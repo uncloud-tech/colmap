@@ -57,6 +57,11 @@ struct PatchMatchOptions {
   // Maximum image size in either dimension.
   int max_image_size = -1;
 
+  // Sweep threads/columns per block: 8, 16, 32, or 0 for experimental auto.
+  // Fixed tiles must cover window_radius. Auto promotes to cover the halo.
+  // Keep 32 as the conservative default; the auto coverage rule is unvalidated.
+  int sweep_tile = 32;
+
   // Half window size to compute NCC photo-consistency cost.
   int window_radius = 5;
 

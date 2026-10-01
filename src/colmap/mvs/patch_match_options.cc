@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "colmap/mvs/patch_match_options.h"
+#include "colmap/mvs/sweep_tile.h"
 
 #include "colmap/util/logging.h"
 #include "colmap/util/misc.h"
@@ -22,6 +23,7 @@ void PatchMatchOptions::Print() const {
   PrintOption(depth_min);
   PrintOption(depth_max);
   PrintOption(window_radius);
+  PrintOption(sweep_tile);
   PrintOption(window_step);
   PrintOption(sigma_spatial);
   PrintOption(sigma_color);
@@ -46,6 +48,10 @@ void PatchMatchOptions::Print() const {
 bool PatchMatchOptions::Check() const {
   if (depth_min != -1.0f || depth_max != -1.0f) {
     CHECK_OPTION_IN(depth_min, 0.0f, depth_max);
+  }
+  CHECK_OPTION_EQ(sweep_tile::IsValidOption(sweep_tile), true);
+  if (sweep_tile != 0) {
+    CHECK_OPTION_LE(window_radius, sweep_tile);
   }
   CHECK_OPTION_LE(window_radius, static_cast<int>(kMaxPatchMatchWindowRadius));
   CHECK_OPTION_GT(sigma_color, 0.0f);

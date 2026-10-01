@@ -35,6 +35,10 @@ class PatchMatchCuda {
   template <int kWindowSize, int kWindowStep>
   void RunWithWindowSizeAndStep();
 
+  template <int kWindowSize, int kWindowStep, int kSweepTile>
+  void RunWithWindowSizeAndStepAndTile();
+
+  void InitSweepTile();
   void ComputeCudaConfig();
 
   void BindRefImageTexture();
@@ -51,6 +55,7 @@ class PatchMatchCuda {
   const PatchMatch::Problem problem_;
 
   // Dimensions for sweeping from top to bottom, i.e. one thread per column.
+  int sweep_tile_ = 32;  // Chosen once; unchanged by reference rotations.
   dim3 sweep_block_size_;
   dim3 sweep_grid_size_;
   // Dimensions for element-wise operations, i.e. one thread per pixel.
