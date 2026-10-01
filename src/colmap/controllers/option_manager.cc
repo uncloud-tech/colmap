@@ -998,6 +998,10 @@ void OptionManager::AddPatchMatchStereoOptions() {
                    &patch_match_stereo->depth_max);
   AddDefaultOption("PatchMatchStereo.window_radius",
                    &patch_match_stereo->window_radius);
+  AddDefaultOption("PatchMatchStereo.sweep_tile",
+                   &patch_match_stereo->sweep_tile,
+                   "Sweep tile: 32 (default), 16, 8, or 0 for experimental auto. "
+                   "Fixed tiles must cover window_radius.");
   AddDefaultOption("PatchMatchStereo.window_step",
                    &patch_match_stereo->window_step);
   AddDefaultOption("PatchMatchStereo.sigma_spatial",
