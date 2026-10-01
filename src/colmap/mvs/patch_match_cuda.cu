@@ -24,6 +24,9 @@
 // value, since the templated window sizes rely on this value.
 #define THREADS_PER_BLOCK 32
 
+// Exact beta checkpoints plus one bounded per-column row tile.
+constexpr int kBetaTileRows = 32;
+
 // We must not include "util/math.h" to avoid any Eigen includes here,
 // since Visual Studio cannot compile some of the Eigen/Boost expressions.
 #ifndef DEG2RAD
@@ -915,8 +918,8 @@ __global__ void SweepFromTopToBottom(
     GpuMatView<float> depth_map,
     GpuMatView<float> normal_map,
     GpuMatView<uint8_t> consistency_mask,
-    GpuMatView<float> sel_prob_map,
-    const GpuMatView<float> prev_sel_prob_map,
+    GpuMatView<float> beta_scratch,
+    GpuMatView<float> prev_sel_prob_map,
     const cudaTextureObject_t ref_image_texture,
     const GpuMatView<float> ref_sum_image,
     const GpuMatView<float> ref_squared_sum_image,
@@ -941,9 +944,10 @@ __global__ void SweepFromTopToBottom(
                                  col * global_workspace.GetHeight()];
 
   //////////////////////////////////////////////////////////////////////////////
-  // Compute backward message for all rows. Note that the backward messages are
-  // temporarily stored in the sel_prob_map and replaced row by row as the
-  // updated forward messages are computed further below.
+  // Compute exact backward messages, retaining only tile-boundary checkpoints.
+  // First kBetaTileRows scratch rows hold the reconstructed tile; following
+  // rows hold beta at row 0, kBetaTileRows, ... . Update persistent probabilities
+  // in place only after both reads for each pixel.
   //////////////////////////////////////////////////////////////////////////////
 
   if (col < cost_map.GetWidth()) {
@@ -953,7 +957,10 @@ __global__ void SweepFromTopToBottom(
       for (int row = cost_map.GetHeight() - 1; row >= 0; --row) {
         const float cost = cost_map.Get(row, col, image_idx);
         beta = likelihood_computer.ComputeBackwardMessage(cost, beta);
-        sel_prob_map.Set(row, col, image_idx, beta);
+        if (row % kBetaTileRows == 0) {
+          beta_scratch.Set(kBetaTileRows + row / kBetaTileRows,
+                           col, image_idx, beta);
+        }
       }
 
       // Initialize forward message.
@@ -1001,6 +1008,23 @@ __global__ void SweepFromTopToBottom(
   }
 
   for (int row = 0; row < cost_map.GetHeight(); ++row) {
+    // Reconstruct beta before any costs in this tile are overwritten. Exact
+    // boundary checkpoints preserve recurrence FP order, without inversion.
+    if (col < cost_map.GetWidth() && row % kBetaTileRows == 0) {
+      const int tile_end = min(row + kBetaTileRows, static_cast<int>(cost_map.GetHeight()));
+      for (int image_idx = 0; image_idx < cost_map.GetDepth(); ++image_idx) {
+        float beta = tile_end == cost_map.GetHeight()
+                         ? kUniformProb
+                         : beta_scratch.Get(kBetaTileRows +
+                                                tile_end / kBetaTileRows,
+                                            col, image_idx);
+        for (int beta_row = tile_end - 1; beta_row >= row; --beta_row) {
+          beta = likelihood_computer.ComputeBackwardMessage(
+              cost_map.Get(beta_row, col, image_idx), beta);
+          beta_scratch.Set(beta_row - row, col, image_idx, beta);
+        }
+      }
+    }
     // Note that this must be executed even for pixels outside the borders,
     // since pixels are used in the local neighborhood of the current pixel.
     pcc_computer.Read(row);
@@ -1044,7 +1068,7 @@ __global__ void SweepFromTopToBottom(
       const float cost = cost_map.Get(row, col, image_idx);
       const float alpha = likelihood_computer.ComputeForwardMessage(
           cost, forward_message[image_idx]);
-      const float beta = sel_prob_map.Get(row, col, image_idx);
+      const float beta = beta_scratch.Get(row % kBetaTileRows, col, image_idx);
       const float prev_prob = prev_sel_prob_map.Get(row, col, image_idx);
       const float sel_prob = likelihood_computer.ComputeSelProb(
           alpha, beta, prev_prob, options.prev_sel_prob_weight);
@@ -1171,12 +1195,12 @@ __global__ void SweepFromTopToBottom(
 
       const float alpha = likelihood_computer.ComputeForwardMessage(
           cost, forward_message[image_idx]);
-      const float beta = sel_prob_map.Get(row, col, image_idx);
+      const float beta = beta_scratch.Get(row % kBetaTileRows, col, image_idx);
       const float prev_prob = prev_sel_prob_map.Get(row, col, image_idx);
       const float prob = likelihood_computer.ComputeSelProb(
           alpha, beta, prev_prob, options.prev_sel_prob_weight);
       forward_message[image_idx] = alpha;
-      sel_prob_map.Set(row, col, image_idx, prob);
+      prev_sel_prob_map.Set(row, col, image_idx, prob);
     }
 
     if (kFilterPhotoConsistency || kFilterGeomConsistency) {
@@ -1205,7 +1229,7 @@ __global__ void SweepFromTopToBottom(
         }
 
         if (!kFilterGeomConsistency) {
-          if (sel_prob_map.Get(row, col, image_idx) >= min_ncc_prob) {
+          if (prev_sel_prob_map.Get(row, col, image_idx) >= min_ncc_prob) {
             consistency_mask.Set(row, col, image_idx, 1);
             num_consistent += 1;
           }
@@ -1222,7 +1246,7 @@ __global__ void SweepFromTopToBottom(
             num_consistent += 1;
           }
         } else {
-          if (sel_prob_map.Get(row, col, image_idx) >= min_ncc_prob &&
+          if (prev_sel_prob_map.Get(row, col, image_idx) >= min_ncc_prob &&
               ComputeGeomConsistencyCost(poses_texture,
                                          src_depth_maps_texture,
                                          row,
@@ -1807,13 +1831,11 @@ void PatchMatchCuda::InitWorkspaceMemory() {
 
   normal_map_ = std::make_unique<GpuMat<float>>(ref_width_, ref_height_, 3);
 
-  // Note that it is not necessary to keep the selection probability map in
-  // memory for all pixels. Theoretically, it is possible to incorporate
-  // the temporary selection probabilities in the global_workspace_.
-  // However, it is useful to keep the probabilities for the entire image
-  // in memory, so that it can be exported.
+  // sel_prob_map_ holds beta scratch/checkpoints, not persistent probabilities.
+  // prev_sel_prob_map_ alone holds the full image, including filter/export.
   sel_prob_map_ = std::make_unique<GpuMat<float>>(
-      ref_width_, ref_height_, problem_.src_image_idxs.size());
+      ref_width_, kBetaTileRows + (ref_height_ + kBetaTileRows - 1) / kBetaTileRows,
+      problem_.src_image_idxs.size());
   prev_sel_prob_map_ = std::make_unique<GpuMat<float>>(
       ref_width_, ref_height_, problem_.src_image_idxs.size());
   prev_sel_prob_map_->FillWithScalar(0.5f);
@@ -1891,12 +1913,18 @@ void PatchMatchCuda::Rotate() {
     BindRefImageTexture();
   }
 
-  // Rotate selection probability map.
-  prev_sel_prob_map_ = std::make_unique<GpuMat<float>>(
-      width, height, problem_.src_image_idxs.size());
-  sel_prob_map_->Rotate(prev_sel_prob_map_.get());
+  // Rotate only persistent probabilities. Scratch is not exported or rotated.
+  // Release scratch first to reduce peak live memory during rotation.
+  sel_prob_map_.reset();
+  {
+    auto rotated = std::make_unique<GpuMat<float>>(
+        width, height, problem_.src_image_idxs.size());
+    prev_sel_prob_map_->Rotate(rotated.get());
+    prev_sel_prob_map_.swap(rotated);
+  }
   sel_prob_map_ = std::make_unique<GpuMat<float>>(
-      width, height, problem_.src_image_idxs.size());
+      width, kBetaTileRows + (height + kBetaTileRows - 1) / kBetaTileRows,
+      problem_.src_image_idxs.size());
 
   // Rotate cost map.
   {
