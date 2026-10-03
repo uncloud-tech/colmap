@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "colmap/mvs/sweep_tile.h"
+#include "colmap/mvs/benchmark_seed.h"
+#include "colmap/mvs/patch_match_options.h"
 
+#include <algorithm>
 #include <climits>
 #include <iostream>
 #include <stdexcept>
@@ -116,6 +119,33 @@ void CheckLayouts() {
   }
 }
 
+void RunBenchmarkSeedChecks() {
+  namespace bs = colmap::mvs::benchmark_seed;
+  // Deterministic: identical inputs give identical seeds.
+  REQUIRE(bs::PixelSeed(7, 11, 13) == bs::PixelSeed(7, 11, 13));
+  // Distinct pixels and distinct seeds do not collide in a dense sample.
+  std::vector<uint64_t> seen;
+  for (int64_t row = 0; row < 16; ++row) {
+    for (int64_t col = 0; col < 16; ++col) {
+      seen.push_back(bs::PixelSeed(7, row, col));
+      seen.push_back(bs::PixelSeed(8, row, col));
+    }
+  }
+  std::sort(seen.begin(), seen.end());
+  REQUIRE(std::adjacent_find(seen.begin(), seen.end()) == seen.end());
+  // Coordinate-coded, not launch-coded: neighbouring pixels differ in both axes.
+  REQUIRE(bs::PixelSeed(7, 100, 200) != bs::PixelSeed(7, 100, 201));
+  REQUIRE(bs::PixelSeed(7, 100, 200) != bs::PixelSeed(7, 101, 200));
+  REQUIRE(bs::PixelSeed(7, 100, 200) != bs::PixelSeed(9, 100, 200));
+  // Large coordinate range stays well mixed (no truncation to 32 bits).
+  REQUIRE(bs::PixelSeed(7, 1 << 20, 1 << 20) != bs::PixelSeed(7, 0, 0));
+  // The option default must preserve historical (production) seeding.
+  colmap::mvs::PatchMatchOptions options;
+  REQUIRE(options.random_seed == -1);
+  std::cout << "PASS benchmark seed: deterministic, coordinate-indexed, "
+               "option default preserves legacy seeding\n";
+}
+
 void RunTests() {
   REQUIRE(st::Select(3930, 2210, 170, 5, 0) == 8);
   REQUIRE(st::Select(3930, 2210, 82, 5, 0) == 16);
@@ -149,6 +179,7 @@ void RunTests() {
   CheckLayouts<8>();
   CheckLayouts<16>();
   CheckLayouts<32>();
+  RunBenchmarkSeedChecks();
   std::cout << "PASS selector, specialized + padded layout identity; " << checks
             << " pixel checks; both pitch-mismatch mutants rejected\n";
 }

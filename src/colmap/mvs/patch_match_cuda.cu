@@ -1864,7 +1864,8 @@ void PatchMatchCuda::InitTransforms() {
 }
 
 void PatchMatchCuda::InitWorkspaceMemory() {
-  rand_state_map_ = std::make_unique<GpuMatPRNG>(ref_width_, ref_height_);
+  rand_state_map_ = std::make_unique<GpuMatPRNG>(
+      ref_width_, ref_height_, options_.random_seed);
 
   depth_map_ = std::make_unique<GpuMat<float>>(ref_width_, ref_height_);
   if (options_.geom_consistency) {
@@ -1926,7 +1927,7 @@ void PatchMatchCuda::Rotate() {
   // Rotate random map.
   {
     std::unique_ptr<GpuMatPRNG> rotated_rand_state_map(
-        new GpuMatPRNG(width, height));
+        new GpuMatPRNG(width, height, options_.random_seed));
     rand_state_map_->Rotate(rotated_rand_state_map.get());
     rand_state_map_.swap(rotated_rand_state_map);
   }

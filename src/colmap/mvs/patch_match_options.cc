@@ -24,6 +24,7 @@ void PatchMatchOptions::Print() const {
   PrintOption(depth_max);
   PrintOption(window_radius);
   PrintOption(sweep_tile);
+  PrintOption(random_seed);
   PrintOption(window_step);
   PrintOption(sigma_spatial);
   PrintOption(sigma_color);
@@ -50,6 +51,7 @@ bool PatchMatchOptions::Check() const {
     CHECK_OPTION_IN(depth_min, 0.0f, depth_max);
   }
   CHECK_OPTION_EQ(sweep_tile::IsValidOption(sweep_tile), true);
+  CHECK_OPTION_GE(random_seed, -1);
   if (sweep_tile != 0) {
     CHECK_OPTION_LE(window_radius, sweep_tile);
   }

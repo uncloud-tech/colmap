@@ -1039,6 +1039,11 @@ void OptionManager::AddPatchMatchStereoOptions() {
                    &patch_match_stereo->allow_missing_files);
   AddDefaultOption("PatchMatchStereo.write_consistency_graph",
                    &patch_match_stereo->write_consistency_graph);
+  // Benchmark-only: -1 keeps the historical launch-geometry seeding; >= 0 seeds
+  // each pixel deterministically from (seed, row, col) for cross-machine
+  // reproducibility. Not intended for production runs.
+  AddDefaultOption("PatchMatchStereo.random_seed",
+                   &patch_match_stereo->random_seed);
   AddDefaultOption("PatchMatchStereo.num_threads",
                    &patch_match_stereo->num_threads);
 }

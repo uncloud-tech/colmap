@@ -9,7 +9,11 @@ namespace mvs {
 
 class GpuMatPRNG : public GpuMat<curandState> {
  public:
-  GpuMatPRNG(const int width, const int height);
+  // `random_seed < 0` keeps the historical launch-geometry-derived seeding.
+  // `random_seed >= 0` seeds each pixel from (random_seed, row, col) so the
+  // random stream is independent of launch geometry, sweep tile and device.
+  // Benchmark reproducibility only; production must keep the default (-1).
+  GpuMatPRNG(const int width, const int height, const int random_seed = -1);
 
  private:
   void InitRandomState();

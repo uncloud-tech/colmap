@@ -62,6 +62,13 @@ struct PatchMatchOptions {
   // Keep 32 as the conservative default; the auto coverage rule is unvalidated.
   int sweep_tile = 32;
 
+  // Benchmark-only deterministic seeding of the patch-match random sampler.
+  // -1 keeps the historical launch-geometry-derived seeding (production default).
+  // >= 0 derives every pixel's cuRAND state from (random_seed, row, col), making
+  // results independent of sweep tile, launch geometry, device and MPS state.
+  // Intended for benchmark reproducibility; do not enable in production runs.
+  int random_seed = -1;
+
   // Half window size to compute NCC photo-consistency cost.
   int window_radius = 5;
 
