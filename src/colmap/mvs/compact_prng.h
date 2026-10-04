@@ -70,7 +70,7 @@ struct PrngPerimeter {
 // Template parameters keep this same access implementation host-testable.
 template <typename State, typename FullView>
 struct PrngRowView {
-  FullView full;
+  mutable FullView full;  // Set() is const; the delegated view is a by-value copy
   State* compact;
   PrngPerimeter perimeter;
   int orientation;
