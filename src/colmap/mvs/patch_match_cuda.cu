@@ -1885,11 +1885,11 @@ void PatchMatchCuda::InitWorkspaceMemory() {
   sel_prob_map_ = std::make_unique<GpuMat<float>>(
       ref_width_, kBetaTileRows + (ref_height_ + kBetaTileRows - 1) / kBetaTileRows,
       problem_.src_image_idxs.size());
-  prev_sel_prob_map_ = std::make_unique<GpuMat<float>>(
+  prev_sel_prob_map_ = GpuMat<float>::CreateCompact(
       ref_width_, ref_height_, problem_.src_image_idxs.size());
   prev_sel_prob_map_->FillWithScalar(0.5f);
 
-  cost_map_ = std::make_unique<GpuMat<float>>(
+  cost_map_ = GpuMat<float>::CreateCompact(
       ref_width_, ref_height_, problem_.src_image_idxs.size());
 
   const int ref_max_dim = std::max(ref_width_, ref_height_);
@@ -1897,6 +1897,7 @@ void PatchMatchCuda::InitWorkspaceMemory() {
       ref_max_dim, problem_.src_image_idxs.size(), 2);
 
   consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(0, 0, 0);
+  rotation_workspace_ = GpuMat<float>::CreateCompact(ref_width_, ref_height_);
 
   ComputeCudaConfig();
 
@@ -1966,9 +1967,9 @@ void PatchMatchCuda::Rotate() {
   // Release scratch first to reduce peak live memory during rotation.
   sel_prob_map_.reset();
   {
-    auto rotated = std::make_unique<GpuMat<float>>(
-        width, height, problem_.src_image_idxs.size());
-    prev_sel_prob_map_->Rotate(rotated.get());
+    auto rotated = prev_sel_prob_map_->MakeCompactView(width, height);
+    auto workspace_view = rotation_workspace_->MakeCompactView(width, height);
+    prev_sel_prob_map_->RotateWithStorageReuse(rotated.get(), workspace_view.get());
     prev_sel_prob_map_.swap(rotated);
   }
   sel_prob_map_ = std::make_unique<GpuMat<float>>(
@@ -1977,9 +1978,9 @@ void PatchMatchCuda::Rotate() {
 
   // Rotate cost map.
   {
-    std::unique_ptr<GpuMat<float>> rotated_cost_map(
-        new GpuMat<float>(width, height, problem_.src_image_idxs.size()));
-    cost_map_->Rotate(rotated_cost_map.get());
+    auto rotated_cost_map = cost_map_->MakeCompactView(width, height);
+    auto workspace_view = rotation_workspace_->MakeCompactView(width, height);
+    cost_map_->RotateWithStorageReuse(rotated_cost_map.get(), workspace_view.get());
     cost_map_.swap(rotated_cost_map);
   }
 

@@ -17,6 +17,7 @@ COLMAP_ADD_LIBRARY(
         poisson_meshing.h poisson_meshing.cc
         normal_map.h normal_map.cc
         patch_match_options.h patch_match_options.cc
+        rotation_storage_plan.h
         sweep_tile.h
         texture_mapping.h texture_mapping.cc
         workspace.h workspace.cc
@@ -37,6 +38,11 @@ if(OPENMP_FOUND)
     target_link_libraries(colmap_mvs PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
+COLMAP_ADD_TEST(
+    NAME rotation_storage_plan_test
+    SRCS rotation_storage_plan_test.cc
+    LINK_LIBS colmap_mvs
+)
 COLMAP_ADD_TEST(
     NAME sweep_tile_test
     SRCS sweep_tile_test.cc
