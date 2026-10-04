@@ -47,6 +47,7 @@ class PatchMatchCuda {
   void InitSourceImages();
   void InitTransforms();
   void InitWorkspaceMemory();
+  GpuMatPRNGRowView RandomStateRowView() const;
 
   // Rotate reference image by 90 degrees in counter-clockwise direction.
   void Rotate();
@@ -104,6 +105,7 @@ class PatchMatchCuda {
   std::unique_ptr<GpuMat<float>> prev_sel_prob_map_;
   std::unique_ptr<GpuMat<float>> cost_map_;
   std::unique_ptr<GpuMatPRNG> rand_state_map_;
+  std::unique_ptr<GpuMatPRNGEdges> rand_state_edges_;
   std::unique_ptr<GpuMat<uint8_t>> consistency_mask_;
 
   // Shared memory is too small to hold local state for each thread,
