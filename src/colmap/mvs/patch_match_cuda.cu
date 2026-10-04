@@ -19,6 +19,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <sstream>
 
 // The number of threads per Cuda thread block. Warning: Do not change this
@@ -909,11 +910,11 @@ template <int kWindowSize,
           bool kFilterGeomConsistency = false>
 __global__ void SweepFromTopToBottom(
     GpuMatView<float> global_workspace,
-    GpuMatView<curandState> rand_state_map,
+    GpuMatPRNGRowView rand_state_map,
     GpuMatView<float> cost_map,
     GpuMatView<float> depth_map,
     GpuMatView<float> normal_map,
-    GpuMatView<uint8_t> consistency_mask,
+    PackedConsistencyMaskView consistency_mask,
     GpuMatView<float> beta_scratch,
     GpuMatView<float> prev_sel_prob_map,
     const cudaTextureObject_t ref_image_texture,
@@ -1385,29 +1386,16 @@ Mat<float> PatchMatchCuda::GetSelProbMap() const {
 }
 
 std::vector<int> PatchMatchCuda::GetConsistentImageIdxs() const {
-  const Mat<uint8_t> mask = consistency_mask_->CopyToMat();
-  std::vector<int> consistent_image_idxs;
-  std::vector<int> pixel_consistent_image_idxs;
-  pixel_consistent_image_idxs.reserve(mask.GetDepth());
-  for (size_t r = 0; r < mask.GetHeight(); ++r) {
-    for (size_t c = 0; c < mask.GetWidth(); ++c) {
-      pixel_consistent_image_idxs.clear();
-      for (size_t d = 0; d < mask.GetDepth(); ++d) {
-        if (mask.Get(r, c, d)) {
-          pixel_consistent_image_idxs.push_back(problem_.src_image_idxs[d]);
-        }
-      }
-      if (pixel_consistent_image_idxs.size() > 0) {
-        consistent_image_idxs.push_back(c);
-        consistent_image_idxs.push_back(r);
-        consistent_image_idxs.push_back(pixel_consistent_image_idxs.size());
-        consistent_image_idxs.insert(consistent_image_idxs.end(),
-                                     pixel_consistent_image_idxs.begin(),
-                                     pixel_consistent_image_idxs.end());
-      }
-    }
-  }
-  return consistent_image_idxs;
+  Mat<uint8_t> mask = consistency_mask_->CopyToMat();
+  // The final GPU rotation already restored the original image orientation.
+  // Expand source bits directly into the sparse list, not a W*H*S host buffer.
+  return UnpackConsistentImageIdxs(
+      {mask.GetPtr(),
+       mask.GetWidth(),
+       mask.GetWidth(),
+       mask.GetHeight(),
+       problem_.src_image_idxs.size()},
+      problem_.src_image_idxs);
 }
 
 template <int kWindowSize, int kWindowStep>
@@ -1505,11 +1493,12 @@ void PatchMatchCuda::RunWithWindowSizeAndStepAndTile() {
                        kFilterGeomConsistency>            \
       <<<sweep_grid_size_, sweep_block_size_>>>(          \
           global_workspace_->View(),                      \
-          rand_state_map_->View(),                        \
+          RandomStateRowView(),                           \
           cost_map_->View(),                              \
           depth_map_->View(),                             \
           normal_map_->View(),                            \
-          consistency_mask_->View(),                      \
+          MakePackedConsistencyMaskView(                  \
+              *consistency_mask_, cost_map_->GetDepth()),  \
           sel_prob_map_->View(),                          \
           prev_sel_prob_map_->View(),                     \
           ref_image_texture_->GetObj(),                   \
@@ -1524,10 +1513,10 @@ void PatchMatchCuda::RunWithWindowSizeAndStepAndTile() {
 
       if (last_sweep) {
         if (options_.filter) {
-          consistency_mask_ =
-              std::make_unique<GpuMat<uint8_t>>(cost_map_->GetWidth(),
-                                                cost_map_->GetHeight(),
-                                                cost_map_->GetDepth());
+          consistency_mask_ = GpuMat<uint8_t>::CreateCompact(
+              cost_map_->GetWidth(),
+              cost_map_->GetHeight(),
+              PackedConsistencyMaskDepth(cost_map_->GetDepth()));
           consistency_mask_->FillWithScalar(0);
         }
         if (options_.geom_consistency) {
@@ -1571,13 +1560,14 @@ void PatchMatchCuda::RunWithWindowSizeAndStepAndTile() {
 
       Rotate();
 
-      // Rotate selected image map.
+      // Rotate packed byte planes back to the original image orientation.
       if (last_sweep && options_.filter) {
-        std::unique_ptr<GpuMat<uint8_t>> rot_consistency_mask_(
-            new GpuMat<uint8_t>(cost_map_->GetWidth(),
-                                cost_map_->GetHeight(),
-                                cost_map_->GetDepth()));
-        consistency_mask_->Rotate(rot_consistency_mask_.get());
+        auto rot_consistency_mask_ = consistency_mask_->MakeCompactView(
+            cost_map_->GetWidth(), cost_map_->GetHeight());
+        auto workspace = rotation_workspace_->MakeCompactWorkspaceView<uint8_t>(
+            cost_map_->GetWidth(), cost_map_->GetHeight());
+        consistency_mask_->RotateWithStorageReuse(
+            rot_consistency_mask_.get(), workspace.get());
         consistency_mask_.swap(rot_consistency_mask_);
       }
 
@@ -1627,7 +1617,7 @@ void PatchMatchCuda::InitRefImage() {
   ref_height_ = ref_image.GetHeight();
 
   // Upload to device and filter.
-  ref_image_ = std::make_unique<GpuMatRefImage>(ref_width_, ref_height_);
+  ref_image_ = std::make_unique<GpuMatRefImage>(ref_width_, ref_height_, true);
   ref_image_->Filter(ref_image.GetBitmap().RowMajorData().data(),
                      options_.window_radius,
                      options_.window_step,
@@ -1863,11 +1853,26 @@ void PatchMatchCuda::InitTransforms() {
   }
 }
 
-void PatchMatchCuda::InitWorkspaceMemory() {
-  rand_state_map_ = std::make_unique<GpuMatPRNG>(
-      ref_width_, ref_height_, options_.random_seed);
+GpuMatPRNGRowView PatchMatchCuda::RandomStateRowView() const {
+  if (rand_state_edges_) {
+    return rand_state_edges_->RowView(rotation_in_half_pi_);
+  }
+  return {rand_state_map_->View(), nullptr, {ref_width_, ref_height_}, 0};
+}
 
-  depth_map_ = std::make_unique<GpuMat<float>>(ref_width_, ref_height_);
+void PatchMatchCuda::InitWorkspaceMemory() {
+  // Explicit benchmark-only opt-in. Production seeds and photometric runs
+  // always retain the full state map and its historical initialization.
+  if (UseCompactPrng(options_.geom_consistency, options_.random_seed,
+                     std::getenv("COLMAP_PATCH_MATCH_COMPACT_PRNG"))) {
+    rand_state_edges_ =
+        std::make_unique<GpuMatPRNGEdges>(ref_width_, ref_height_);
+  } else {
+    rand_state_map_ = GpuMatPRNG::CreateCompact(
+        ref_width_, ref_height_, options_.random_seed);
+  }
+
+  depth_map_ = GpuMat<float>::CreateCompact(ref_width_, ref_height_);
   if (options_.geom_consistency) {
     const DepthMap& init_depth_map =
         problem_.depth_maps->at(problem_.ref_image_idx);
@@ -1878,7 +1883,7 @@ void PatchMatchCuda::InitWorkspaceMemory() {
         options_.depth_min, options_.depth_max, *rand_state_map_);
   }
 
-  normal_map_ = std::make_unique<GpuMat<float>>(ref_width_, ref_height_, 3);
+  normal_map_ = GpuMat<float>::CreateCompact(ref_width_, ref_height_, 3);
 
   // sel_prob_map_ holds beta scratch/checkpoints, not persistent probabilities.
   // prev_sel_prob_map_ alone holds the full image, including filter/export.
@@ -1925,19 +1930,27 @@ void PatchMatchCuda::Rotate() {
     height = ref_width_;
   }
 
-  // Rotate random map.
+  // Rotate random map. Compact states stay at original coordinates; only the
+  // row view changes orientation. Preserve the original rotation sync boundary.
   {
-    std::unique_ptr<GpuMatPRNG> rotated_rand_state_map(
-        new GpuMatPRNG(width, height, options_.random_seed));
-    rand_state_map_->Rotate(rotated_rand_state_map.get());
-    rand_state_map_.swap(rotated_rand_state_map);
+    if (rand_state_edges_) {
+      CUDA_SYNC_AND_CHECK();
+    } else {
+      // No dead destination initializer: rotation overwrites every state word.
+      auto rotated_rand_state_map = rand_state_map_->MakeCompactView(width, height);
+      auto workspace = rotation_workspace_->MakeCompactWorkspaceView<uint32_t>(
+          width, height);
+      rand_state_map_->RotateWithWordStorageReuse(
+          rotated_rand_state_map.get(), workspace.get());
+      rand_state_map_.swap(rotated_rand_state_map);
+    }
   }
 
   // Rotate depth map.
   {
-    std::unique_ptr<GpuMat<float>> rotated_depth_map(
-        new GpuMat<float>(width, height));
-    depth_map_->Rotate(rotated_depth_map.get());
+    auto rotated_depth_map = depth_map_->MakeCompactView(width, height);
+    auto workspace = rotation_workspace_->MakeCompactView(width, height);
+    depth_map_->RotateWithStorageReuse(rotated_depth_map.get(), workspace.get());
     depth_map_.swap(rotated_depth_map);
   }
 
@@ -1945,20 +1958,24 @@ void PatchMatchCuda::Rotate() {
   {
     RotateNormalMap<<<elem_wise_grid_size_, elem_wise_block_size_>>>(
         normal_map_->View());
-    std::unique_ptr<GpuMat<float>> rotated_normal_map(
-        new GpuMat<float>(width, height, 3));
-    normal_map_->Rotate(rotated_normal_map.get());
+    auto rotated_normal_map = normal_map_->MakeCompactView(width, height);
+    auto workspace = rotation_workspace_->MakeCompactView(width, height);
+    normal_map_->RotateWithStorageReuse(rotated_normal_map.get(), workspace.get());
     normal_map_.swap(rotated_normal_map);
   }
 
   // Rotate reference image.
   {
-    std::unique_ptr<GpuMatRefImage> rotated_ref_image(
-        new GpuMatRefImage(width, height));
-    ref_image_->image->Rotate(rotated_ref_image->image.get());
-    ref_image_->sum_image->Rotate(rotated_ref_image->sum_image.get());
-    ref_image_->squared_sum_image->Rotate(
-        rotated_ref_image->squared_sum_image.get());
+    auto rotated_ref_image = ref_image_->MakeCompactView(width, height);
+    auto byte_workspace = rotation_workspace_->MakeCompactWorkspaceView<uint8_t>(
+        width, height);
+    auto float_workspace = rotation_workspace_->MakeCompactView(width, height);
+    ref_image_->image->RotateWithStorageReuse(
+        rotated_ref_image->image.get(), byte_workspace.get());
+    ref_image_->sum_image->RotateWithStorageReuse(
+        rotated_ref_image->sum_image.get(), float_workspace.get());
+    ref_image_->squared_sum_image->RotateWithStorageReuse(
+        rotated_ref_image->squared_sum_image.get(), float_workspace.get());
     ref_image_.swap(rotated_ref_image);
     BindRefImageTexture();
   }

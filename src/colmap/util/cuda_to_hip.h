@@ -54,6 +54,7 @@ using cudaDeviceProp = hipDeviceProp_t;
 #define cudaMemcpy hipMemcpy
 #define cudaMemcpyAsync hipMemcpyAsync
 #define cudaMemcpy2D hipMemcpy2D
+#define cudaMemcpy2DAsync hipMemcpy2DAsync
 #define cudaMemcpy3D hipMemcpy3D
 #define cudaMemcpyToSymbol hipMemcpyToSymbol
 #define cudaMemset hipMemset

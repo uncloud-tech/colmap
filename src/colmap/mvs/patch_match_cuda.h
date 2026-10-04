@@ -47,6 +47,7 @@ class PatchMatchCuda {
   void InitSourceImages();
   void InitTransforms();
   void InitWorkspaceMemory();
+  GpuMatPRNGRowView RandomStateRowView() const;
 
   // Rotate reference image by 90 degrees in counter-clockwise direction.
   void Rotate();
@@ -103,15 +104,18 @@ class PatchMatchCuda {
   std::unique_ptr<GpuMat<float>> sel_prob_map_;
   std::unique_ptr<GpuMat<float>> prev_sel_prob_map_;
   std::unique_ptr<GpuMat<float>> cost_map_;
-  std::unique_ptr<GpuMatPRNG> rand_state_map_;
+  std::unique_ptr<GpuMat<curandState>> rand_state_map_;
+  std::unique_ptr<GpuMatPRNGEdges> rand_state_edges_;
+  // Eight source flags per byte; depth is ceil(num_sources / 8).
   std::unique_ptr<GpuMat<uint8_t>> consistency_mask_;
 
   // Shared memory is too small to hold local state for each thread,
   // so this is workspace memory in global memory.
   std::unique_ptr<GpuMat<float>> global_workspace_;
 
-  // One disjoint compact float plane shared sequentially by persistent-prev
-  // and cost rotation. No per-rotation allocation or added synchronization.
+  // One disjoint compact float plane, reused across all map rotations. Allocate
+  // once so rotation submission never introduces allocator synchronization.
+
   std::unique_ptr<GpuMat<float>> rotation_workspace_;
 };
 

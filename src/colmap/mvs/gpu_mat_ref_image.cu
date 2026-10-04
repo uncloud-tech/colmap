@@ -55,12 +55,28 @@ __global__ void FilterKernel(const cudaTextureObject_t image_texture,
 
 }  // namespace
 
-GpuMatRefImage::GpuMatRefImage(const size_t width, const size_t height)
-    : image(std::make_unique<GpuMat<uint8_t>>(width, height)),
-      sum_image(std::make_unique<GpuMat<float>>(width, height)),
-      squared_sum_image(std::make_unique<GpuMat<float>>(width, height)),
+GpuMatRefImage::GpuMatRefImage(const size_t width, const size_t height,
+                             const bool compact)
+    : image(compact ? GpuMat<uint8_t>::CreateCompact(width, height)
+                    : std::make_unique<GpuMat<uint8_t>>(width, height)),
+      sum_image(compact ? GpuMat<float>::CreateCompact(width, height)
+                        : std::make_unique<GpuMat<float>>(width, height)),
+      squared_sum_image(compact ? GpuMat<float>::CreateCompact(width, height)
+                                : std::make_unique<GpuMat<float>>(width, height)),
       width_(width),
       height_(height) {}
+
+GpuMatRefImage::GpuMatRefImage(const GpuMatRefImage& source,
+                             size_t width, size_t height)
+    : image(source.image->MakeCompactView(width, height)),
+      sum_image(source.sum_image->MakeCompactView(width, height)),
+      squared_sum_image(source.squared_sum_image->MakeCompactView(width, height)),
+      width_(width), height_(height) {}
+
+std::unique_ptr<GpuMatRefImage> GpuMatRefImage::MakeCompactView(
+    size_t width, size_t height) const {
+  return std::unique_ptr<GpuMatRefImage>(new GpuMatRefImage(*this, width, height));
+}
 
 void GpuMatRefImage::Filter(const uint8_t* image_data,
                             const size_t window_radius,
