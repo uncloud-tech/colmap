@@ -31,6 +31,8 @@ class GpuMatPRNG : public GpuMat<curandState> {
   // random stream is independent of launch geometry, sweep tile and device.
   // Benchmark reproducibility only; production must keep the default (-1).
   GpuMatPRNG(const int width, const int height, const int random_seed = -1);
+  static std::unique_ptr<GpuMat<curandState>> CreateCompact(
+      int width, int height, int random_seed = -1);
 
  private:
   void InitRandomState();

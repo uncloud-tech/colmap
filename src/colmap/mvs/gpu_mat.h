@@ -11,6 +11,7 @@
 #include "colmap/util/string.h"
 
 #include <fstream>
+#include <type_traits>
 #include <utility>
 
 #if defined(__CUDACC__) || defined(__HIPCC__)
@@ -95,6 +96,15 @@ class GpuMat {
       size_t width, size_t height, size_t depth = 1);
   std::unique_ptr<GpuMat<T>> MakeCompactView(size_t width, size_t height) const;
 
+  // A bounded typed prefix of a compact workspace. Retains the physical owner.
+  template <typename U>
+  std::unique_ptr<GpuMat<U>> MakeCompactWorkspaceView(
+      size_t width, size_t height) const;
+
+  // AoS state rotation using only one uint32 plane of scratch, for any trivially
+  // copyable, word-aligned state representation (including compact PRNG types).
+  void RotateWithWordStorageReuse(GpuMat<T>* output, GpuMat<uint32_t>* workspace);
+
   GpuMat(const GpuMat&) = delete;
   GpuMat& operator=(const GpuMat&) = delete;
   GpuMat(GpuMat&&) = delete;
@@ -157,6 +167,8 @@ class GpuMat {
   dim3 gridSize_;
 
  private:
+  template <typename U>
+  friend class GpuMat;
   explicit GpuMat(rotation_storage::RotationStorageView storage);
   rotation_storage::RotationStorageView compact_storage_;
 };
@@ -221,6 +233,16 @@ std::unique_ptr<GpuMat<T>> GpuMat<T>::MakeCompactView(
   const auto view = rotation_storage::ReorientView(compact_storage_, width, height);
   THROW_CHECK(view.has_value());
   return std::unique_ptr<GpuMat<T>>(new GpuMat<T>(*view));
+}
+
+template <typename T>
+template <typename U>
+std::unique_ptr<GpuMat<U>> GpuMat<T>::MakeCompactWorkspaceView(
+    size_t width, size_t height) const {
+  const auto view = rotation_storage::MakeWorkspaceView(
+      compact_storage_, width, height, sizeof(U));
+  THROW_CHECK(view.has_value());
+  return std::unique_ptr<GpuMat<U>>(new GpuMat<U>(*view));
 }
 
 template <typename T>
@@ -513,6 +535,49 @@ void GpuMat<T>::RotateWithStorageReuse(GpuMat<T>* output, GpuMat<T>* workspace) 
             workspace->GetPtr(), plan.plane_bytes, cudaMemcpyDeviceToDevice));
       });
   // Replaces, not supplements, the ordinary Rotate's final synchronization.
+  CUDA_SYNC_AND_CHECK();
+}
+
+template <typename T>
+void GpuMat<T>::RotateWithWordStorageReuse(
+    GpuMat<T>* output, GpuMat<uint32_t>* workspace) {
+  static_assert(std::is_trivially_copyable<T>::value, "Opaque state must be copyable");
+  static_assert(sizeof(T) % sizeof(uint32_t) == 0, "State must contain whole words");
+  static_assert(alignof(T) >= alignof(uint32_t), "State must be word aligned");
+  THROW_CHECK(output != nullptr);
+  THROW_CHECK(workspace != nullptr);
+  // Validate using word-plane descriptions of the same physical allocations.
+  // Depth expands to cover every word; the actual AoS addressing stays below.
+  auto source_words = compact_storage_;
+  auto dest_words = output->compact_storage_;
+  THROW_CHECK(rotation_storage::IsValid(source_words));
+  THROW_CHECK(rotation_storage::IsValid(dest_words));
+  const auto& plan = compact_storage_.layout;
+  const size_t words = sizeof(T) / sizeof(uint32_t);
+  const auto source_plan = rotation_storage::MakePlan(
+      plan.width, plan.height, plan.depth * words, sizeof(uint32_t));
+  const auto dest_plan = rotation_storage::MakePlan(
+      dest_words.layout.width, dest_words.layout.height,
+      dest_words.layout.depth * words, sizeof(uint32_t));
+  THROW_CHECK(source_plan.has_value());
+  THROW_CHECK(dest_plan.has_value());
+  source_words.layout = *source_plan;
+  dest_words.layout = *dest_plan;
+  THROW_CHECK(rotation_storage::ValidateReuse(
+      source_words, dest_words, workspace->compact_storage_));
+  rotation_storage::ForEachWord(
+      plan,
+      [&](size_t layer, size_t word) {
+        CudaRotateWord(reinterpret_cast<char*>(array_ptr_) + layer * plan.plane_bytes,
+                       workspace->GetPtr(), plan.width, plan.height, words, word);
+      },
+      [&](size_t layer, size_t word) {
+        CUDA_SAFE_CALL(cudaMemcpy2DAsync(
+            reinterpret_cast<char*>(output->GetPtr()) + layer * plan.plane_bytes +
+                word * sizeof(uint32_t),
+            sizeof(T), workspace->GetPtr(), sizeof(uint32_t), sizeof(uint32_t),
+            plan.width * plan.height, cudaMemcpyDeviceToDevice));
+      });
   CUDA_SYNC_AND_CHECK();
 }
 

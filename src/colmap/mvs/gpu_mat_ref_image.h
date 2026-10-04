@@ -12,7 +12,10 @@ namespace mvs {
 
 class GpuMatRefImage {
  public:
-  GpuMatRefImage(const size_t width, const size_t height);
+  GpuMatRefImage(const size_t width, const size_t height,
+                 bool compact = false);
+  std::unique_ptr<GpuMatRefImage> MakeCompactView(
+      size_t width, size_t height) const;
 
   // Filter image using sum convolution kernel to compute local sum of
   // intensities. The filtered images can then be used for repeated, efficient
@@ -33,6 +36,7 @@ class GpuMatRefImage {
   std::unique_ptr<GpuMat<float>> squared_sum_image;
 
  private:
+  GpuMatRefImage(const GpuMatRefImage& source, size_t width, size_t height);
   const static size_t kBlockDimX = 16;
   const static size_t kBlockDimY = 12;
 

@@ -70,5 +70,20 @@ GpuMatPRNG::GpuMatPRNG(const int width, const int height, const int random_seed)
   }
 }
 
+std::unique_ptr<GpuMat<curandState>> GpuMatPRNG::CreateCompact(
+    const int width, const int height, const int random_seed) {
+  auto result = GpuMat<curandState>::CreateCompact(width, height);
+  // Identical launch geometry/seed/coordinates to the ordinary constructor.
+  const dim3 block(kBlockDimX, kBlockDimY, 1);
+  const dim3 grid((width - 1) / kBlockDimX + 1,
+                  (height - 1) / kBlockDimY + 1, 1);
+  if (random_seed < 0) {
+    InitRandomStateKernel<<<grid, block>>>(result->View());
+  } else {
+    InitRandomStateFromSeedKernel<<<grid, block>>>(result->View(), random_seed);
+  }
+  return result;
+}
+
 }  // namespace mvs
 }  // namespace colmap
