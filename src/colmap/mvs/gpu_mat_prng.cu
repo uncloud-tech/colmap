@@ -34,7 +34,32 @@ __global__ void InitRandomStateFromSeedKernel(GpuMatView<curandState> output,
   }
 }
 
+// Seed at ORIGINAL coordinates exactly as the full seed-0 map does. Never
+// reseed after a sweep: adjacent orientations share updated corner states.
+__global__ void InitEdgeRandomStateKernel(GpuMatView<curandState> output,
+                                          PrngPerimeter perimeter) {
+  const size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index < perimeter.Size()) {
+    const auto p = perimeter.Coordinate(index);
+    curand_init(benchmark_seed::PixelSeed(0, p.row, p.col),
+                0, 0, &output.GetRef(0, index));
+  }
+}
+
 }  // namespace
+
+GpuMatPRNGEdges::GpuMatPRNGEdges(size_t width, size_t height)
+    : perimeter_{width, height} {
+  THROW_CHECK_GT(width, 0);
+  THROW_CHECK_GT(height, 0);
+  states_ = GpuMat<curandState>::CreateCompact(perimeter_.Size(), 1);
+  InitEdgeRandomStateKernel<<<(perimeter_.Size() + 255) / 256, 256>>>(
+      states_->View(), perimeter_);
+}
+
+GpuMatPRNGRowView GpuMatPRNGEdges::RowView(int orientation) const {
+  return {{nullptr, 0, 0, 0, 0}, states_->GetPtr(), perimeter_, orientation};
+}
 
 GpuMatPRNG::GpuMatPRNG(const int width, const int height, const int random_seed)
     : GpuMat(width, height) {

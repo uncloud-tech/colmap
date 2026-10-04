@@ -2,10 +2,27 @@
 
 #pragma once
 
+#include "colmap/mvs/compact_prng.h"
 #include "colmap/mvs/gpu_mat.h"
+
+#include <memory>
 
 namespace colmap {
 namespace mvs {
+
+using GpuMatPRNGRowView = PrngRowView<curandState, GpuMatView<curandState>>;
+
+// Benchmark seed-0 geometric phase only. Stores the unique perimeter states;
+// unlike a full map, this must never be used for photometric initialization.
+class GpuMatPRNGEdges {
+ public:
+  GpuMatPRNGEdges(size_t width, size_t height);
+  GpuMatPRNGRowView RowView(int orientation) const;
+
+ private:
+  PrngPerimeter perimeter_;
+  std::unique_ptr<GpuMat<curandState>> states_;
+};
 
 class GpuMatPRNG : public GpuMat<curandState> {
  public:
