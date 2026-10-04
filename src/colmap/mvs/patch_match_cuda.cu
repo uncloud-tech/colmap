@@ -19,6 +19,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <sstream>
 
 // The number of threads per Cuda thread block. Warning: Do not change this
@@ -909,7 +910,7 @@ template <int kWindowSize,
           bool kFilterGeomConsistency = false>
 __global__ void SweepFromTopToBottom(
     GpuMatView<float> global_workspace,
-    GpuMatView<curandState> rand_state_map,
+    GpuMatPRNGRowView rand_state_map,
     GpuMatView<float> cost_map,
     GpuMatView<float> depth_map,
     GpuMatView<float> normal_map,
@@ -1505,7 +1506,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStepAndTile() {
                        kFilterGeomConsistency>            \
       <<<sweep_grid_size_, sweep_block_size_>>>(          \
           global_workspace_->View(),                      \
-          rand_state_map_->View(),                        \
+          RandomStateRowView(),                           \
           cost_map_->View(),                              \
           depth_map_->View(),                             \
           normal_map_->View(),                            \
@@ -1863,9 +1864,24 @@ void PatchMatchCuda::InitTransforms() {
   }
 }
 
+GpuMatPRNGRowView PatchMatchCuda::RandomStateRowView() const {
+  if (rand_state_edges_) {
+    return rand_state_edges_->RowView(rotation_in_half_pi_);
+  }
+  return {rand_state_map_->View(), nullptr, {ref_width_, ref_height_}, 0};
+}
+
 void PatchMatchCuda::InitWorkspaceMemory() {
-  rand_state_map_ = std::make_unique<GpuMatPRNG>(
-      ref_width_, ref_height_, options_.random_seed);
+  // Explicit benchmark-only opt-in. Production seeds and photometric runs
+  // always retain the full state map and its historical initialization.
+  if (UseCompactPrng(options_.geom_consistency, options_.random_seed,
+                     std::getenv("COLMAP_PATCH_MATCH_COMPACT_PRNG"))) {
+    rand_state_edges_ =
+        std::make_unique<GpuMatPRNGEdges>(ref_width_, ref_height_);
+  } else {
+    rand_state_map_ = std::make_unique<GpuMatPRNG>(
+        ref_width_, ref_height_, options_.random_seed);
+  }
 
   depth_map_ = std::make_unique<GpuMat<float>>(ref_width_, ref_height_);
   if (options_.geom_consistency) {
@@ -1925,12 +1941,17 @@ void PatchMatchCuda::Rotate() {
     height = ref_width_;
   }
 
-  // Rotate random map.
+  // Rotate random map. Compact states stay at original coordinates; only the
+  // row view changes orientation. Preserve the original rotation sync boundary.
   {
-    std::unique_ptr<GpuMatPRNG> rotated_rand_state_map(
-        new GpuMatPRNG(width, height, options_.random_seed));
-    rand_state_map_->Rotate(rotated_rand_state_map.get());
-    rand_state_map_.swap(rotated_rand_state_map);
+    if (rand_state_edges_) {
+      CUDA_SYNC_AND_CHECK();
+    } else {
+      std::unique_ptr<GpuMatPRNG> rotated_rand_state_map(
+          new GpuMatPRNG(width, height, options_.random_seed));
+      rand_state_map_->Rotate(rotated_rand_state_map.get());
+      rand_state_map_.swap(rotated_rand_state_map);
+    }
   }
 
   // Rotate depth map.
