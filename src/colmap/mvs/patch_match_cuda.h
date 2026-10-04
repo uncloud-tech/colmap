@@ -98,14 +98,14 @@ class PatchMatchCuda {
   std::unique_ptr<GpuMat<float>> sel_prob_map_;
   std::unique_ptr<GpuMat<float>> prev_sel_prob_map_;
   std::unique_ptr<GpuMat<float>> cost_map_;
-  std::unique_ptr<GpuMatPRNG> rand_state_map_;
+  std::unique_ptr<GpuMat<curandState>> rand_state_map_;
   std::unique_ptr<GpuMat<uint8_t>> consistency_mask_;
 
   // Shared memory is too small to hold local state for each thread,
   // so this is workspace memory in global memory.
   std::unique_ptr<GpuMat<float>> global_workspace_;
 
-  // One disjoint compact float plane, reused across cost rotations. Allocate
+  // One disjoint compact float plane, reused across all map rotations. Allocate
   // once so rotation submission never introduces allocator synchronization.
   std::unique_ptr<GpuMat<float>> rotation_workspace_;
 };
