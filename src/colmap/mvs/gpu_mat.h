@@ -3,6 +3,7 @@
 #pragma once
 
 #include "colmap/mvs/mat.h"
+#include "colmap/mvs/packed_consistency_mask.h"
 #include "colmap/util/cudacc.h"
 #include "colmap/util/endian.h"
 #include "colmap/util/logging.h"
