@@ -1812,13 +1812,13 @@ void PatchMatchCuda::InitWorkspaceMemory() {
   // the temporary selection probabilities in the global_workspace_.
   // However, it is useful to keep the probabilities for the entire image
   // in memory, so that it can be exported.
-  sel_prob_map_ = std::make_unique<GpuMat<float>>(
+  sel_prob_map_ = GpuMat<float>::CreateCompact(
       ref_width_, ref_height_, problem_.src_image_idxs.size());
-  prev_sel_prob_map_ = std::make_unique<GpuMat<float>>(
+  prev_sel_prob_map_ = GpuMat<float>::CreateCompact(
       ref_width_, ref_height_, problem_.src_image_idxs.size());
   prev_sel_prob_map_->FillWithScalar(0.5f);
 
-  cost_map_ = std::make_unique<GpuMat<float>>(
+  cost_map_ = GpuMat<float>::CreateCompact(
       ref_width_, ref_height_, problem_.src_image_idxs.size());
 
   const int ref_max_dim = std::max(ref_width_, ref_height_);
@@ -1826,6 +1826,7 @@ void PatchMatchCuda::InitWorkspaceMemory() {
       ref_max_dim, problem_.src_image_idxs.size(), 2);
 
   consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(0, 0, 0);
+  rotation_workspace_ = GpuMat<float>::CreateCompact(ref_width_, ref_height_);
 
   ComputeCudaConfig();
 
@@ -1891,18 +1892,22 @@ void PatchMatchCuda::Rotate() {
     BindRefImageTexture();
   }
 
-  // Rotate selection probability map.
-  prev_sel_prob_map_ = std::make_unique<GpuMat<float>>(
-      width, height, problem_.src_image_idxs.size());
+  // Preserve main's sel -> prev recurrence using DISTINCT existing backings.
+  // Old prev values are no longer needed after the synchronized sweep.
+  auto rotated_prev = prev_sel_prob_map_->MakeCompactView(width, height);
+  auto rotated_scratch = sel_prob_map_->MakeCompactView(width, height);
+  prev_sel_prob_map_ = std::move(rotated_prev);
+  THROW_CHECK(sel_prob_map_->GetPtr() != prev_sel_prob_map_->GetPtr());
   sel_prob_map_->Rotate(prev_sel_prob_map_.get());
-  sel_prob_map_ = std::make_unique<GpuMat<float>>(
-      width, height, problem_.src_image_idxs.size());
+  // The next backward pass writes every valid row/layer before any scratch read;
+  // filtering reads only after the forward pass writes that row's probabilities.
+  sel_prob_map_ = std::move(rotated_scratch);
 
   // Rotate cost map.
   {
-    std::unique_ptr<GpuMat<float>> rotated_cost_map(
-        new GpuMat<float>(width, height, problem_.src_image_idxs.size()));
-    cost_map_->Rotate(rotated_cost_map.get());
+    auto rotated_cost_map = cost_map_->MakeCompactView(width, height);
+    auto workspace_view = rotation_workspace_->MakeCompactView(width, height);
+    cost_map_->RotateWithStorageReuse(rotated_cost_map.get(), workspace_view.get());
     cost_map_.swap(rotated_cost_map);
   }
 

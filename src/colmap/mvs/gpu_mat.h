@@ -3,12 +3,14 @@
 #pragma once
 
 #include "colmap/mvs/mat.h"
+#include "colmap/mvs/rotation_storage_plan.h"
 #include "colmap/util/cudacc.h"
 #include "colmap/util/endian.h"
 #include "colmap/util/logging.h"
 #include "colmap/util/string.h"
 
 #include <fstream>
+#include <utility>
 
 #if defined(__CUDACC__) || defined(__HIPCC__)
 #include "colmap/mvs/cuda_flip.h"
@@ -87,6 +89,11 @@ class GpuMat {
   GpuMat(const size_t width, const size_t height, const size_t depth = 1);
   ~GpuMat();
 
+  // Opt-in compact backing. Ordinary pitched allocation remains the default.
+  static std::unique_ptr<GpuMat<T>> CreateCompact(
+      size_t width, size_t height, size_t depth = 1);
+  std::unique_ptr<GpuMat<T>> MakeCompactView(size_t width, size_t height) const;
+
   GpuMat(const GpuMat&) = delete;
   GpuMat& operator=(const GpuMat&) = delete;
   GpuMat(GpuMat&&) = delete;
@@ -123,6 +130,11 @@ class GpuMat {
   // Rotate array in counter-clockwise direction.
   void Rotate(GpuMat<T>* output);
 
+  // Output shares this compact backing; workspace is a disjoint compact plane.
+  // Metadata views must be prepared before submission. Never use ordinary
+  // Rotate with aliased input/output: its kernel is not an in-place algorithm.
+  void RotateWithStorageReuse(GpuMat<T>* output, GpuMat<T>* workspace);
+
   void Read(const std::filesystem::path& path);
   void Write(const std::filesystem::path& path);
   void Write(const std::filesystem::path& path, const size_t slice);
@@ -142,6 +154,10 @@ class GpuMat {
 
   dim3 blockSize_;
   dim3 gridSize_;
+
+ private:
+  explicit GpuMat(rotation_storage::RotationStorageView storage);
+  rotation_storage::RotationStorageView compact_storage_;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -164,9 +180,46 @@ GpuMat<T>::GpuMat(const size_t width, const size_t height, const size_t depth)
 
 template <typename T>
 GpuMat<T>::~GpuMat() {
+  // Aliases release only their shared owner. The final owner frees the backing.
+  if (compact_storage_.backing.allocation) return;
   // Errors during destruction would be invisible to callers anyway; explicitly
   // discard the return value so HIP's [[nodiscard]] cudaFree does not warn.
   (void)cudaFree(array_ptr_);
+}
+
+template <typename T>
+std::unique_ptr<GpuMat<T>> GpuMat<T>::CreateCompact(
+    size_t width, size_t height, size_t depth) {
+  const auto plan = rotation_storage::MakePlan(width, height, depth, sizeof(T));
+  THROW_CHECK(plan.has_value());
+  void* pointer = nullptr;
+  CUDA_SAFE_CALL(cudaMalloc(&pointer, plan->backing_bytes));
+  // shared_ptr invokes its deleter even if allocating its control block fails.
+  rotation_storage::RotationBacking backing{
+      std::shared_ptr<void>(pointer, [](void* ptr) { (void)cudaFree(ptr); }),
+      plan->backing_bytes};
+  const auto view = rotation_storage::MakeView(backing, width, height, depth, sizeof(T));
+  THROW_CHECK(view.has_value());
+  return std::unique_ptr<GpuMat<T>>(new GpuMat<T>(*view));
+}
+
+template <typename T>
+GpuMat<T>::GpuMat(rotation_storage::RotationStorageView storage)
+    : array_ptr_(static_cast<T*>(storage.backing.allocation.get())),
+      pitch_(storage.layout.source_pitch),
+      width_(storage.layout.width),
+      height_(storage.layout.height),
+      depth_(storage.layout.depth),
+      compact_storage_(std::move(storage)) {
+  ComputeCudaConfig();
+}
+
+template <typename T>
+std::unique_ptr<GpuMat<T>> GpuMat<T>::MakeCompactView(
+    size_t width, size_t height) const {
+  const auto view = rotation_storage::ReorientView(compact_storage_, width, height);
+  THROW_CHECK(view.has_value());
+  return std::unique_ptr<GpuMat<T>>(new GpuMat<T>(*view));
 }
 
 template <typename T>
@@ -431,6 +484,34 @@ void GpuMat<T>::Rotate(GpuMat<T>* output) {
                pitch_,
                output->pitch_);
   }
+  CUDA_SYNC_AND_CHECK();
+}
+
+template <typename T>
+void GpuMat<T>::RotateWithStorageReuse(GpuMat<T>* output, GpuMat<T>* workspace) {
+  THROW_CHECK(output != nullptr);
+  THROW_CHECK(workspace != nullptr);
+  THROW_CHECK(rotation_storage::ValidateReuse(
+      compact_storage_, output->compact_storage_, workspace->compact_storage_));
+  const auto& plan = compact_storage_.layout;
+  rotation_storage::ForEachLayer(
+      plan,
+      [&](size_t /*layer*/, size_t offset) {
+        CudaRotate(reinterpret_cast<T*>(reinterpret_cast<char*>(array_ptr_) + offset),
+                   workspace->GetPtr(),
+                   static_cast<int>(plan.width),
+                   static_cast<int>(plan.height),
+                   static_cast<int>(plan.source_pitch),
+                   static_cast<int>(plan.rotated_pitch));
+      },
+      [&](size_t /*layer*/, size_t offset) {
+        // Same implicit stream as CudaRotate, including per-thread default mode.
+        // The next layer cannot overwrite workspace until this copy has consumed it.
+        CUDA_SAFE_CALL(cudaMemcpyAsync(
+            reinterpret_cast<char*>(output->GetPtr()) + offset,
+            workspace->GetPtr(), plan.plane_bytes, cudaMemcpyDeviceToDevice));
+      });
+  // Replaces, not supplements, the ordinary Rotate's final synchronization.
   CUDA_SYNC_AND_CHECK();
 }
 
