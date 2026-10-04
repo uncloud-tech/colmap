@@ -85,6 +85,20 @@ inline std::optional<RotationStorageView> ReorientView(
   return MakeView(source.backing, width, height, p.depth, p.element_bytes);
 }
 
+// Typed prefix of an existing workspace, never an additional allocation.
+// Capacity describes the usable prefix; shared ownership retains the full buffer.
+inline std::optional<RotationStorageView> MakeWorkspaceView(
+    const RotationStorageView& source, size_t width, size_t height,
+    size_t element_bytes) noexcept {
+  if (!IsValid(source)) return std::nullopt;
+  const auto plan = MakePlan(width, height, 1, element_bytes);
+  if (!plan || plan->backing_bytes > source.backing.capacity_bytes)
+    return std::nullopt;
+  auto backing = source.backing;
+  backing.capacity_bytes = plan->backing_bytes;
+  return MakeView(backing, width, height, 1, element_bytes);
+}
+
 inline bool SameOwner(const RotationBacking& a,
                       const RotationBacking& b) noexcept {
   return !a.allocation.owner_before(b.allocation) &&
@@ -110,6 +124,28 @@ inline bool ValidateReuse(const RotationStorageView& source,
   const uintptr_t scratch = reinterpret_cast<uintptr_t>(workspace.backing.allocation.get());
   // Address ranges were checked before adding their lengths.
   return start + s.backing_bytes <= scratch || scratch + w.backing_bytes <= start;
+}
+
+// Linear index of a compact pixel after a counter-clockwise quarter turn.
+#if defined(__CUDACC__) || defined(__HIPCC__)
+__host__ __device__
+#endif
+inline size_t RotatedIndex(size_t index, size_t width, size_t height) {
+  return (width - 1 - index % width) * height + index / width;
+}
+
+// Each component is consumed into disjoint scratch before ANY of that component
+// is overwritten. Other components remain untouched until their own turn.
+// Requires a checked plan with element_bytes divisible by four.
+template <class Rotate, class Scatter>
+void ForEachWord(const RotationStoragePlan& plan,
+                 Rotate&& rotate, Scatter&& scatter) {
+  for (size_t layer = 0; layer < plan.depth; ++layer) {
+    for (size_t word = 0; word < plan.element_bytes / 4; ++word) {
+      rotate(layer, word);
+      scatter(layer, word);
+    }
+  }
 }
 
 // Caller must supply a checked plan (the GPU adapter calls ValidateReuse first).

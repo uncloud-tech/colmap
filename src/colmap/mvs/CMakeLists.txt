@@ -38,6 +38,11 @@ if(OPENMP_FOUND)
 endif()
 
 COLMAP_ADD_TEST(
+    NAME rotation_word_plan_test
+    SRCS rotation_word_plan_test.cc
+    LINK_LIBS colmap_mvs
+)
+COLMAP_ADD_TEST(
     NAME rotation_storage_plan_test
     SRCS rotation_storage_plan_test.cc
     LINK_LIBS colmap_mvs
