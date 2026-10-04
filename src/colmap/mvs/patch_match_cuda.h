@@ -106,6 +106,7 @@ class PatchMatchCuda {
   std::unique_ptr<GpuMat<float>> cost_map_;
   std::unique_ptr<GpuMatPRNG> rand_state_map_;
   std::unique_ptr<GpuMatPRNGEdges> rand_state_edges_;
+  // Eight source flags per byte; depth is ceil(num_sources / 8).
   std::unique_ptr<GpuMat<uint8_t>> consistency_mask_;
 
   // Shared memory is too small to hold local state for each thread,
