@@ -104,6 +104,10 @@ class PatchMatchCuda {
   // Shared memory is too small to hold local state for each thread,
   // so this is workspace memory in global memory.
   std::unique_ptr<GpuMat<float>> global_workspace_;
+
+  // One disjoint compact float plane, reused across cost rotations. Allocate
+  // once so rotation submission never introduces allocator synchronization.
+  std::unique_ptr<GpuMat<float>> rotation_workspace_;
 };
 
 }  // namespace mvs

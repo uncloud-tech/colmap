@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -169,7 +170,166 @@ void CheckBitsAndSchedule() {
   }
   REQUIRE(calls == 2);
 }
-void RunTests() { CheckLayoutsAndOwnership(); CheckBitsAndSchedule(); }
+std::vector<uint32_t> ScratchRun(size_t width, size_t height, size_t depth,
+                                 bool photo_filter, bool geom_filter,
+                                 uint32_t poison) {
+  std::vector<uint32_t> scratch(width * height * depth, poison);
+  std::vector<uint32_t> previous(scratch.size(), 0x3f000000u);
+  for (int sweep = 0; sweep < 8; ++sweep) {
+    std::vector<int> state(scratch.size(), 0); // 0=unwritten, 1=beta, 2=probability
+    auto index = [&](size_t r, size_t c, size_t s) {
+      return s * width * height + r * width + c;
+    };
+    for (size_t col = 0; col < ((width + 31) / 32) * 32; ++col) {
+      if (col >= width) continue; // padded threads have no scratch access
+      // Main's backward phase initializes ALL rows/layers of this column.
+      for (size_t s = 0; s < depth; ++s)
+        for (size_t row = height; row-- > 0;) {
+          const size_t i = index(row, col, s);
+          scratch[i] = static_cast<uint32_t>(i * 17 + sweep);
+          state[i] = 1;
+        }
+      for (size_t row = 0; row < height; ++row) {
+        for (size_t s = 0; s < depth; ++s) {
+          const size_t i = index(row, col, s);
+          REQUIRE(state[i] == 1); // sampling beta read
+          REQUIRE(state[i] == 1); // updated-probability beta read
+          scratch[i] ^= previous[i]; // token operation, NOT likelihood numerics
+          state[i] = 2;
+        }
+        if (photo_filter || geom_filter) {
+          for (size_t s = 0; s < depth; ++s) {
+            if (photo_filter) REQUIRE(state[index(row, col, s)] == 2);
+            // Geometric-only filtering does not read sel probability.
+          }
+        }
+      }
+    }
+    REQUIRE(std::all_of(state.begin(), state.end(), [](int s) { return s == 2; }));
+    previous = Oracle(scratch, width, height, depth);
+    std::swap(width, height); // scratch bytes are reused, NOT cleared
+  }
+  return previous; // GetSelProbMap exports prev, not scratch
+}
+
+struct LifetimeLedger {
+  struct Event { const char* name; size_t logical, known_physical; };
+  size_t live = 0, known = 0, peak = 0, known_peak = 0;
+  const char* peak_event = "empty";
+  std::vector<Event> events;
+  void Mark(const char* name) {
+    events.push_back({name, live, known});
+    if (live > peak) { peak = live; peak_event = name; }
+    known_peak = std::max(known_peak, known);
+  }
+  std::shared_ptr<int> Allocate(const char* name, size_t logical,
+                                std::optional<size_t> physical) {
+    live += logical;
+    known += physical.value_or(0); // arrays deliberately have UNKNOWN physical bytes
+    Mark(name);
+    return std::shared_ptr<int>(new int, [this, logical, physical](int* p) {
+      delete p; live -= logical; known -= physical.value_or(0); Mark("release");
+    });
+  }
+};
+
+void CheckLifetimeModel(size_t sources, bool geometric, bool filter) {
+  // Symbolic fixture, NOT a GPU estimate: 48-byte PRNG and 128-byte pitch alignment.
+  // Actual CUDA pitches, sizeof(curandState), array/driver costs require tracing.
+  size_t width = 3930, height = 2210;
+  const size_t pixels = width * height, plane = pixels * 4;
+  auto pitched = [](size_t w, size_t h, size_t layers, size_t element) {
+    return ((w * element + 127) / 128) * 128 * h * layers;
+  };
+  LifetimeLedger ledger;
+  auto alloc = [&](const char* label, size_t logical, std::optional<size_t> physical) {
+    return ledger.Allocate(label, logical, physical);
+  };
+  {
+    auto ref = alloc("ref_image", pixels, pitched(width, height, 1, 1));
+    auto sum = alloc("ref_sum", plane, pitched(width, height, 1, 4));
+    auto squared = alloc("ref_squared_sum", plane, pitched(width, height, 1, 4));
+    { auto input = alloc("filter_input_texture", pixels, std::nullopt); }
+    auto ref_texture = alloc("ref_texture", pixels, std::nullopt);
+    auto images = alloc("src_images", pixels * sources, std::nullopt);
+    auto depths = geometric ? alloc("src_depths", plane * sources, std::nullopt) : nullptr;
+    std::vector<std::shared_ptr<int>> poses;
+    for (int i = 0; i < 4; ++i) poses.push_back(alloc("pose", 43 * sources * 4, std::nullopt));
+    auto random = alloc("random", pixels * 48, pitched(width, height, 1, 48));
+    auto depth = alloc("depth", plane, pitched(width, height, 1, 4));
+    auto normal = alloc("normal", plane * 3, pitched(width, height, 3, 4));
+    auto sel = alloc("sel", plane * sources, plane * sources);
+    auto prev = alloc("prev", plane * sources, plane * sources);
+    auto cost = alloc("cost", plane * sources, plane * sources);
+    const size_t max_dim = std::max(width, height);
+    auto global = alloc("global", max_dim * sources * 2 * 4,
+                        pitched(max_dim, sources, 2, 4));
+    std::shared_ptr<int> mask; // zero placeholder, no bytes
+    auto workspace = alloc("workspace", plane, plane);
+    const size_t steady = ledger.live;
+    REQUIRE(sel.get() != prev.get());
+    for (int turn = 0; turn < 4; ++turn) {
+      if (filter && turn == 3)
+        mask = alloc("lazy_mask", pixels * sources, pitched(width, height, sources, 1));
+      std::swap(width, height);
+      { auto next = alloc("rotated_random", pixels * 48, pitched(width, height, 1, 48)); random.swap(next); }
+      { auto next = alloc("rotated_depth", plane, pitched(width, height, 1, 4)); depth.swap(next); }
+      { auto next = alloc("rotated_normal", plane * 3, pitched(width, height, 3, 4)); normal.swap(next); }
+      {
+        auto nr = alloc("rotated_ref", pixels, pitched(width, height, 1, 1));
+        auto ns = alloc("rotated_sum", plane, pitched(width, height, 1, 4));
+        auto nq = alloc("rotated_squared", plane, pitched(width, height, 1, 4));
+        ref.swap(nr); sum.swap(ns); squared.swap(nq);
+        { auto texture = alloc("rebound_texture", pixels, std::nullopt); ref_texture.swap(texture); }
+      }
+      const size_t before_alias = ledger.live;
+      { auto reoriented_prev = prev; prev.swap(reoriented_prev); }
+      { auto reoriented_sel = sel; sel.swap(reoriented_sel); }
+      {
+        auto rotated_cost = cost;
+        auto scratch_view = workspace;
+        REQUIRE(rotated_cost.get() != scratch_view.get());
+        cost.swap(rotated_cost);
+        ledger.Mark("cost_alias_both_live");
+        REQUIRE(ledger.live == before_alias);
+        REQUIRE(ledger.live == steady + ((filter && turn == 3) ? pixels * sources : 0));
+      }
+      REQUIRE(ledger.live == before_alias);
+      if (filter && turn == 3) {
+        auto next = alloc("rotated_mask", pixels * sources, pitched(width, height, sources, 1));
+        mask.swap(next);
+      }
+    }
+    const size_t remaining_single = std::max({pixels * 48, plane, plane * 3, pixels * 10});
+    const size_t mask_bytes = filter ? pixels * sources : 0;
+    const size_t expected_peak = steady + std::max(mask_bytes + remaining_single, 2 * mask_bytes);
+    REQUIRE(ledger.peak == expected_peak);
+    if (filter && sources >= 61) REQUIRE(std::string(ledger.peak_event) == "rotated_mask");
+    else REQUIRE(std::string(ledger.peak_event) == "rotated_random");
+    REQUIRE(ledger.known_peak > 0);
+    if (std::getenv("COLMAP_ROTATION_MODEL_DUMP")) {
+      std::printf("MODEL_ONLY S=%zu geom=%d filter=%d steady_logical=%zu peak_logical=%zu known_physical_peak=%zu peak_event=%s\n",
+                  sources, geometric, filter, steady, ledger.peak, ledger.known_peak, ledger.peak_event);
+    }
+  }
+  REQUIRE(ledger.live == 0 && ledger.known == 0);
+  REQUIRE(ledger.events.back().logical == 0);
+}
+
+void CheckScratchAndMemory() {
+  for (size_t sources : {1, 61, 64}) {
+    for (bool geom : {false, true}) for (bool photo : {false, true}) {
+      REQUIRE(ScratchRun(7, 3, sources, photo, geom, 0xaaaaaaaa) ==
+              ScratchRun(7, 3, sources, photo, geom, 0x55555555));
+    }
+    for (bool geom : {false, true}) for (bool filter : {false, true})
+      CheckLifetimeModel(sources, geom, filter);
+  }
+}
+
+void RunTests() {
+  CheckLayoutsAndOwnership(); CheckBitsAndSchedule(); CheckScratchAndMemory();
+}
 }  // namespace
 
 #ifdef COLMAP_ROTATION_STORAGE_STANDALONE
