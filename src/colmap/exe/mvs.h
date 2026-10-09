@@ -4,6 +4,7 @@
 
 #include "colmap/mvs/fusion.h"
 #include "colmap/mvs/patch_match_options.h"
+#include "colmap/mvs/patch_match_execution.h"
 #include "colmap/scene/reconstruction.h"
 
 #include <filesystem>
@@ -16,6 +17,17 @@ void RunPatchMatchStereoImpl(const std::filesystem::path& workspace_path,
                              const std::string& pmvs_option_name,
                              const mvs::PatchMatchOptions& options,
                              const std::filesystem::path& config_path);
+
+// Shared parser/controller path for the optional one-reference experiment.
+int RunPatchMatchStereoWithExecution(int argc, char** argv,
+                                    mvs::PatchMatchExecution execution);
+void RunPatchMatchStereoImplWithExecution(
+    const std::filesystem::path& workspace_path,
+    const std::string& workspace_format,
+    const std::string& pmvs_option_name,
+    const mvs::PatchMatchOptions& options,
+    const std::filesystem::path& config_path,
+    mvs::PatchMatchExecution execution);
 
 Reconstruction RunStereoFuserImpl(const std::filesystem::path& output_path,
                                   const std::filesystem::path& workspace_path,

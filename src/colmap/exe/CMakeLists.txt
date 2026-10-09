@@ -99,3 +99,16 @@ if(HIP_ENABLED)
     target_link_libraries(colmap_main hip::host hip::hiprand roc::rocrand)
 endif()
 set_target_properties(colmap_main PROPERTIES OUTPUT_NAME colmap)
+
+option(OWNED_PATCH_MATCH_DRIVER_ENABLED
+       "Build the experimental CUDA-only single-reference owned driver" OFF)
+if(OWNED_PATCH_MATCH_DRIVER_ENABLED)
+    if(NOT CUDA_ENABLED OR NOT MVS_ENABLED OR HIP_ENABLED)
+        message(FATAL_ERROR "Owned reference driver requires CUDA MVS, not HIP")
+    endif()
+    COLMAP_ADD_EXECUTABLE(
+        NAME colmap_owned_reference
+        SRCS owned_reference.cc
+        LINK_LIBS colmap_exe colmap_mvs_cuda ${COLMAP_BOOST_HEADER_LIBS}
+    )
+endif()

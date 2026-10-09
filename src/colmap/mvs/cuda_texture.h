@@ -23,6 +23,17 @@ class CudaArrayLayeredTexture {
       const size_t depth,
       const T* data);
 
+#if !defined(COLMAP_HIP_ENABLED)
+  static std::unique_ptr<CudaArrayLayeredTexture<T>> FromGpuMat(
+      const cudaTextureDesc& texture_desc,
+      const GpuMat<T>& mat,
+      cudaStream_t stream);
+  static std::unique_ptr<CudaArrayLayeredTexture<T>> FromHostArray(
+      const cudaTextureDesc& texture_desc,
+      size_t width, size_t height, size_t depth,
+      const T* data, cudaStream_t stream);
+#endif
+
   cudaTextureObject_t GetObj() const;
 
   size_t GetWidth() const;
@@ -96,6 +107,49 @@ CudaArrayLayeredTexture<T>::FromHostArray(const cudaTextureDesc& texture_desc,
 
   return array;
 }
+
+#if !defined(COLMAP_HIP_ENABLED)
+template <typename T>
+std::unique_ptr<CudaArrayLayeredTexture<T>>
+CudaArrayLayeredTexture<T>::FromGpuMat(const cudaTextureDesc& texture_desc,
+                                       const GpuMat<T>& mat,
+                                       const cudaStream_t stream) {
+  auto array = std::make_unique<CudaArrayLayeredTexture<T>>(
+      texture_desc, mat.GetWidth(), mat.GetHeight(), mat.GetDepth());
+  owned::ScopedStreamCompletion completion(stream);
+  cudaMemcpy3DParms params{};
+  params.extent = make_cudaExtent(mat.GetWidth(), mat.GetHeight(), mat.GetDepth());
+  params.kind = cudaMemcpyDeviceToDevice;
+  params.srcPtr = make_cudaPitchedPtr(
+      (void*)mat.GetPtr(), mat.GetPitch(), mat.GetWidth(), mat.GetHeight());
+  params.dstArray = array->array_;
+  CUDA_SAFE_CALL(cudaMemcpy3DAsync(&params, stream));
+  completion.Wait();
+  return array;
+}
+
+template <typename T>
+std::unique_ptr<CudaArrayLayeredTexture<T>>
+CudaArrayLayeredTexture<T>::FromHostArray(const cudaTextureDesc& texture_desc,
+                                          const size_t width,
+                                          const size_t height,
+                                          const size_t depth,
+                                          const T* data,
+                                          const cudaStream_t stream) {
+  auto array = std::make_unique<CudaArrayLayeredTexture<T>>(
+      texture_desc, width, height, depth);
+  owned::ScopedStreamCompletion completion(stream);
+  cudaMemcpy3DParms params{};
+  params.extent = make_cudaExtent(width, height, depth);
+  params.kind = cudaMemcpyHostToDevice;
+  params.srcPtr = make_cudaPitchedPtr((void*)data, width * sizeof(T), width, height);
+  params.dstArray = array->array_;
+  CUDA_SAFE_CALL(cudaMemcpy3DAsync(&params, stream));
+  // The caller may release its pageable staging vector immediately on return.
+  completion.Wait();
+  return array;
+}
+#endif  // !defined(COLMAP_HIP_ENABLED)
 
 template <typename T>
 CudaArrayLayeredTexture<T>::CudaArrayLayeredTexture(

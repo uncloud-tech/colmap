@@ -23,6 +23,13 @@ class GpuMatRefImage {
               const float sigma_spatial,
               const float sigma_color);
 
+#if !defined(COLMAP_HIP_ENABLED)
+  void Filter(const uint8_t* image_data,
+              size_t window_radius, size_t window_step,
+              float sigma_spatial, float sigma_color,
+              cudaStream_t stream);
+#endif
+
   // Image intensities.
   std::unique_ptr<GpuMat<uint8_t>> image;
 

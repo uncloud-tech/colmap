@@ -5,6 +5,9 @@
 #include "colmap/math/math.h"
 #include "colmap/mvs/consistency_graph.h"
 #include "colmap/mvs/patch_match_cuda.h"
+#if !defined(COLMAP_HIP_ENABLED)
+#include "colmap/mvs/patch_match_cuda_owned.h"
+#endif
 #include "colmap/mvs/workspace.h"
 #include "colmap/util/cuda.h"
 #include "colmap/util/file.h"
@@ -20,8 +23,37 @@
 namespace colmap {
 namespace mvs {
 
-PatchMatch::PatchMatch(const PatchMatchOptions& options, const Problem& problem)
-    : options_(options), problem_(problem) {}
+namespace {
+PatchMatchExecution ValidateExecution(const PatchMatchOptions& options,
+                                     const PatchMatchExecution execution) {
+#if defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
+  constexpr bool kOwnedCudaAvailable = true;
+#else
+  constexpr bool kOwnedCudaAvailable = false;
+#endif
+  return ValidatePatchMatchExecution(execution, options.window_radius,
+                                     options.window_step,
+                                     options.geom_consistency,
+                                     kOwnedCudaAvailable);
+}
+}  // namespace
+
+PatchMatch::PatchMatch(const PatchMatchOptions& options,
+                       const Problem& problem,
+                       const PatchMatchExecution execution)
+    : options_(options),
+      execution_(ValidateExecution(options, execution)),
+      owned_images_(execution_ == PatchMatchExecution::kOwnedCuda && problem.images
+                        ? *problem.images : std::vector<Image>{}),
+      problem_([&] {
+        Problem result = problem;
+        if (execution_ == PatchMatchExecution::kOwnedCuda) {
+          result.images = &owned_images_;
+          result.depth_maps = nullptr;
+          result.normal_maps = nullptr;
+        }
+        return result;
+      }()) {}
 
 PatchMatch::~PatchMatch() {}
 
@@ -103,24 +135,60 @@ void PatchMatch::Run() {
 
   Check();
 
+#if !defined(COLMAP_HIP_ENABLED)
+  if (execution_ == PatchMatchExecution::kOwnedCuda) {
+    THROW_CHECK(!owned_patch_match_cuda_) << "Owned instances run only once";
+    owned_patch_match_cuda_ =
+        std::make_unique<owned::PatchMatchCuda>(options_, problem_);
+    LOG(INFO) << "PATCH_MATCH_BACKEND actual=owned_cuda reference="
+              << problem_.ref_image_idx;
+    owned_patch_match_cuda_->Run();
+    return;
+  }
+#endif
   patch_match_cuda_ = std::make_unique<PatchMatchCuda>(options_, problem_);
   patch_match_cuda_->Run();
 }
 
 DepthMap PatchMatch::GetDepthMap() const {
+#if !defined(COLMAP_HIP_ENABLED)
+  if (execution_ == PatchMatchExecution::kOwnedCuda) {
+    THROW_CHECK_NOTNULL(owned_patch_match_cuda_.get());
+    return owned_patch_match_cuda_->GetDepthMap();
+  }
+#endif
   return patch_match_cuda_->GetDepthMap();
 }
 
 NormalMap PatchMatch::GetNormalMap() const {
+#if !defined(COLMAP_HIP_ENABLED)
+  if (execution_ == PatchMatchExecution::kOwnedCuda) {
+    THROW_CHECK_NOTNULL(owned_patch_match_cuda_.get());
+    return owned_patch_match_cuda_->GetNormalMap();
+  }
+#endif
   return patch_match_cuda_->GetNormalMap();
 }
 
 Mat<float> PatchMatch::GetSelProbMap() const {
+#if !defined(COLMAP_HIP_ENABLED)
+  if (execution_ == PatchMatchExecution::kOwnedCuda) {
+    THROW_CHECK_NOTNULL(owned_patch_match_cuda_.get());
+    return owned_patch_match_cuda_->GetSelProbMap();
+  }
+#endif
   return patch_match_cuda_->GetSelProbMap();
 }
 
 ConsistencyGraph PatchMatch::GetConsistencyGraph() const {
   const auto& ref_image = problem_.images->at(problem_.ref_image_idx);
+#if !defined(COLMAP_HIP_ENABLED)
+  if (execution_ == PatchMatchExecution::kOwnedCuda) {
+    THROW_CHECK_NOTNULL(owned_patch_match_cuda_.get());
+    return ConsistencyGraph(ref_image.GetWidth(), ref_image.GetHeight(),
+                             owned_patch_match_cuda_->GetConsistentImageIdxs());
+  }
+#endif
   return ConsistencyGraph(ref_image.GetWidth(),
                           ref_image.GetHeight(),
                           patch_match_cuda_->GetConsistentImageIdxs());
@@ -131,8 +199,10 @@ PatchMatchController::PatchMatchController(
     const std::filesystem::path& workspace_path,
     const std::string& workspace_format,
     const std::string& pmvs_option_name,
-    const std::filesystem::path& config_path)
+    const std::filesystem::path& config_path,
+    const PatchMatchExecution execution)
     : options_(options),
+      execution_(ValidateExecution(options, execution)),
       workspace_path_(workspace_path),
       workspace_format_(workspace_format),
       pmvs_option_name_(pmvs_option_name),
@@ -145,6 +215,10 @@ void PatchMatchController::Run() {
   run_timer.Start();
   ReadWorkspace();
   ReadProblems();
+  if (execution_ == PatchMatchExecution::kOwnedCuda) {
+    THROW_CHECK_EQ(problems_.size(), 1)
+        << "Owned prototype accepts exactly one configured reference";
+  }
   ReadGpuIndices();
 
   thread_pool_ = std::make_unique<ThreadPool>(gpu_indices_.size());
@@ -383,6 +457,8 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
   if (ExistsFile(depth_map_path) && ExistsFile(normal_map_path) &&
       (!options.write_consistency_graph ||
        ExistsFile(consistency_graph_path))) {
+    THROW_CHECK(execution_ != PatchMatchExecution::kOwnedCuda)
+        << "Owned prototype requires fresh output paths, not a skipped result";
     return;
   }
 
@@ -492,7 +568,7 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
   problem.Print();
   patch_match_options.Print();
 
-  PatchMatch patch_match(patch_match_options, problem);
+  PatchMatch patch_match(patch_match_options, problem, execution_);
   patch_match.Run();
 
   LOG(INFO) << std::endl

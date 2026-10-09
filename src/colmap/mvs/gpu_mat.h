@@ -10,6 +10,10 @@
 
 #include <fstream>
 
+#if !defined(COLMAP_HIP_ENABLED)
+#include "colmap/mvs/owned_cuda_execution.h"
+#endif
+
 #if defined(__CUDACC__) || defined(__HIPCC__)
 #include "colmap/mvs/cuda_flip.h"
 #include "colmap/mvs/cuda_rotate.h"
@@ -123,6 +127,19 @@ class GpuMat {
   // Rotate array in counter-clockwise direction.
   void Rotate(GpuMat<T>* output);
 
+#if !defined(COLMAP_HIP_ENABLED)
+  // Explicit-stream overloads preserve the original blocking host lifetimes.
+  void CopyToDevice(const T* data, size_t pitch, cudaStream_t stream);
+  void CopyToHost(T* data, size_t pitch, cudaStream_t stream) const;
+  Mat<T> CopyToMat(cudaStream_t stream) const;
+  void FillWithScalar(T value, cudaStream_t stream);
+  void FillWithRandomNumbers(T min_value,
+                             T max_value,
+                             const GpuMat<curandState>& random_state,
+                             cudaStream_t stream);
+  void Rotate(GpuMat<T>* output, cudaStream_t stream);
+#endif
+
   void Read(const std::filesystem::path& path);
   void Write(const std::filesystem::path& path);
   void Write(const std::filesystem::path& path, const size_t slice);
@@ -232,6 +249,37 @@ Mat<T> GpuMat<T>::CopyToMat() const {
   CopyToHost(mat.GetPtr(), mat.GetWidth() * sizeof(T));
   return mat;
 }
+
+#if !defined(COLMAP_HIP_ENABLED)
+template <typename T>
+void GpuMat<T>::CopyToDevice(const T* data,
+                              const size_t pitch,
+                              const cudaStream_t stream) {
+  owned::ScopedStreamCompletion completion(stream);
+  CUDA_SAFE_CALL(cudaMemcpy2DAsync(array_ptr_, pitch_, data, pitch,
+                                  width_ * sizeof(T), height_ * depth_,
+                                  cudaMemcpyHostToDevice, stream));
+  completion.Wait();
+}
+
+template <typename T>
+void GpuMat<T>::CopyToHost(T* data,
+                            const size_t pitch,
+                            const cudaStream_t stream) const {
+  owned::ScopedStreamCompletion completion(stream);
+  CUDA_SAFE_CALL(cudaMemcpy2DAsync(data, pitch, array_ptr_, pitch_,
+                                  width_ * sizeof(T), height_ * depth_,
+                                  cudaMemcpyDeviceToHost, stream));
+  completion.Wait();
+}
+
+template <typename T>
+Mat<T> GpuMat<T>::CopyToMat(const cudaStream_t stream) const {
+  Mat<T> mat(width_, height_, depth_);
+  CopyToHost(mat.GetPtr(), mat.GetWidth() * sizeof(T), stream);
+  return mat;
+}
+#endif
 
 template <typename T>
 void GpuMat<T>::Read(const std::filesystem::path& path) {
@@ -433,6 +481,41 @@ void GpuMat<T>::Rotate(GpuMat<T>* output) {
   }
   CUDA_SYNC_AND_CHECK();
 }
+
+#if !defined(COLMAP_HIP_ENABLED)
+template <typename T>
+void GpuMat<T>::FillWithScalar(const T value, const cudaStream_t stream) {
+  owned::ScopedStreamCompletion completion(stream);
+  internal::FillWithScalarKernel<T><<<gridSize_, blockSize_, 0, stream>>>(
+      View(), value);
+  completion.Wait();
+}
+
+template <typename T>
+void GpuMat<T>::FillWithRandomNumbers(
+    const T min_value,
+    const T max_value,
+    const GpuMat<curandState>& random_state,
+    const cudaStream_t stream) {
+  owned::ScopedStreamCompletion completion(stream);
+  internal::FillWithRandomNumbersKernel<T>
+      <<<gridSize_, blockSize_, 0, stream>>>(
+          View(), random_state.View(), min_value, max_value);
+  completion.Wait();
+}
+
+template <typename T>
+void GpuMat<T>::Rotate(GpuMat<T>* output, const cudaStream_t stream) {
+  owned::ScopedStreamCompletion completion(stream);
+  for (size_t slice = 0; slice < depth_; ++slice) {
+    CudaRotate((T*)((char*)array_ptr_ + slice * pitch_ * GetHeight()),
+               (T*)((char*)output->GetPtr() +
+                    slice * output->pitch_ * output->GetHeight()),
+               width_, height_, pitch_, output->pitch_, stream);
+  }
+  completion.Wait();
+}
+#endif  // !defined(COLMAP_HIP_ENABLED)
 
 #endif  // __CUDACC__ || __HIPCC__
 

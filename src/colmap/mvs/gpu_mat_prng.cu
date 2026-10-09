@@ -27,5 +27,16 @@ GpuMatPRNG::GpuMatPRNG(const int width, const int height)
   InitRandomStateKernel<<<gridSize_, blockSize_>>>(View());
 }
 
+#if !defined(COLMAP_HIP_ENABLED)
+GpuMatPRNG::GpuMatPRNG(const int width,
+                       const int height,
+                       const cudaStream_t stream)
+    : GpuMat(width, height) {
+  owned::ScopedStreamCompletion completion(stream);
+  InitRandomStateKernel<<<gridSize_, blockSize_, 0, stream>>>(View());
+  completion.Wait();
+}
+#endif  // !defined(COLMAP_HIP_ENABLED)
+
 }  // namespace mvs
 }  // namespace colmap

@@ -93,5 +93,35 @@ void GpuMatRefImage::Filter(const uint8_t* image_data,
   CUDA_SYNC_AND_CHECK();
 }
 
+#if !defined(COLMAP_HIP_ENABLED)
+void GpuMatRefImage::Filter(const uint8_t* image_data,
+                            const size_t window_radius,
+                            const size_t window_step,
+                            const float sigma_spatial,
+                            const float sigma_color,
+                            const cudaStream_t stream) {
+  cudaTextureDesc texture_desc;
+  memset(&texture_desc, 0, sizeof(texture_desc));
+  texture_desc.addressMode[0] = cudaAddressModeBorder;
+  texture_desc.addressMode[1] = cudaAddressModeBorder;
+  texture_desc.addressMode[2] = cudaAddressModeBorder;
+  texture_desc.filterMode = cudaFilterModePoint;
+  texture_desc.readMode = cudaReadModeNormalizedFloat;
+  texture_desc.normalizedCoords = false;
+  auto image_texture = CudaArrayLayeredTexture<uint8_t>::FromHostArray(
+      texture_desc, width_, height_, 1, image_data, stream);
+  const dim3 block_size(kBlockDimX, kBlockDimY);
+  const dim3 grid_size((width_ - 1) / block_size.x + 1,
+                       (height_ - 1) / block_size.y + 1);
+  owned::ScopedStreamCompletion completion(stream);
+  FilterKernel<<<grid_size, block_size, 0, stream>>>(
+      image_texture->GetObj(), image->View(), sum_image->View(),
+      squared_sum_image->View(), window_radius, window_step,
+      sigma_spatial, sigma_color);
+  // Complete the final texture read before the local texture is destroyed.
+  completion.Wait();
+}
+#endif  // !defined(COLMAP_HIP_ENABLED)
+
 }  // namespace mvs
 }  // namespace colmap

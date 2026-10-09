@@ -199,6 +199,12 @@ int RunMeshTexturer(int argc, char** argv) {
 }
 
 int RunPatchMatchStereo(int argc, char** argv) {
+  return RunPatchMatchStereoWithExecution(
+      argc, argv, mvs::PatchMatchExecution::kStock);
+}
+
+int RunPatchMatchStereoWithExecution(
+    int argc, char** argv, const mvs::PatchMatchExecution execution) {
   std::filesystem::path workspace_path;
   std::string workspace_format = "COLMAP";
   std::string pmvs_option_name = "option-all";
@@ -217,11 +223,12 @@ int RunPatchMatchStereo(int argc, char** argv) {
   if (!options.Parse(argc, argv)) {
     return EXIT_FAILURE;
   }
-  RunPatchMatchStereoImpl(workspace_path,
-                          workspace_format,
-                          pmvs_option_name,
-                          *options.patch_match_stereo,
-                          config_path);
+  RunPatchMatchStereoImplWithExecution(workspace_path,
+                                       workspace_format,
+                                       pmvs_option_name,
+                                       *options.patch_match_stereo,
+                                       config_path,
+                                       execution);
   return EXIT_SUCCESS;
 }
 
@@ -230,6 +237,18 @@ void RunPatchMatchStereoImpl(const std::filesystem::path& workspace_path,
                              const std::string& pmvs_option_name,
                              const mvs::PatchMatchOptions& options,
                              const std::filesystem::path& config_path) {
+  RunPatchMatchStereoImplWithExecution(workspace_path, workspace_format,
+                                       pmvs_option_name, options, config_path,
+                                       mvs::PatchMatchExecution::kStock);
+}
+
+void RunPatchMatchStereoImplWithExecution(
+    const std::filesystem::path& workspace_path,
+    const std::string& workspace_format,
+    const std::string& pmvs_option_name,
+    const mvs::PatchMatchOptions& options,
+    const std::filesystem::path& config_path,
+    const mvs::PatchMatchExecution execution) {
 #if !defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
   LOG(FATAL_THROW) << "Dense stereo reconstruction requires CUDA or HIP, "
                       "neither of which is available on your system.";
@@ -245,7 +264,8 @@ void RunPatchMatchStereoImpl(const std::filesystem::path& workspace_path,
                                        workspace_path,
                                        workspace_format_lower,
                                        pmvs_option_name,
-                                       config_path);
+                                       config_path,
+                                       execution);
 
   controller.Run();
 #endif  // COLMAP_CUDA_ENABLED || COLMAP_HIP_ENABLED

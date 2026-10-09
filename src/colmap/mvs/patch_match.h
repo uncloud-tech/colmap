@@ -6,6 +6,7 @@
 #include "colmap/mvs/image.h"
 #include "colmap/mvs/normal_map.h"
 #include "colmap/mvs/patch_match_options.h"
+#include "colmap/mvs/patch_match_execution.h"
 #ifndef __CUDACC__
 #include "colmap/util/base_controller.h"
 #include "colmap/util/threading.h"
@@ -21,6 +22,11 @@ namespace mvs {
 class ConsistencyGraph;
 class PatchMatchCuda;
 class Workspace;
+#if !defined(COLMAP_HIP_ENABLED)
+namespace owned {
+class PatchMatchCuda;
+}
+#endif
 
 // This is a wrapper class around the actual PatchMatchCuda implementation. This
 // class is necessary to hide Cuda code from any boost or Eigen code, since
@@ -47,7 +53,9 @@ class PatchMatch {
     void Print() const;
   };
 
-  PatchMatch(const PatchMatchOptions& options, const Problem& problem);
+  PatchMatch(const PatchMatchOptions& options,
+             const Problem& problem,
+             PatchMatchExecution execution = PatchMatchExecution::kStock);
   ~PatchMatch();
 
   // Check the options and the problem for validity.
@@ -64,8 +72,15 @@ class PatchMatch {
 
  private:
   const PatchMatchOptions options_;
+  const PatchMatchExecution execution_;
+  // Owned mode snapshots inputs before binding Problem pointers. Backend is
+  // destroyed before this storage; stock mode retains its original borrowing.
+  std::vector<Image> owned_images_;
   const Problem problem_;
   std::unique_ptr<PatchMatchCuda> patch_match_cuda_;
+#if !defined(COLMAP_HIP_ENABLED)
+  std::unique_ptr<owned::PatchMatchCuda> owned_patch_match_cuda_;
+#endif
 };
 
 // This thread processes all problems in a workspace. A workspace has the
@@ -105,7 +120,8 @@ class PatchMatchController : public BaseController {
                        const std::filesystem::path& workspace_path,
                        const std::string& workspace_format,
                        const std::string& pmvs_option_name,
-                       const std::filesystem::path& config_path = "");
+                       const std::filesystem::path& config_path = "",
+                       PatchMatchExecution execution = PatchMatchExecution::kStock);
   void Run();
 
  private:
@@ -115,6 +131,7 @@ class PatchMatchController : public BaseController {
   void ProcessProblem(const PatchMatchOptions& options, size_t problem_idx);
 
   const PatchMatchOptions options_;
+  const PatchMatchExecution execution_;
   const std::filesystem::path workspace_path_;
   const std::string workspace_format_;
   const std::string pmvs_option_name_;

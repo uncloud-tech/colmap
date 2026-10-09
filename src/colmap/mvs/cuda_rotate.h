@@ -67,6 +67,24 @@ void CudaRotate(const T* input,
       output, input, width, height, pitch_input, pitch_output);
 }
 
+#if !defined(COLMAP_HIP_ENABLED)
+template <typename T>
+void CudaRotate(const T* input,
+                T* output,
+                const int width,
+                const int height,
+                const int pitch_input,
+                const int pitch_output,
+                const cudaStream_t stream) {
+  dim3 block_dim(TILE_DIM_ROTATE, 1, 1);
+  dim3 grid_dim;
+  grid_dim.x = (width - 1) / TILE_DIM_ROTATE + 1;
+  grid_dim.y = height;
+  internal::CudaRotateKernel<<<grid_dim, block_dim, 0, stream>>>(
+      output, input, width, height, pitch_input, pitch_output);
+}
+#endif  // !defined(COLMAP_HIP_ENABLED)
+
 #undef TILE_DIM_ROTATE
 
 #endif  // defined(__CUDACC__) || defined(__HIPCC__)

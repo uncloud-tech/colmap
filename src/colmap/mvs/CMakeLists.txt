@@ -17,6 +17,7 @@ COLMAP_ADD_LIBRARY(
         poisson_meshing.h poisson_meshing.cc
         normal_map.h normal_map.cc
         patch_match_options.h patch_match_options.cc
+        patch_match_execution.h
         texture_mapping.h texture_mapping.cc
         workspace.h workspace.cc
     PUBLIC_LINK_LIBS
@@ -110,6 +111,9 @@ if(CUDA_ENABLED)
             gpu_mat_ref_image.h gpu_mat_ref_image.cu
             patch_match.h patch_match.cc
             patch_match_cuda.h patch_match_cuda.cu
+            patch_match_cuda_owned.h patch_match_cuda_owned.cu
+            patch_match_calibration.h
+            owned_cuda_execution.h
         PUBLIC_LINK_LIBS
             colmap_mvs
             colmap_util_cuda
