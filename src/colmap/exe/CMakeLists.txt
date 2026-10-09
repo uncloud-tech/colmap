@@ -112,3 +112,17 @@ if(OWNED_PATCH_MATCH_DRIVER_ENABLED)
         LINK_LIBS colmap_exe colmap_mvs_cuda ${COLMAP_BOOST_HEADER_LIBS}
     )
 endif()
+
+option(OWNED_PATCH_MATCH_PAIR_DRIVER_ENABLED
+       "Build the experimental finite TWO-reference owned driver" OFF)
+if(OWNED_PATCH_MATCH_PAIR_DRIVER_ENABLED)
+    if(NOT CUDA_ENABLED OR NOT MVS_ENABLED OR HIP_ENABLED OR
+       NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR "Owned pair driver requires Linux CUDA MVS, not HIP")
+    endif()
+    COLMAP_ADD_EXECUTABLE(
+        NAME colmap_owned_pair
+        SRCS owned_pair.cc
+        LINK_LIBS colmap_exe colmap_mvs_cuda ${COLMAP_BOOST_HEADER_LIBS}
+    )
+endif()

@@ -1490,6 +1490,9 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
       }
 
       sweep_timer.Print(" Sweep " + std::to_string(sweep + 1));
+      if (sweep_observer_) {
+        sweep_observer_(iter + 1, sweep + 1);
+      }
     }
 
     iter_timer.Print("Iteration " + std::to_string(iter + 1));

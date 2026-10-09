@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "colmap/mvs/patch_match.h"
+#include "colmap/mvs/owned_pair_coordinator.h"
+#include "colmap/mvs/owned_pair_input.h"
+#include "colmap/mvs/owned_pair_output.h"
 
 #include "colmap/math/math.h"
 #include "colmap/mvs/consistency_graph.h"
@@ -137,12 +140,8 @@ void PatchMatch::Run() {
 
 #if !defined(COLMAP_HIP_ENABLED)
   if (execution_ == PatchMatchExecution::kOwnedCuda) {
-    THROW_CHECK(!owned_patch_match_cuda_) << "Owned instances run only once";
-    owned_patch_match_cuda_ =
-        std::make_unique<owned::PatchMatchCuda>(options_, problem_);
-    LOG(INFO) << "PATCH_MATCH_BACKEND actual=owned_cuda reference="
-              << problem_.ref_image_idx;
-    owned_patch_match_cuda_->Run();
+    PrepareOwned();
+    RunPreparedOwned();
     return;
   }
 #endif
@@ -150,10 +149,50 @@ void PatchMatch::Run() {
   patch_match_cuda_->Run();
 }
 
+void PatchMatch::PrepareOwned() {
+#if !defined(COLMAP_HIP_ENABLED)
+  THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
+  THROW_CHECK(!owned_patch_match_cuda_) << "Owned instances prepare only once";
+  Check();
+  owned_patch_match_cuda_ =
+      std::make_unique<owned::PatchMatchCuda>(options_, problem_);
+  LOG(INFO) << "PATCH_MATCH_BACKEND actual=owned_cuda reference="
+            << problem_.ref_image_idx;
+#else
+  THROW_CHECK(false) << "Owned lifecycle requires CUDA, not HIP";
+#endif
+}
+
+void PatchMatch::RunPreparedOwned() {
+#if !defined(COLMAP_HIP_ENABLED)
+  THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
+  THROW_CHECK_NOTNULL(owned_patch_match_cuda_.get());
+  THROW_CHECK(!owned_run_started_) << "Owned instances run only once";
+  owned_run_started_ = true;
+  owned_patch_match_cuda_->Run();
+  owned_run_completed_ = true;
+#else
+  THROW_CHECK(false) << "Owned lifecycle requires CUDA, not HIP";
+#endif
+}
+
+void PatchMatch::SetOwnedSweepObserver(
+    std::function<void(int, int)> observer) {
+#if !defined(COLMAP_HIP_ENABLED)
+  THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
+  THROW_CHECK_NOTNULL(owned_patch_match_cuda_.get());
+  THROW_CHECK(!owned_run_started_);
+  owned_patch_match_cuda_->SetSweepObserver(std::move(observer));
+#else
+  THROW_CHECK(false) << "Owned lifecycle requires CUDA, not HIP";
+#endif
+}
+
 DepthMap PatchMatch::GetDepthMap() const {
 #if !defined(COLMAP_HIP_ENABLED)
   if (execution_ == PatchMatchExecution::kOwnedCuda) {
     THROW_CHECK_NOTNULL(owned_patch_match_cuda_.get());
+    THROW_CHECK(owned_run_completed_) << "Owned result is not complete";
     return owned_patch_match_cuda_->GetDepthMap();
   }
 #endif
@@ -164,6 +203,7 @@ NormalMap PatchMatch::GetNormalMap() const {
 #if !defined(COLMAP_HIP_ENABLED)
   if (execution_ == PatchMatchExecution::kOwnedCuda) {
     THROW_CHECK_NOTNULL(owned_patch_match_cuda_.get());
+    THROW_CHECK(owned_run_completed_) << "Owned result is not complete";
     return owned_patch_match_cuda_->GetNormalMap();
   }
 #endif
@@ -174,6 +214,7 @@ Mat<float> PatchMatch::GetSelProbMap() const {
 #if !defined(COLMAP_HIP_ENABLED)
   if (execution_ == PatchMatchExecution::kOwnedCuda) {
     THROW_CHECK_NOTNULL(owned_patch_match_cuda_.get());
+    THROW_CHECK(owned_run_completed_) << "Owned result is not complete";
     return owned_patch_match_cuda_->GetSelProbMap();
   }
 #endif
@@ -185,6 +226,7 @@ ConsistencyGraph PatchMatch::GetConsistencyGraph() const {
 #if !defined(COLMAP_HIP_ENABLED)
   if (execution_ == PatchMatchExecution::kOwnedCuda) {
     THROW_CHECK_NOTNULL(owned_patch_match_cuda_.get());
+    THROW_CHECK(owned_run_completed_) << "Owned result is not complete";
     return ConsistencyGraph(ref_image.GetWidth(), ref_image.GetHeight(),
                              owned_patch_match_cuda_->GetConsistentImageIdxs());
   }
@@ -251,6 +293,32 @@ void PatchMatchController::Run() {
   thread_pool_->Wait();
 
   run_timer.PrintMinutes();
+}
+
+void PatchMatchController::RunOwnedPairJob(
+    owned::PairCoordinator& coordinator,
+    const size_t job,
+    const OwnedPairHooks& hooks) {
+  THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
+  THROW_CHECK(!owned_pair_);
+  owned_pair_ = &coordinator;
+  owned_pair_job_ = job;
+  owned_pair_hooks_ = hooks;
+  try {
+    coordinator.BeginPreparation(job);
+    ReadWorkspace();
+    ReadProblems();
+    THROW_CHECK_EQ(problems_.size(), 1);
+    ReadGpuIndices();
+    THROW_CHECK_EQ(gpu_indices_.size(), 1);
+    THROW_CHECK_GT(options_.num_threads, 0);
+    io_thread_pool_ = std::make_unique<ThreadPool>(options_.num_threads);
+    // Deliberately synchronous: the caller is the actual CUDA owner worker.
+    ProcessProblem(options_, 0);
+  } catch (...) {
+    coordinator.Cancel(job, std::current_exception());
+    throw;
+  }
 }
 
 void PatchMatchController::ReadWorkspace() {
@@ -432,13 +500,18 @@ void PatchMatchController::ReadGpuIndices() {
 void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
                                           const size_t problem_idx) {
   if (CheckIfStopped()) {
+    if (owned_pair_) {
+      THROW_CHECK(false) << "Owned pair stopped before solver";
+    }
     return;
   }
 
   const auto& model = workspace_->GetModel();
 
   auto& problem = problems_.at(problem_idx);
-  const int gpu_index = gpu_indices_.at(thread_pool_->GetThreadIndex());
+  const int gpu_index = owned_pair_
+                            ? gpu_indices_.front()
+                            : gpu_indices_.at(thread_pool_->GetThreadIndex());
   THROW_CHECK_GE(gpu_index, -1);
 
   const std::string& stereo_folder = workspace_->GetOptions().stereo_folder;
@@ -546,20 +619,39 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
       }
     }
 
+    if (owned_pair_ && owned_pair_hooks_.check_inputs) {
+      auto budget_problem = problem;
+      budget_problem.src_image_idxs = src_image_idxs;
+      owned_pair_hooks_.check_inputs(
+          owned_pair_job_, patch_match_options, budget_problem);
+    }
+
     // Read images in parallel using the shared I/O thread pool.
     std::vector<std::shared_future<void>> futures;
     futures.reserve(valid_image_idxs.size());
-    for (const auto image_idx : valid_image_idxs) {
-      futures.push_back(io_thread_pool_->AddTask([&, image_idx]() {
-        images.at(image_idx).SetBitmap(workspace_->GetBitmap(image_idx));
-        if (options.geom_consistency) {
-          depth_maps.at(image_idx) = workspace_->GetDepthMap(image_idx);
-          normal_maps.at(image_idx) = workspace_->GetNormalMap(image_idx);
-        }
-      }));
+    std::exception_ptr input_error;
+    try {
+      for (const auto image_idx : valid_image_idxs) {
+        futures.push_back(io_thread_pool_->AddTask([&, image_idx]() {
+          images.at(image_idx).SetBitmap(workspace_->GetBitmap(image_idx));
+          if (options.geom_consistency) {
+            depth_maps.at(image_idx) = workspace_->GetDepthMap(image_idx);
+            normal_maps.at(image_idx) = workspace_->GetNormalMap(image_idx);
+          }
+        }));
+      }
+    } catch (...) {
+      if (!owned_pair_) throw;
+      input_error = std::current_exception();
+      owned_pair_->Cancel(owned_pair_job_, input_error);
     }
-    for (auto& future : futures) {
-      future.get();
+    if (owned_pair_) {
+      owned::DrainPairInputs(io_thread_pool_, futures, input_error,
+                            [this](std::exception_ptr error) noexcept {
+                              owned_pair_->Cancel(owned_pair_job_, error);
+                            });
+    } else {
+      for (auto& future : futures) future.get();
     }
 
     problem.src_image_idxs = src_image_idxs;
@@ -567,6 +659,49 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
 
   problem.Print();
   patch_match_options.Print();
+
+  if (owned_pair_) {
+    // Declared outside try: cancellation is published before engine/input
+    // owners unwind, including constructor and output failures.
+    std::unique_ptr<PatchMatch> patch_match;
+    try {
+      if (owned_pair_hooks_.metadata) {
+        owned_pair_hooks_.metadata(owned_pair_job_, patch_match_options, problem);
+      }
+      patch_match =
+          std::make_unique<PatchMatch>(patch_match_options, problem, execution_);
+      patch_match->PrepareOwned();
+      patch_match->SetOwnedSweepObserver([this](int iteration, int sweep) {
+        if (owned_pair_hooks_.sweep) {
+          owned_pair_hooks_.sweep(owned_pair_job_, iteration, sweep);
+        }
+      });
+      // No inactive second decode pool is retained at the both-ready barrier.
+      io_thread_pool_.reset();
+      owned_pair_->ReadyAndWait(owned_pair_job_);
+      patch_match->RunPreparedOwned();
+      owned_pair_->SolverDone(owned_pair_job_);
+      owned_pair_->BeginOutput(owned_pair_job_);
+      if (owned_pair_hooks_.output_phase) {
+        owned_pair_hooks_.output_phase(owned_pair_job_, "depth_begin");
+      }
+      owned::WriteCheckedMat(patch_match->GetDepthMap(), depth_map_path);
+      if (owned_pair_hooks_.output_phase) {
+        owned_pair_hooks_.output_phase(owned_pair_job_, "depth_end");
+        owned_pair_hooks_.output_phase(owned_pair_job_, "normal_begin");
+      }
+      owned::WriteCheckedMat(patch_match->GetNormalMap(), normal_map_path);
+      if (owned_pair_hooks_.output_phase) {
+        owned_pair_hooks_.output_phase(owned_pair_job_, "normal_end");
+      }
+      owned_pair_->EndOutput(owned_pair_job_);
+      owned_pair_->AwaitOutputs(owned_pair_job_);
+    } catch (...) {
+      owned_pair_->Cancel(owned_pair_job_, std::current_exception());
+      throw;
+    }
+    return;
+  }
 
   PatchMatch patch_match(patch_match_options, problem, execution_);
   patch_match.Run();

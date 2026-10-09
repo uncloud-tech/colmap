@@ -16,6 +16,7 @@
 #include "colmap/mvs/patch_match.h"
 #include "colmap/util/cuda_to_hip.h"
 
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <vector>
@@ -32,6 +33,9 @@ class PatchMatchCuda {
   ~PatchMatchCuda();
 
   void Run();
+  void SetSweepObserver(std::function<void(int, int)> observer) {
+    sweep_observer_ = std::move(observer);
+  }
 
   DepthMap GetDepthMap() const;
   NormalMap GetNormalMap() const;
@@ -119,6 +123,8 @@ class PatchMatchCuda {
   // Shared memory is too small to hold local state for each thread,
   // so this is workspace memory in global memory.
   std::unique_ptr<GpuMat<float>> global_workspace_;
+  // Host-only telemetry; never passed to a kernel or active in the ONE path.
+  std::function<void(int, int)> sweep_observer_;
 };
 
 }  // namespace owned

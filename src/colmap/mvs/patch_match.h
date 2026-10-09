@@ -13,6 +13,7 @@
 #endif
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -22,6 +23,9 @@ namespace mvs {
 class ConsistencyGraph;
 class PatchMatchCuda;
 class Workspace;
+namespace owned {
+class PairCoordinator;
+}
 #if !defined(COLMAP_HIP_ENABLED)
 namespace owned {
 class PatchMatchCuda;
@@ -64,6 +68,12 @@ class PatchMatch {
   // Run the patch match algorithm.
   void Run();
 
+  // Experiment-only owned lifecycle. Prepare drains constructor work; solver
+  // dispatch can then be coordinated without constructing another backend.
+  void PrepareOwned();
+  void RunPreparedOwned();
+  void SetOwnedSweepObserver(std::function<void(int, int)> observer);
+
   // Get the computed values after running the algorithm.
   DepthMap GetDepthMap() const;
   NormalMap GetNormalMap() const;
@@ -80,6 +90,8 @@ class PatchMatch {
   std::unique_ptr<PatchMatchCuda> patch_match_cuda_;
 #if !defined(COLMAP_HIP_ENABLED)
   std::unique_ptr<owned::PatchMatchCuda> owned_patch_match_cuda_;
+  bool owned_run_started_ = false;
+  bool owned_run_completed_ = false;
 #endif
 };
 
@@ -116,6 +128,12 @@ class PatchMatch {
 
 class PatchMatchController : public BaseController {
  public:
+  struct OwnedPairHooks {
+    std::function<void(size_t, const PatchMatchOptions&, const PatchMatch::Problem&)> check_inputs;
+    std::function<void(size_t, const PatchMatchOptions&, const PatchMatch::Problem&)> metadata;
+    std::function<void(size_t, int, int)> sweep;
+    std::function<void(size_t, const char*)> output_phase;
+  };
   PatchMatchController(const PatchMatchOptions& options,
                        const std::filesystem::path& workspace_path,
                        const std::string& workspace_format,
@@ -123,6 +141,11 @@ class PatchMatchController : public BaseController {
                        const std::filesystem::path& config_path = "",
                        PatchMatchExecution execution = PatchMatchExecution::kStock);
   void Run();
+  // Synchronous owner-thread path; caller retains controller through join and
+  // retires its reservation only after this controller has been destroyed.
+  void RunOwnedPairJob(owned::PairCoordinator& coordinator,
+                       size_t job,
+                       const OwnedPairHooks& hooks);
 
  private:
   void ReadWorkspace();
@@ -136,6 +159,10 @@ class PatchMatchController : public BaseController {
   const std::string workspace_format_;
   const std::string pmvs_option_name_;
   const std::filesystem::path config_path_;
+
+  owned::PairCoordinator* owned_pair_ = nullptr;
+  size_t owned_pair_job_ = 0;
+  OwnedPairHooks owned_pair_hooks_;
 
   std::unique_ptr<ThreadPool> thread_pool_;
   std::unique_ptr<ThreadPool> io_thread_pool_;

@@ -114,6 +114,13 @@ if(CUDA_ENABLED)
             patch_match_cuda_owned.h patch_match_cuda_owned.cu
             patch_match_calibration.h
             owned_cuda_execution.h
+            owned_pair_coordinator.h
+            owned_pair_validation.h
+            owned_pair_input.h
+            owned_pair_image.h
+            owned_pair_output.h
+            owned_pair_events.h
+            owned_pair_run.h
         PUBLIC_LINK_LIBS
             colmap_mvs
             colmap_util_cuda
