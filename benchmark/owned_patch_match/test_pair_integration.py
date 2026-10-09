@@ -74,6 +74,9 @@ struct OptionManager:BaseOptionManager { explicit OptionManager(bool b):BaseOpti
  void AddPatchMatchStereoOptions(){} bool Read(const std::filesystem::path&,bool){return true;} };
 }
 ''',
+                # The production driver includes this to make Workspace
+                # complete; keep this unrelated host-interface test isolated.
+                'colmap/mvs/workspace.h': '#pragma once\n',
                 'colmap/mvs/patch_match.h': r'''
 #pragma once
 #include "colmap/mvs/patch_match_options.h"

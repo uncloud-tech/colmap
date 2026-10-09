@@ -6,6 +6,7 @@
 #include "colmap/mvs/owned_pair_run.h"
 #include "colmap/mvs/owned_pair_validation.h"
 #include "colmap/mvs/patch_match.h"
+#include "colmap/mvs/workspace.h"
 #include "colmap/util/file.h"
 #include "colmap/util/logging.h"
 #include "colmap/util/string.h"
