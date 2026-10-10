@@ -29,9 +29,18 @@ GpuMatPRNG::GpuMatPRNG(const int width, const int height)
 
 #if !defined(COLMAP_HIP_ENABLED)
 GpuMatPRNG::GpuMatPRNG(const int width,
-                       const int height,
-                       const cudaStream_t stream)
+                     const int height,
+                     const cudaStream_t stream)
     : GpuMat(width, height) {
+  Reinitialize(stream);
+}
+
+GpuMatPRNG::GpuMatPRNG(const int width,
+                     const int height,
+                     UninitializedTag)
+    : GpuMat(width, height) {}
+
+void GpuMatPRNG::Reinitialize(const cudaStream_t stream) {
   owned::ScopedStreamCompletion completion(stream);
   InitRandomStateKernel<<<gridSize_, blockSize_, 0, stream>>>(View());
   completion.Wait();
