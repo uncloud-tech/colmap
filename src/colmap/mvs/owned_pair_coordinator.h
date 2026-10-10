@@ -226,6 +226,7 @@ class PairCoordinator {
       AwaitLocked(lock, "dispatch", job, [&]() { return permit_[job]; },
                   deadline);
       state_[job] = JobState::kRunning;
+      solver_active_[job] = true;
     }
     Emit(job, "solver_start");
   }
@@ -241,6 +242,8 @@ class PairCoordinator {
         ThrowState(job, "SolverDone", state_[job]);
       }
       state_[job] = JobState::kComputeDone;
+      solver_active_[job] = false;
+      cv_.notify_all();
       pending.push_back(MakeEventLocked(job, "solver_end"));
       if (dispatch_ == PairDispatch::kSerial && job == 0) {
         permit_[1] = true;
@@ -323,6 +326,34 @@ class PairCoordinator {
       event = MakeEventLocked(job, "cancelled");
     }
     InvokeSinkGuarded(event);
+  }
+
+  // Failure-only ownership rendezvous. Publish cancellation FIRST so no new
+  // solver can dispatch, then prove local CUDA completion without holding the
+  // mutex. A running peer must finish or enter this same drain path before
+  // either owner may unwind its retained buffers. Never-started peers have no
+  // active solver and need not arrive. Unknown completion or timeout must stop
+  // the process, NOT throw through owners and accidentally free live storage.
+  template <typename Drain>
+  void CancelAndAwaitCleanup(size_t job,
+                             std::exception_ptr error,
+                             Drain&& drain) noexcept {
+    Cancel(job, error);
+    try {
+      RequireJob(job);
+      drain();
+      std::unique_lock<std::mutex> lock(mutex_);
+      solver_active_[job] = false;
+      cv_.notify_all();
+      const auto deadline = Clock::now() + timeout_;
+      if (!cv_.wait_until(lock, deadline, [&] {
+            return !solver_active_[0] && !solver_active_[1];
+          })) {
+        std::terminate();
+      }
+    } catch (...) {
+      std::terminate();
+    }
   }
 
   // Called AFTER the real job resources have been destroyed. Supports
@@ -537,6 +568,7 @@ class PairCoordinator {
   bool ready_[2] = {false, false};
   bool both_ready_closed_ = false;
   bool permit_[2] = {false, false};
+  bool solver_active_[2] = {false, false};
   bool output_in_use_ = false;
   size_t output_owner_ = kNoJob;
   bool output_done_[2] = {false, false};

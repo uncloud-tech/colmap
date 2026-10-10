@@ -75,6 +75,8 @@ class PatchMatchCuda {
  void InitSourceImages() { if(fake::fail_init) throw std::runtime_error("injected init failure"); }
  void InitTransforms() {}
  void InitWorkspaceMemory() {}
+ void InitRotationStorage() {}
+ void EmitRotationAllocations() {}
  private:
  PatchMatchOptions options_; PatchMatch::Problem problem_;
  std::unique_ptr<OwnedCudaStream> stream_;

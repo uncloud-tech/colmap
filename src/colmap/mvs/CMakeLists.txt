@@ -114,6 +114,7 @@ if(CUDA_ENABLED)
             patch_match_cuda_owned.h patch_match_cuda_owned.cu
             patch_match_calibration.h
             owned_cuda_execution.h
+            owned_rotation_storage.h
             owned_pair_coordinator.h
             owned_pair_validation.h
             owned_pair_input.h

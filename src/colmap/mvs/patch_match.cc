@@ -176,6 +176,14 @@ void PatchMatch::RunPreparedOwned() {
 #endif
 }
 
+void PatchMatch::DrainOwned() noexcept {
+#if !defined(COLMAP_HIP_ENABLED)
+  if (owned_patch_match_cuda_) {
+    owned_patch_match_cuda_->DrainForCleanup();
+  }
+#endif
+}
+
 void PatchMatch::SetOwnedSweepObserver(
     std::function<void(int, int)> observer) {
 #if !defined(COLMAP_HIP_ENABLED)
@@ -697,7 +705,10 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
       owned_pair_->EndOutput(owned_pair_job_);
       owned_pair_->AwaitOutputs(owned_pair_job_);
     } catch (...) {
-      owned_pair_->Cancel(owned_pair_job_, std::current_exception());
+      owned_pair_->CancelAndAwaitCleanup(
+          owned_pair_job_, std::current_exception(), [&] {
+            if (patch_match) patch_match->DrainOwned();
+          });
       throw;
     }
     return;

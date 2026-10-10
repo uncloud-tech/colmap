@@ -4,6 +4,7 @@
 
 #if !defined(COLMAP_HIP_ENABLED)
 #include "colmap/mvs/owned_cuda_execution.h"
+#include "colmap/mvs/owned_rotation_storage.h"
 #include "colmap/mvs/patch_match_calibration.h"
 
 #include "colmap/mvs/cuda_texture.h"
@@ -33,6 +34,11 @@ class PatchMatchCuda {
   ~PatchMatchCuda();
 
   void Run();
+  void DrainForCleanup() noexcept {
+    if (stream_) {
+      stream_->DrainBeforeDestruction();
+    }
+  }
   void SetSweepObserver(std::function<void(int, int)> observer) {
     sweep_observer_ = std::move(observer);
   }
@@ -59,6 +65,8 @@ class PatchMatchCuda {
   void InitSourceImages();
   void InitTransforms();
   void InitWorkspaceMemory();
+  void InitRotationStorage();
+  void EmitRotationAllocations();
 
   // Rotate reference image by 90 degrees in counter-clockwise direction.
   void Rotate();
@@ -111,14 +119,15 @@ class PatchMatchCuda {
   float ref_inv_K_host_[4][4];
 
   // Data for reference image.
-  std::unique_ptr<GpuMatRefImage> ref_image_;
-  std::unique_ptr<GpuMat<float>> depth_map_;
-  std::unique_ptr<GpuMat<float>> normal_map_;
-  std::unique_ptr<GpuMat<float>> sel_prob_map_;
-  std::unique_ptr<GpuMat<float>> prev_sel_prob_map_;
-  std::unique_ptr<GpuMat<float>> cost_map_;
-  std::unique_ptr<GpuMatPRNG> rand_state_map_;
-  std::unique_ptr<GpuMat<uint8_t>> consistency_mask_;
+  OwnedRotationLayout rotation_layout_;
+  OwnedRotationPair<GpuMatRefImage> ref_image_;
+  OwnedRotationPair<GpuMat<float>> depth_map_;
+  OwnedRotationPair<GpuMat<float>> normal_map_;
+  OwnedRotationPair<GpuMat<float>> sel_prob_map_;
+  OwnedRotationPair<GpuMat<float>> prev_sel_prob_map_;
+  OwnedRotationPair<GpuMat<float>> cost_map_;
+  OwnedRotationPair<GpuMatPRNG> rand_state_map_;
+  OwnedRotationPair<GpuMat<uint8_t>> consistency_mask_;
 
   // Shared memory is too small to hold local state for each thread,
   // so this is workspace memory in global memory.

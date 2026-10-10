@@ -72,6 +72,8 @@ class PatchMatch {
   // dispatch can then be coordinated without constructing another backend.
   void PrepareOwned();
   void RunPreparedOwned();
+  // Failure-path completion proof while this instance still owns its buffers.
+  void DrainOwned() noexcept;
   void SetOwnedSweepObserver(std::function<void(int, int)> observer);
 
   // Get the computed values after running the algorithm.

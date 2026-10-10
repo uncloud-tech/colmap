@@ -19,6 +19,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
+#include <locale>
 #include <sstream>
 
 // The number of threads per Cuda thread block. Warning: Do not change this
@@ -1281,6 +1282,8 @@ PatchMatchCuda::PatchMatchCuda(const PatchMatchOptions& options,
     InitTransforms();
     InitWorkspaceMemory();
     stream_->Synchronize();
+    InitRotationStorage();
+    EmitRotationAllocations();
   } catch (...) {
     // This class's destructor does not run on constructor failure. Fence here
     // before member texture/array/buffer destructors can run.
@@ -1317,6 +1320,9 @@ Mat<float> PatchMatchCuda::GetSelProbMap() const {
 }
 
 std::vector<int> PatchMatchCuda::GetConsistentImageIdxs() const {
+  // The baseline had an empty placeholder until the last filtered sweep.
+  // Retained but unwritten mask allocations must not become observable data.
+  if (!options_.filter || options_.num_iterations == 0) return {};
   stream_->Activate();
   const Mat<uint8_t> mask = consistency_mask_->CopyToMat(stream_->Get());
   std::vector<int> consistent_image_idxs;
@@ -1432,10 +1438,6 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 
       if (last_sweep) {
         if (options_.filter) {
-          consistency_mask_ =
-              std::make_unique<GpuMat<uint8_t>>(cost_map_->GetWidth(),
-                                                cost_map_->GetHeight(),
-                                                cost_map_->GetDepth());
           consistency_mask_->FillWithScalar(0, stream_->Get());
         }
         if (options_.geom_consistency) {
@@ -1481,12 +1483,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 
       // Rotate selected image map.
       if (last_sweep && options_.filter) {
-        std::unique_ptr<GpuMat<uint8_t>> rot_consistency_mask_(
-            new GpuMat<uint8_t>(cost_map_->GetWidth(),
-                                cost_map_->GetHeight(),
-                                cost_map_->GetDepth()));
-        consistency_mask_->Rotate(rot_consistency_mask_.get(), stream_->Get());
-        consistency_mask_.swap(rot_consistency_mask_);
+        consistency_mask_.Alternate()->Rotate(consistency_mask_.Current(), stream_->Get());
       }
 
       sweep_timer.Print(" Sweep " + std::to_string(sweep + 1));
@@ -1537,8 +1534,11 @@ void PatchMatchCuda::InitRefImage() {
   ref_width_ = ref_image.GetWidth();
   ref_height_ = ref_image.GetHeight();
 
+  rotation_layout_ = BuildOwnedRotationLayout(
+      ref_width_, ref_height_, problem_.src_image_idxs.size());
+
   // Upload to device and filter.
-  ref_image_ = std::make_unique<GpuMatRefImage>(ref_width_, ref_height_);
+  ref_image_.Set(0, std::make_unique<GpuMatRefImage>(ref_width_, ref_height_));
   ref_image_->Filter(ref_image.GetBitmap().RowMajorData().data(),
                      options_.window_radius,
                      options_.window_step,
@@ -1770,9 +1770,9 @@ void PatchMatchCuda::InitTransforms() {
 }
 
 void PatchMatchCuda::InitWorkspaceMemory() {
-  rand_state_map_ = std::make_unique<GpuMatPRNG>(ref_width_, ref_height_, stream_->Get());
+  rand_state_map_.Set(0, std::make_unique<GpuMatPRNG>(ref_width_, ref_height_, stream_->Get()));
 
-  depth_map_ = std::make_unique<GpuMat<float>>(ref_width_, ref_height_);
+  depth_map_.Set(0, std::make_unique<GpuMat<float>>(ref_width_, ref_height_));
   if (options_.geom_consistency) {
     const DepthMap& init_depth_map =
         problem_.depth_maps->at(problem_.ref_image_idx);
@@ -1780,30 +1780,28 @@ void PatchMatchCuda::InitWorkspaceMemory() {
                              init_depth_map.GetWidth() * sizeof(float), stream_->Get());
   } else {
     depth_map_->FillWithRandomNumbers(
-        options_.depth_min, options_.depth_max, *rand_state_map_, stream_->Get());
+        options_.depth_min, options_.depth_max, *rand_state_map_.Current(), stream_->Get());
   }
 
-  normal_map_ = std::make_unique<GpuMat<float>>(ref_width_, ref_height_, 3);
+  normal_map_.Set(0, std::make_unique<GpuMat<float>>(ref_width_, ref_height_, 3));
 
   // Note that it is not necessary to keep the selection probability map in
   // memory for all pixels. Theoretically, it is possible to incorporate
   // the temporary selection probabilities in the global_workspace_.
   // However, it is useful to keep the probabilities for the entire image
   // in memory, so that it can be exported.
-  sel_prob_map_ = std::make_unique<GpuMat<float>>(
-      ref_width_, ref_height_, problem_.src_image_idxs.size());
-  prev_sel_prob_map_ = std::make_unique<GpuMat<float>>(
-      ref_width_, ref_height_, problem_.src_image_idxs.size());
+  sel_prob_map_.Set(0, std::make_unique<GpuMat<float>>(
+      ref_width_, ref_height_, problem_.src_image_idxs.size()));
+  prev_sel_prob_map_.Set(0, std::make_unique<GpuMat<float>>(
+      ref_width_, ref_height_, problem_.src_image_idxs.size()));
   prev_sel_prob_map_->FillWithScalar(0.5f, stream_->Get());
 
-  cost_map_ = std::make_unique<GpuMat<float>>(
-      ref_width_, ref_height_, problem_.src_image_idxs.size());
+  cost_map_.Set(0, std::make_unique<GpuMat<float>>(
+      ref_width_, ref_height_, problem_.src_image_idxs.size()));
 
   const int ref_max_dim = std::max(ref_width_, ref_height_);
   global_workspace_ = std::make_unique<GpuMat<float>>(
       ref_max_dim, problem_.src_image_idxs.size(), 2);
-
-  consistency_mask_ = std::make_unique<GpuMat<uint8_t>>(0, 0, 0);
 
   ComputeCudaConfig();
 
@@ -1818,75 +1816,99 @@ void PatchMatchCuda::InitWorkspaceMemory() {
   }
 }
 
+void PatchMatchCuda::InitRotationStorage() {
+  static_assert(sizeof(curandState) == 48, "Rotation layout requires XORWOW48");
+  const size_t sources = problem_.src_image_idxs.size();
+  // Genuine swapped-shape allocations, even for square images. No additional
+  // initialization: preserve all original work, including overwritten PRNG init.
+  rand_state_map_.Set(1, std::make_unique<GpuMatPRNG>(
+      ref_height_, ref_width_, GpuMatPRNG::UninitializedTag{}));
+  depth_map_.Set(1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_));
+  normal_map_.Set(1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_, 3));
+  ref_image_.Set(1, std::make_unique<GpuMatRefImage>(ref_height_, ref_width_));
+  sel_prob_map_.Set(1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_, sources));
+  prev_sel_prob_map_.Set(1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_, sources));
+  cost_map_.Set(1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_, sources));
+  consistency_mask_.Set(0, std::make_unique<GpuMat<uint8_t>>(ref_width_, ref_height_, sources));
+  consistency_mask_.Set(1, std::make_unique<GpuMat<uint8_t>>(ref_height_, ref_width_, sources));
+}
+
+void PatchMatchCuda::EmitRotationAllocations() {
+  THROW_CHECK_GE(problem_.ref_image_idx, 0);
+  const auto emit = [&](const RotationSlotLayout& slot, const auto& mat) {
+    THROW_CHECK_EQ(slot.width, mat.GetWidth());
+    THROW_CHECK_EQ(slot.height, mat.GetHeight());
+    THROW_CHECK_EQ(slot.depth, mat.GetDepth());
+    THROW_CHECK_EQ(slot.element_bytes, sizeof(*mat.GetPtr()));
+    const auto record = MakeRotationAllocationRecord(slot, mat.GetPitch());
+    std::ostringstream line;
+    line.imbue(std::locale::classic());
+    line << "OWNED_ROTATION_ALLOCATION reference=" << problem_.ref_image_idx
+         << " role=" << RotationRoleName(record.role)
+         << " parity=" << record.parity
+         << " width=" << record.width << " height=" << record.height
+         << " depth=" << record.depth << " element_bytes=" << record.element_bytes
+         << " pitch_bytes=" << record.pitch_bytes
+         << " requested_span_bytes=" << record.requested_span_bytes
+         << " pitched_span_bytes=" << record.pitched_span_bytes
+         << " phase=" << record.lifetime_phase;
+    LOG(INFO) << line.str();
+  };
+  for (const auto& slot : rotation_layout_.slots) {
+    const auto p = slot.parity;
+    switch (slot.role) {
+      case RotationRole::kPrng: emit(slot, *rand_state_map_.At(p)); break;
+      case RotationRole::kDepth: emit(slot, *depth_map_.At(p)); break;
+      case RotationRole::kNormal: emit(slot, *normal_map_.At(p)); break;
+      case RotationRole::kRefImage: emit(slot, *ref_image_.At(p)->image); break;
+      case RotationRole::kRefSum: emit(slot, *ref_image_.At(p)->sum_image); break;
+      case RotationRole::kRefSquaredSum: emit(slot, *ref_image_.At(p)->squared_sum_image); break;
+      case RotationRole::kSelectionCurrent: emit(slot, *sel_prob_map_.At(p)); break;
+      case RotationRole::kSelectionPrevious: emit(slot, *prev_sel_prob_map_.At(p)); break;
+      case RotationRole::kCost: emit(slot, *cost_map_.At(p)); break;
+      case RotationRole::kMask: emit(slot, *consistency_mask_.At(p)); break;
+      case RotationRole::kWorkspace: emit(slot, *global_workspace_); break;
+    }
+  }
+}
+
 void PatchMatchCuda::Rotate() {
   rotation_in_half_pi_ = (rotation_in_half_pi_ + 1) % 4;
 
-  size_t width;
-  size_t height;
-  if (rotation_in_half_pi_ % 2 == 0) {
-    width = ref_width_;
-    height = ref_height_;
-  } else {
-    width = ref_height_;
-    height = ref_width_;
-  }
+  // Preserve initialization even though rotation overwrites its result.
+  rand_state_map_.Alternate()->Reinitialize(stream_->Get());
+  rand_state_map_->Rotate(rand_state_map_.Alternate(), stream_->Get());
+  rand_state_map_.Flip();
 
-  // Rotate random map.
-  {
-    std::unique_ptr<GpuMatPRNG> rotated_rand_state_map(
-        new GpuMatPRNG(width, height, stream_->Get()));
-    rand_state_map_->Rotate(rotated_rand_state_map.get(), stream_->Get());
-    rand_state_map_.swap(rotated_rand_state_map);
-  }
+  depth_map_->Rotate(depth_map_.Alternate(), stream_->Get());
+  depth_map_.Flip();
 
-  // Rotate depth map.
-  {
-    std::unique_ptr<GpuMat<float>> rotated_depth_map(
-        new GpuMat<float>(width, height));
-    depth_map_->Rotate(rotated_depth_map.get(), stream_->Get());
-    depth_map_.swap(rotated_depth_map);
-  }
+  RotateNormalMap<<<elem_wise_grid_size_, elem_wise_block_size_, 0, stream_->Get()>>>(
+      normal_map_->View());
+  normal_map_->Rotate(normal_map_.Alternate(), stream_->Get());
+  normal_map_.Flip();
 
-  // Rotate normal map.
-  {
-    RotateNormalMap<<<elem_wise_grid_size_, elem_wise_block_size_, 0, stream_->Get()>>>(
-        normal_map_->View());
-    std::unique_ptr<GpuMat<float>> rotated_normal_map(
-        new GpuMat<float>(width, height, 3));
-    normal_map_->Rotate(rotated_normal_map.get(), stream_->Get());
-    normal_map_.swap(rotated_normal_map);
-  }
+  ref_image_->image->Rotate(ref_image_.Alternate()->image.get(), stream_->Get());
+  ref_image_->sum_image->Rotate(ref_image_.Alternate()->sum_image.get(), stream_->Get());
+  ref_image_->squared_sum_image->Rotate(
+      ref_image_.Alternate()->squared_sum_image.get(), stream_->Get());
+  ref_image_.Flip();
+  BindRefImageTexture();
 
-  // Rotate reference image.
-  {
-    std::unique_ptr<GpuMatRefImage> rotated_ref_image(
-        new GpuMatRefImage(width, height));
-    ref_image_->image->Rotate(rotated_ref_image->image.get(), stream_->Get());
-    ref_image_->sum_image->Rotate(rotated_ref_image->sum_image.get(), stream_->Get());
-    ref_image_->squared_sum_image->Rotate(
-        rotated_ref_image->squared_sum_image.get(), stream_->Get());
-    ref_image_.swap(rotated_ref_image);
-    BindRefImageTexture();
-  }
+  // Four separate allocations: rotate completed current into alternate previous;
+  // the next sweep overwrites alternate current before reading its contents.
+  sel_prob_map_->Rotate(prev_sel_prob_map_.Alternate(), stream_->Get());
+  prev_sel_prob_map_.Flip();
+  sel_prob_map_.Flip();
 
-  // Rotate selection probability map.
-  prev_sel_prob_map_ = std::make_unique<GpuMat<float>>(
-      width, height, problem_.src_image_idxs.size());
-  sel_prob_map_->Rotate(prev_sel_prob_map_.get(), stream_->Get());
-  sel_prob_map_ = std::make_unique<GpuMat<float>>(
-      width, height, problem_.src_image_idxs.size());
+  cost_map_->Rotate(cost_map_.Alternate(), stream_->Get());
+  cost_map_.Flip();
 
-  // Rotate cost map.
-  {
-    std::unique_ptr<GpuMat<float>> rotated_cost_map(
-        new GpuMat<float>(width, height, problem_.src_image_idxs.size()));
-    cost_map_->Rotate(rotated_cost_map.get(), stream_->Get());
-    cost_map_.swap(rotated_cost_map);
-  }
+  // Only parity changes here. The final filtered sweep rotates the mask from
+  // Alternate into Current after all ordinary rotation work, as in the baseline.
+  consistency_mask_.Flip();
 
   // The next launch snapshots the new orientation; no module write.
-
-  // Recompute Cuda configuration for rotated reference image.
   ComputeCudaConfig();
 }
 
