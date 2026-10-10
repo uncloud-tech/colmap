@@ -28,6 +28,7 @@ class CudaArrayLayeredTexture {
       const cudaTextureDesc& texture_desc,
       const GpuMat<T>& mat,
       cudaStream_t stream);
+  void CopyFromGpuMat(const GpuMat<T>& mat, cudaStream_t stream);
   static std::unique_ptr<CudaArrayLayeredTexture<T>> FromHostArray(
       const cudaTextureDesc& texture_desc,
       size_t width, size_t height, size_t depth,
@@ -116,16 +117,25 @@ CudaArrayLayeredTexture<T>::FromGpuMat(const cudaTextureDesc& texture_desc,
                                        const cudaStream_t stream) {
   auto array = std::make_unique<CudaArrayLayeredTexture<T>>(
       texture_desc, mat.GetWidth(), mat.GetHeight(), mat.GetDepth());
+  array->CopyFromGpuMat(mat, stream);
+  return array;
+}
+
+template <typename T>
+void CudaArrayLayeredTexture<T>::CopyFromGpuMat(
+    const GpuMat<T>& mat, const cudaStream_t stream) {
+  THROW_CHECK_EQ(mat.GetWidth(), width_);
+  THROW_CHECK_EQ(mat.GetHeight(), height_);
+  THROW_CHECK_EQ(mat.GetDepth(), depth_);
   owned::ScopedStreamCompletion completion(stream);
   cudaMemcpy3DParms params{};
   params.extent = make_cudaExtent(mat.GetWidth(), mat.GetHeight(), mat.GetDepth());
   params.kind = cudaMemcpyDeviceToDevice;
   params.srcPtr = make_cudaPitchedPtr(
       (void*)mat.GetPtr(), mat.GetPitch(), mat.GetWidth(), mat.GetHeight());
-  params.dstArray = array->array_;
+  params.dstArray = array_;
   CUDA_SAFE_CALL(cudaMemcpy3DAsync(&params, stream));
   completion.Wait();
-  return array;
 }
 
 template <typename T>
@@ -173,8 +183,14 @@ CudaArrayLayeredTexture<T>::CudaArrayLayeredTexture(
   resource_desc_.resType = cudaResourceTypeArray;
   resource_desc_.res.array.array = array_;
 
-  CUDA_SAFE_CALL(cudaCreateTextureObject(
-      &texture_, &resource_desc_, &texture_desc_, nullptr));
+  try {
+    CUDA_SAFE_CALL(cudaCreateTextureObject(
+        &texture_, &resource_desc_, &texture_desc_, nullptr));
+  } catch (...) {
+    // The destructor is not called if texture creation fails after allocation.
+    (void)cudaFreeArray(array_);
+    throw;
+  }
 }
 
 template <typename T>

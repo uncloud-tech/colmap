@@ -34,7 +34,7 @@ class RotationReuse(unittest.TestCase):
         start = '__device__'
         self.assertEqual(self.cu[self.cu.index(start):self.cu.index(marker)],
                          self.base[self.base.index(start):self.base.index(marker)])
-        for name in ('BindRefImageTexture', 'InitSourceImages', 'InitTransforms', 'ComputeCudaConfig'):
+        for name in ('InitSourceImages', 'InitTransforms', 'ComputeCudaConfig'):
             signature = 'void PatchMatchCuda::' + name + '()'
             self.assertEqual(body(self.cu, signature), body(self.base, signature))
         stock = 'src/colmap/mvs/patch_match_cuda.cu'

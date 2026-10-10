@@ -93,7 +93,10 @@ class PatchMatchCuda {
   int rotation_in_half_pi_;
 
   // Reference and source image input data.
-  std::unique_ptr<CudaArrayLayeredTexture<uint8_t>> ref_image_texture_;
+  // Two layered arrays, W*H bytes each (logical resident bytes: 2*W*H).
+  // The active pointer borrows the parity owner; both survive until drain.
+  std::unique_ptr<CudaArrayLayeredTexture<uint8_t>> ref_image_textures_[2];
+  CudaArrayLayeredTexture<uint8_t>* ref_image_texture_ = nullptr;
   std::unique_ptr<CudaArrayLayeredTexture<uint8_t>> src_images_texture_;
   std::unique_ptr<CudaArrayLayeredTexture<float>> src_depth_maps_texture_;
 

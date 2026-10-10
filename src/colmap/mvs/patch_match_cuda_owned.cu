@@ -1516,16 +1516,11 @@ void PatchMatchCuda::ComputeCudaConfig() {
 }
 
 void PatchMatchCuda::BindRefImageTexture() {
-  cudaTextureDesc texture_desc;
-  memset(&texture_desc, 0, sizeof(texture_desc));
-  texture_desc.addressMode[0] = cudaAddressModeBorder;
-  texture_desc.addressMode[1] = cudaAddressModeBorder;
-  texture_desc.addressMode[2] = cudaAddressModeBorder;
-  texture_desc.filterMode = cudaFilterModePoint;
-  texture_desc.readMode = cudaReadModeNormalizedFloat;
-  texture_desc.normalizedCoords = false;
-  ref_image_texture_ = CudaArrayLayeredTexture<uint8_t>::FromGpuMat(
-      texture_desc, *ref_image_->image, stream_->Get());
+  ref_image_texture_ = ref_image_textures_[rotation_in_half_pi_ % 2].get();
+  // The pre-Rotate owner synchronization completes all previous readers.
+  // Rotated-image writes precede this copy on the same stream; the helper
+  // explicitly waits for completion, including the final rotation's refresh.
+  ref_image_texture_->CopyFromGpuMat(*ref_image_->image, stream_->Get());
 }
 
 void PatchMatchCuda::InitRefImage() {
@@ -1545,6 +1540,19 @@ void PatchMatchCuda::InitRefImage() {
                      options_.sigma_spatial,
                      options_.sigma_color, stream_->Get());
 
+  cudaTextureDesc texture_desc;
+  memset(&texture_desc, 0, sizeof(texture_desc));
+  texture_desc.addressMode[0] = cudaAddressModeBorder;
+  texture_desc.addressMode[1] = cudaAddressModeBorder;
+  texture_desc.addressMode[2] = cudaAddressModeBorder;
+  texture_desc.filterMode = cudaFilterModePoint;
+  texture_desc.readMode = cudaReadModeNormalizedFloat;
+  texture_desc.normalizedCoords = false;
+  ref_image_textures_[0] = std::make_unique<CudaArrayLayeredTexture<uint8_t>>(
+      texture_desc, ref_width_, ref_height_, ref_image_->image->GetDepth());
+  ref_image_textures_[1] = std::make_unique<CudaArrayLayeredTexture<uint8_t>>(
+      texture_desc, ref_height_, ref_width_, ref_image_->image->GetDepth());
+  // Do not initialize or copy into the spare parity until its first rotation.
   BindRefImageTexture();
 }
 
