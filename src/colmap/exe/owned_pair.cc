@@ -5,6 +5,7 @@
 #include "colmap/mvs/owned_pair_image.h"
 #include "colmap/mvs/owned_pair_run.h"
 #include "colmap/mvs/owned_pair_validation.h"
+#include "colmap/mvs/owned_rotation_storage.h"
 #include "colmap/mvs/patch_match.h"
 #include "colmap/mvs/workspace.h"
 #include "colmap/util/file.h"
@@ -185,12 +186,13 @@ void CheckInputs(const mvs::PatchMatchOptions& options,
   const uint64_t u=pair::CheckedMultiply(s,pair::CheckedMultiply(max_w,max_h));
   const uint64_t host=pair::CheckedAdd(cache,pair::CheckedAdd(pair::CheckedMultiply(2,q),
                         std::max(u,pair::CheckedMultiply(24,a))));
-  uint64_t device=pair::CheckedAdd(pair::CheckedMultiply(a,pair::CheckedAdd(pair::CheckedMultiply(12,s),74)),u);
+  // Persistent pitched layout plus source/pose arrays and both live reference
+  // arrays during rebinding. This logical minimum is NOT a physical bound.
+  uint64_t device=pair::CheckedAdd(pair::BuildOwnedRotationLayout(
+      ref.GetWidth(),ref.GetHeight(),s).logical_bytes,u);
+  device=pair::CheckedAdd(device,pair::CheckedMultiply(2,a));
   device=pair::CheckedAdd(device,pair::CheckedMultiply(688,s));
-  device=pair::CheckedAdd(device,pair::CheckedMultiply(8,pair::CheckedMultiply(std::max(ref.GetWidth(),ref.GetHeight()),s)));
-  device=pair::CheckedAdd(device,32);
-  device=pair::CheckedAdd(device,pair::CheckedMultiply(a,s));
-  device=pair::CheckedAdd(device,std::max(pair::CheckedMultiply(48,a),pair::CheckedMultiply(4,pair::CheckedMultiply(a,s))));
+  device=pair::CheckedAdd(device,32);  // Retained calibration policy allowance.
   if (charge.host<host || charge.device<device) throw std::invalid_argument("job reservation below logical workload envelope");
 }
 
