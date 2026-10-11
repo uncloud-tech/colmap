@@ -53,14 +53,26 @@ int main() {
          == PatchMatchExecution::kStock);
   assert(ValidatePatchMatchExecution(PatchMatchExecution::kOwnedCuda, 5, 1, false, true)
          == PatchMatchExecution::kOwnedCuda);
+  assert(ValidatePatchMatchExecution(PatchMatchExecution::kOwnedCuda, 5, 1, true, true)
+         == PatchMatchExecution::kOwnedCuda);
   int rejected = 0;
-  for (int i=0; i<5; ++i) {
-    try { ValidatePatchMatchExecution(i==4 ? static_cast<PatchMatchExecution>(99)
+  for (int i=0; i<4; ++i) {
+    try { ValidatePatchMatchExecution(i==2 ? static_cast<PatchMatchExecution>(99)
                                          : PatchMatchExecution::kOwnedCuda,
                                      i==0 ? 4:5, i==1 ? 2:1, i==2, i!=3); }
     catch (const std::invalid_argument&) { ++rejected; }
   }
-  assert(rejected == 5);
+  assert(rejected == 4);
+  for (int i=0; i<3; ++i) {
+    bool caught=false;
+    try { ValidatePatchMatchExecution(PatchMatchExecution::kOwnedCuda, 5, 1,
+                                     true, true, i!=0, i==1, i==2); }
+    catch (const std::invalid_argument&) { caught=true; }
+    assert(caught);
+  }
+  // These restrictions must not change photometric or stock policy.
+  ValidatePatchMatchExecution(PatchMatchExecution::kOwnedCuda, 5, 1,
+                             false, true, false, true, true);
 }
 ''')
 
@@ -101,7 +113,8 @@ int main() {
         source = self.source('patch_match.cc')
         self.assertIn('PatchMatchExecution execution = PatchMatchExecution::kStock', header)
         self.assertIn('owned_images_', header)
-        self.assertLess(header.index('owned_images_'), header.index('const Problem problem_'))
+        for member in ['owned_images_', 'owned_depth_maps_', 'owned_normal_maps_']:
+            self.assertLess(header.index(member), header.index('const Problem problem_'))
         self.assertIn('result.images = &owned_images_', source)
         self.assertIn('std::make_unique<PatchMatchCuda>(options_, problem_)', source)
         self.assertIn('std::make_unique<owned::PatchMatchCuda>(options_, problem_)', source)
@@ -113,10 +126,10 @@ int main() {
         end = source.index('void PatchMatch::Problem::Print()', start)
         constructors = source[start:end]
         headers = {
-            'colmap/mvs/depth_map.h': '#pragma once\nnamespace colmap {namespace mvs {class DepthMap {}; template<class T> class Mat {};}}',
-            'colmap/mvs/normal_map.h': '#pragma once\nnamespace colmap {namespace mvs {class NormalMap {};}}',
+            'colmap/mvs/depth_map.h': '#pragma once\n#include <vector>\nnamespace colmap {namespace mvs {struct DepthMap {std::vector<float> bytes;}; template<class T> class Mat {};}}',
+            'colmap/mvs/normal_map.h': '#pragma once\n#include <vector>\nnamespace colmap {namespace mvs {struct NormalMap {std::vector<float> bytes;};}}',
             'colmap/mvs/image.h': '#pragma once\n#include <vector>\nnamespace colmap {namespace mvs {struct Image {std::vector<unsigned char> bytes;};}}',
-            'colmap/mvs/patch_match_options.h': '#pragma once\nnamespace colmap {namespace mvs {struct PatchMatchOptions {int window_radius=5; int window_step=1; bool geom_consistency=false;};}}',
+            'colmap/mvs/patch_match_options.h': '#pragma once\nnamespace colmap {namespace mvs {struct PatchMatchOptions {int window_radius=5; int window_step=1; bool geom_consistency=false; bool filter=true; bool write_consistency_graph=false; bool allow_missing_files=false;};}}',
         }
         program = r'''
 #include <cassert>
@@ -155,6 +168,26 @@ int main() {
  assert(owned->problem_.images->at(0).bytes[0]==7);
  assert((owned->problem_.src_image_idxs==std::vector<int>{2,1}));
  assert(owned->problem_.depth_maps==nullptr && owned->problem_.normal_maps==nullptr);
+ options.geom_consistency=true;
+ std::unique_ptr<PatchMatch> geometry;
+ {
+  std::vector<Image> images(4);
+  std::vector<DepthMap> depths(4);
+  std::vector<NormalMap> normals(4);
+  depths[2].bytes={1,2}; normals[2].bytes={3,4,5};
+  PatchMatch::Problem problem;
+  problem.images=&images; problem.depth_maps=&depths; problem.normal_maps=&normals;
+  problem.ref_image_idx=2; problem.src_image_idxs={3,1};
+  geometry=std::make_unique<PatchMatch>(options,problem,PatchMatchExecution::kOwnedCuda);
+  assert(geometry->GetProblem().depth_maps!=&depths);
+  assert(geometry->GetProblem().normal_maps!=&normals);
+  depths[2].bytes[0]=99; normals.clear();
+ }
+ assert(geometry->GetProblem().depth_maps->size()==4);
+ assert(geometry->GetProblem().depth_maps->at(0).bytes.empty());
+ assert(geometry->GetProblem().depth_maps->at(2).bytes[0]==1);
+ assert(geometry->GetProblem().normal_maps->at(2).bytes[0]==3);
+ assert((geometry->GetProblem().src_image_idxs==std::vector<int>{3,1}));
  options.window_radius=4;
  bool caught=false;
  try { PatchMatch invalid(options,PatchMatch::Problem{},PatchMatchExecution::kOwnedCuda); }
@@ -188,6 +221,32 @@ int main() {
         cmake = (ROOT / 'src/colmap/exe/CMakeLists.txt').read_text()
         self.assertIn('OWNED_PATCH_MATCH_DRIVER_ENABLED', cmake)
         self.assertIn('colmap_owned_reference', cmake)
+
+    def test_geometry_route_guards_and_effective_order(self):
+        source = self.source('patch_match.cc')
+        run = source[source.index('void PatchMatchController::Run()'):
+                     source.index('PatchMatchController::PrepareOwnedPairJob')]
+        self.assertIn('execution_ == PatchMatchExecution::kStock', run)
+        self.assertIn('if (options_.geom_consistency &&', run)
+        inputs = source[source.index('void PatchMatchController::ProcessProblemInputs'):]
+        # Native reused-photo skips before mutating configured source order;
+        # owned geometry bypasses that prepass and reaches the same transform once.
+        skip = inputs.index('if (ExistsFile(depth_map_path) && ExistsFile(normal_map_path)')
+        collect = inputs.index('FlatHashSet<int> used_image_idxs')
+        transform = inputs.index('problem.src_image_idxs = src_image_idxs;')
+        self.assertLess(skip, collect)
+        self.assertLess(collect, transform)
+        self.assertEqual(inputs.count('    problem.src_image_idxs = src_image_idxs;'), 1)
+        self.assertNotIn('sort(', inputs)
+        self.assertIn('!ExistsFile(depth_map_path) && !ExistsFile(normal_map_path)', inputs)
+        self.assertIn('Missing image or map dependency for image ', inputs)
+        self.assertIn('!prepared->patch_match->GetOptions().geom_consistency', source)
+        for entry, end in [('PrepareOwnedPairJob', 'RunOwnedPairJob'),
+                           ('RunOwnedPairJob', 'RunPreparedOwnedPairJob'),
+                           ('RunPreparedOwnedPairJob', 'ExecutePreparedOwnedPairJob')]:
+            start = source.index('PatchMatchController::' + entry)
+            block = source[start:source.index('PatchMatchController::' + end, start)]
+            self.assertIn('THROW_CHECK(!options_.geom_consistency)', block)
 
     def test_constructor_failure_fenced_before_unwind(self):
         source = self.source('patch_match_cuda_owned.cu')

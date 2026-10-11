@@ -92,6 +92,8 @@ class PatchMatch {
   // Owned mode snapshots inputs before binding Problem pointers. Backend is
   // destroyed before this storage; stock mode retains its original borrowing.
   std::vector<Image> owned_images_;
+  std::vector<DepthMap> owned_depth_maps_;
+  std::vector<NormalMap> owned_normal_maps_;
   const Problem problem_;
   std::unique_ptr<PatchMatchCuda> patch_match_cuda_;
 #if !defined(COLMAP_HIP_ENABLED)

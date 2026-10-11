@@ -290,13 +290,134 @@ TEST_F(OwnedHostSnapshotTest, UnsupportedModesRejectBeforeDecodeOrDeviceWork) {
   }
   auto options = Options();
   options.geom_consistency = true;
+  for (const int preparation_threads : {0, 1}) {
+    try {
+      auto controller = Controller(options);
+      controller->PrepareOwnedPairJob(0, {}, preparation_threads);
+      ADD_FAILURE() << "Geometric preparation/lookahead was accepted";
+    } catch (const std::invalid_argument& error) {
+      EXPECT_NE(std::string(error.what()).find("photometric-only"),
+                std::string::npos);
+    }
+  }
+}
+
+TEST_F(OwnedHostSnapshotTest, GeometrySnapshotsOwnMapsAndPreserveGlobalIndices) {
+  auto prepared = Controller(Options())->PrepareOwnedPairJob(0, {});
+  auto options = Options();
+  options.geom_consistency = true;
+  std::unique_ptr<PatchMatch> engine;
+  {
+    auto problem = prepared->patch_match->GetProblem();
+    std::vector<Image> images = *problem.images;
+    std::vector<DepthMap> depths(images.size() + 1);
+    std::vector<NormalMap> normals(images.size() + 1);
+    images.emplace_back();  // Unused global index stays empty.
+    for (size_t i = 0; i != images.size() - 1; ++i) {
+      depths[i] = DepthMap(kWidth, kHeight, 1.25, 8.5);
+      normals[i] = NormalMap(kWidth, kHeight);
+      depths[i].Fill(2 + i);
+      normals[i].Fill(0.25 + i);
+    }
+    problem.images = &images;
+    problem.depth_maps = &depths;
+    problem.normal_maps = &normals;
+    PatchMatch stock(options, problem);
+    EXPECT_EQ(stock.GetProblem().depth_maps, &depths);
+    EXPECT_EQ(stock.GetProblem().normal_maps, &normals);
+    engine = std::make_unique<PatchMatch>(
+        options, problem, PatchMatchExecution::kOwnedCuda);
+    EXPECT_NE(engine->GetProblem().depth_maps, &depths);
+    EXPECT_NE(engine->GetProblem().normal_maps, &normals);
+    for (auto& depth : depths) depth.Fill(99);
+    for (auto& normal : normals) normal.Fill(99);
+    EXPECT_FLOAT_EQ(stock.GetProblem().depth_maps->at(0).Get(0, 0), 99);
+  }
+  prepared.reset();
+  std::filesystem::remove_all(workspace_path_);
+  const auto& problem = engine->GetProblem();
+  ASSERT_EQ(problem.depth_maps->size(), 3);
+  ASSERT_EQ(problem.normal_maps->size(), 3);
+  EXPECT_EQ(problem.depth_maps->back().GetWidth(), 0);
+  EXPECT_EQ(problem.normal_maps->back().GetWidth(), 0);
+  for (int i : {problem.ref_image_idx, problem.src_image_idxs.at(0)}) {
+    EXPECT_FLOAT_EQ(problem.depth_maps->at(i).Get(0, 0), 2 + i);
+    EXPECT_FLOAT_EQ(problem.normal_maps->at(i).Get(0, 0), 0.25 + i);
+  }
+  EXPECT_NO_THROW(engine->Check());
+}
+
+TEST_F(OwnedHostSnapshotTest, GeometryRejectsMalformedMapInputs) {
+  auto prepared = Controller(Options())->PrepareOwnedPairJob(0, {});
+  auto problem = prepared->patch_match->GetProblem();
+  auto options = Options();
+  options.geom_consistency = true;
+  std::vector<DepthMap> depths(2, DepthMap(kWidth, kHeight, 1.25, 8.5));
+  std::vector<NormalMap> normals(2, NormalMap(kWidth, kHeight));
+  problem.depth_maps = &depths;
+  problem.normal_maps = &normals;
+  const auto rejects = [&] {
+    PatchMatch engine(options, problem, PatchMatchExecution::kOwnedCuda);
+    EXPECT_THROW(engine.Check(), std::invalid_argument);
+  };
+  problem.depth_maps = nullptr;
+  rejects();
+  problem.depth_maps = &depths;
+  problem.normal_maps = nullptr;
+  rejects();
+  problem.normal_maps = &normals;
+  depths.pop_back();
+  rejects();
+  depths.emplace_back(kWidth, kHeight, 1.25, 8.5);
+  normals.pop_back();
+  rejects();
+  normals.emplace_back(kWidth, kHeight);
+  depths.at(problem.src_image_idxs.at(0)) = DepthMap(1, 1, 1.25, 8.5);
+  rejects();
+  depths.at(problem.src_image_idxs.at(0)) = DepthMap(kWidth, kHeight, 1.25, 8.5);
+  normals.at(problem.src_image_idxs.at(0)) = NormalMap(1, 1);
+  rejects();
+}
+
+TEST_F(OwnedHostSnapshotTest, GeometryRequiresExistingSeedsWithoutPhotoPrepass) {
+  auto options = Options();
+  options.geom_consistency = true;
+  // No seeds: fail before any backend can be constructed. A photo prepass
+  // would try CUDA instead and/or create photometric output here.
   try {
-    auto controller = Controller(options);
-    controller->PrepareOwnedPairJob(0, {});
-    ADD_FAILURE() << "Geometric preparation was accepted";
+    Controller(options)->Run();
+    ADD_FAILURE() << "Missing photometric seeds accepted";
   } catch (const std::invalid_argument& error) {
-    EXPECT_NE(std::string(error.what()).find("photo window"),
+    EXPECT_NE(std::string(error.what()).find("Missing image or map dependency"),
               std::string::npos);
+  }
+  for (const auto& name : image_names_) {
+    EXPECT_FALSE(ExistsFile(workspace_path_ / "stereo" / "depth_maps" /
+                           (name + ".photometric.bin")));
+    EXPECT_FALSE(ExistsFile(workspace_path_ / "stereo" / "normal_maps" /
+                           (name + ".photometric.bin")));
+  }
+}
+
+TEST_F(OwnedHostSnapshotTest, GeometryRequiresBothOutputPathsFresh) {
+  auto options = Options();
+  options.geom_consistency = true;
+  for (const auto* folder : {"depth_maps", "normal_maps"}) {
+    const auto path = workspace_path_ / "stereo" / folder /
+                      (image_names_[0] + ".geometric.bin");
+    {
+      std::ofstream output(path);
+      output << "existing output";
+      ASSERT_TRUE(output.good());
+    }
+    try {
+      Controller(options)->Run();
+      ADD_FAILURE() << "Partial existing geometric output accepted";
+    } catch (const std::invalid_argument& error) {
+      EXPECT_NE(std::string(error.what()).find("fresh output paths"),
+                std::string::npos);
+    }
+    std::filesystem::remove(path);
   }
 }
 

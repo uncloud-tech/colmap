@@ -37,7 +37,10 @@ PatchMatchExecution ValidateExecution(const PatchMatchOptions& options,
   return ValidatePatchMatchExecution(execution, options.window_radius,
                                      options.window_step,
                                      options.geom_consistency,
-                                     kOwnedCudaAvailable);
+                                     kOwnedCudaAvailable,
+                                     options.filter,
+                                     options.write_consistency_graph,
+                                     options.allow_missing_files);
 }
 }  // namespace
 
@@ -48,12 +51,24 @@ PatchMatch::PatchMatch(const PatchMatchOptions& options,
       execution_(ValidateExecution(options, execution)),
       owned_images_(execution_ == PatchMatchExecution::kOwnedCuda && problem.images
                         ? *problem.images : std::vector<Image>{}),
+      owned_depth_maps_(execution_ == PatchMatchExecution::kOwnedCuda &&
+                                options_.geom_consistency && problem.depth_maps
+                            ? *problem.depth_maps
+                            : std::vector<DepthMap>{}),
+      owned_normal_maps_(execution_ == PatchMatchExecution::kOwnedCuda &&
+                                 options_.geom_consistency && problem.normal_maps
+                             ? *problem.normal_maps
+                             : std::vector<NormalMap>{}),
       problem_([&] {
         Problem result = problem;
         if (execution_ == PatchMatchExecution::kOwnedCuda) {
           result.images = &owned_images_;
-          result.depth_maps = nullptr;
-          result.normal_maps = nullptr;
+          result.depth_maps = options_.geom_consistency && problem.depth_maps
+                                  ? &owned_depth_maps_
+                                  : nullptr;
+          result.normal_maps = options_.geom_consistency && problem.normal_maps
+                                   ? &owned_normal_maps_
+                                   : nullptr;
         }
         return result;
       }()) {}
@@ -121,6 +136,11 @@ void PatchMatch::Check() const {
       const DepthMap& depth_map = problem_.depth_maps->at(image_idx);
       THROW_CHECK_EQ(image.GetWidth(), depth_map.GetWidth()) << image_idx;
       THROW_CHECK_EQ(image.GetHeight(), depth_map.GetHeight()) << image_idx;
+      if (execution_ == PatchMatchExecution::kOwnedCuda) {
+        const NormalMap& normal_map = problem_.normal_maps->at(image_idx);
+        THROW_CHECK_EQ(image.GetWidth(), normal_map.GetWidth()) << image_idx;
+        THROW_CHECK_EQ(image.GetHeight(), normal_map.GetHeight()) << image_idx;
+      }
     }
   }
 
@@ -275,9 +295,9 @@ void PatchMatchController::Run() {
   io_thread_pool_ = std::make_unique<ThreadPool>(
       GetEffectiveNumThreads(options_.num_threads));
 
-  // If geometric consistency is enabled, then photometric output must be
-  // computed first for all images without filtering.
-  if (options_.geom_consistency) {
+  // Stock computes (or reuses) photometric output first. Owned N1 geometry
+  // requires existing seeds and transforms source order only in its geom pass.
+  if (options_.geom_consistency && execution_ == PatchMatchExecution::kStock) {
     auto photometric_options = options_;
     photometric_options.geom_consistency = false;
     photometric_options.filter = false;
@@ -309,7 +329,8 @@ PatchMatchController::PrepareOwnedPairJob(const size_t job,
                                         const int preparation_threads) {
   THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
   THROW_CHECK_LE(job, 1);
-  THROW_CHECK(!options_.geom_consistency);
+  THROW_CHECK(!options_.geom_consistency)
+      << "Owned PAIR/preparation/lookahead is photometric-only";
   // Reject auto-selection before ReadGpuIndices can query CUDA devices.
   const auto explicit_gpu_indices = CSVToVector<int>(options_.gpu_index);
   THROW_CHECK_EQ(explicit_gpu_indices.size(), 1);
@@ -353,6 +374,8 @@ void PatchMatchController::RunOwnedPairJob(
     const size_t job,
     const OwnedPairHooks& hooks) {
   THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
+  THROW_CHECK(!options_.geom_consistency)
+      << "Owned PAIR/preparation/lookahead is photometric-only";
   THROW_CHECK(!owned_pair_started_);
   owned_pair_started_ = true;
   try {
@@ -372,12 +395,16 @@ void PatchMatchController::RunPreparedOwnedPairJob(
     const size_t job,
     const OwnedPairHooks& hooks) {
   THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
+  THROW_CHECK(!options_.geom_consistency)
+      << "Owned PAIR/preparation/lookahead is photometric-only";
   THROW_CHECK(!owned_pair_started_);
   owned_pair_started_ = true;
   try {
     THROW_CHECK(!workspace_ && !io_thread_pool_ && !thread_pool_);
     THROW_CHECK_NOTNULL(prepared.get());
     THROW_CHECK_NOTNULL(prepared->patch_match.get());
+    THROW_CHECK(!prepared->patch_match->GetOptions().geom_consistency)
+        << "Owned PAIR/preparation/lookahead is photometric-only";
     THROW_CHECK(!ExistsFile(prepared->depth_map_path));
     THROW_CHECK(!ExistsFile(prepared->normal_map_path));
     coordinator.BeginPreparation(job);
@@ -643,6 +670,11 @@ void PatchMatchController::ProcessProblemInputs(
   const auto consistency_graph_path =
       workspace_path_ / stereo_folder / "consistency_graphs" / file_name;
 
+  if (execution_ == PatchMatchExecution::kOwnedCuda && options.geom_consistency) {
+    THROW_CHECK(!ExistsFile(depth_map_path) && !ExistsFile(normal_map_path))
+        << "Owned geometry requires fresh output paths";
+  }
+
   if (ExistsFile(depth_map_path) && ExistsFile(normal_map_path) &&
       (!options.write_consistency_graph ||
        ExistsFile(consistency_graph_path))) {
@@ -722,6 +754,12 @@ void PatchMatchController::ProcessProblemInputs(
               model.GetImageName(image_idx).c_str());
           continue;
         } else {
+          if (execution_ == PatchMatchExecution::kOwnedCuda &&
+              options.geom_consistency) {
+            THROW_CHECK(false) << "Missing image or map dependency for image "
+                               << image_idx << ": "
+                               << model.GetImageName(image_idx);
+          }
           LOG(ERROR) << StringPrintf(
               "Missing image or map dependency for image %d: %s",
               image_idx,
