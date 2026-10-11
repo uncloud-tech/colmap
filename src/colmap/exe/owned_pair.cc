@@ -94,8 +94,8 @@ void ValidateJob(JobOptions& job, pair::ByteCharge charge) {
   StringToLower(&job.format);
   if (job.format != "colmap" || o.geom_consistency || o.window_radius != 5 ||
       o.window_step != 1 || o.num_iterations != 5 || o.max_image_size != -1 ||
-      o.allow_missing_files || o.write_consistency_graph || !o.filter) {
-    throw std::invalid_argument("TWO prototype requires native COLMAP photo11/1, five iterations, filtered, complete inputs, no graph");
+      o.allow_missing_files || o.write_consistency_graph) {
+    throw std::invalid_argument("TWO prototype requires native COLMAP photo11/1, five iterations, complete inputs, no graph");
   }
   const uint64_t device = pair::ParseBytes(o.gpu_index);
   if (device > INT_MAX) throw std::invalid_argument("device index overflow");

@@ -134,6 +134,22 @@ class OwnedPairTest : public testing::Test {
             "[PatchMatchStereo]\nnum_threads=1\ncache_size=0.000001\n"
             "geom_consistency=false\ngpu_index=0\n");
   }
+  void SetPatchMatchOption(size_t j,
+                           const std::string& name,
+                           const std::string& value) {
+    std::ifstream input(Ini(j));
+    if (!input) throw std::runtime_error("test INI read failed");
+    std::string text((std::istreambuf_iterator<char>(input)), {});
+    const std::string prefix = "\n" + name + "=";
+    const auto start = text.find(prefix);
+    if (start == std::string::npos) {
+      text += name + "=" + value + "\n";
+    } else {
+      const auto end = text.find('\n', start + 1);
+      text.replace(start, end - start, prefix + value);
+    }
+    Put(Ini(j), text);
+  }
   fs::path List(const std::vector<size_t>& jobs) {
     const auto path = root_ / "list with spaces" / "projects.txt";
     std::string text;
@@ -307,10 +323,64 @@ TEST_F(OwnedPairTest, LegacyTwoIniStillUsesProductionOwners) {
   EventCapture capture;
   EXPECT_EQ(Invoke(args, [&](auto& job, auto& coordinator, size_t slot,
                              const auto& hooks) {
+    EXPECT_TRUE(job.patch_match_stereo->filter);
     ++calls;
     Complete(job, coordinator, slot, hooks);
   }), EXIT_SUCCESS);
   EXPECT_EQ(calls.load(), 2);
+  size_t filter_options = 0;
+  for (const auto& record : Records(capture.Read())) {
+    if (record.at("event") == "effective_option" &&
+        record.at("option") == "filter") {
+      EXPECT_EQ(record.at("value_hex"), "31");  // Printed bool: 1.
+      ++filter_options;
+    }
+  }
+  EXPECT_EQ(filter_options, 2);
+}
+
+TEST_F(OwnedPairTest, ExplicitUnfilteredPhotoReachesBothEpochsAndMetadata) {
+  for (size_t j = 0; j < 4; ++j) SetPatchMatchOption(j, "filter", "false");
+  for (const std::string dispatch : {"serial", "pair"}) {
+    SCOPED_TRACE(dispatch);
+    auto args = ListArgs({0, 1, 2, 3});
+    args[2] = dispatch;
+    std::atomic<size_t> calls{0};
+    EventCapture capture;
+    EXPECT_EQ(Invoke(args, [&](auto& job, auto& coordinator, size_t slot,
+                               const auto& hooks) {
+      EXPECT_FALSE(job.patch_match_stereo->filter);
+      EXPECT_FALSE(job.patch_match_stereo->geom_consistency);
+      ++calls;
+      Complete(job, coordinator, slot, hooks);
+    }), EXIT_SUCCESS);
+    EXPECT_EQ(calls.load(), 4);
+    size_t filter_options = 0, finished = 0;
+    for (const auto& record : Records(capture.Read())) {
+      if (record.at("event") == "effective_option" &&
+          record.at("option") == "filter") {
+        EXPECT_EQ(record.at("value_hex"), "30");  // Printed bool: 0.
+        ++filter_options;
+      }
+      finished += record.at("event") == "batch_finished";
+    }
+    EXPECT_EQ(filter_options, 4);
+    EXPECT_EQ(finished, 2);
+  }
+}
+
+TEST_F(OwnedPairTest, UnfilteredStillRejectsGeometryAndConsistencyGraphs) {
+  for (size_t j = 0; j < 4; ++j) SetPatchMatchOption(j, "filter", "false");
+  SetPatchMatchOption(3, "geom_consistency", "true");
+  Reject(ListArgs({0, 1, 2, 3}));
+  SetPatchMatchOption(3, "geom_consistency", "false");
+  SetPatchMatchOption(3, "write_consistency_graph", "true");
+  Reject(ListArgs({0, 1, 2, 3}));
+}
+
+TEST_F(OwnedPairTest, InvalidFilterDoesNotSilentlyUseDefault) {
+  SetPatchMatchOption(3, "filter", "not-a-bool");
+  Reject(ListArgs({0, 1, 2, 3}));
 }
 
 TEST_F(OwnedPairTest, TwoEpochsJoinReleaseAndFinishBeforeNextAdmission) {
