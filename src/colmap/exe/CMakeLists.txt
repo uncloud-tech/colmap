@@ -125,4 +125,13 @@ if(OWNED_PATCH_MATCH_PAIR_DRIVER_ENABLED)
         SRCS owned_pair.cc
         LINK_LIBS colmap_exe colmap_mvs_cuda ${COLMAP_BOOST_HEADER_LIBS}
     )
+    # CPU-only callbacks; including the driver still requires its link deps.
+    COLMAP_ADD_TEST(
+        NAME owned_pair_test
+        SRCS owned_pair_test.cc
+        LINK_LIBS colmap_exe colmap_mvs_cuda ${COLMAP_BOOST_HEADER_LIBS}
+    )
+    if(TESTS_ENABLED)
+        set_tests_properties(exe/owned_pair_test PROPERTIES TIMEOUT 30)
+    endif()
 endif()
