@@ -386,6 +386,136 @@ TEST_F(OwnedPairTest, UnfilteredStillRejectsGeometryAndConsistencyGraphs) {
   Reject(ListArgs({0, 1, 2, 3}));
 }
 
+TEST_F(OwnedPairTest, GeometryRequiresExactlyTwoSamePhaseJobsWithoutLookahead) {
+  SetPatchMatchOption(0, "geom_consistency", "true");
+  Reject(ListArgs({0, 1}));
+  SetPatchMatchOption(1, "geom_consistency", "true");
+  for (const std::string dispatch : {"serial", "pair"}) {
+    auto args = ListArgs({0, 1});
+    args[2] = dispatch;
+    std::atomic<size_t> calls{0};
+    EventCapture capture;
+    EXPECT_EQ(Invoke(args, [&](auto& job, auto& coordinator, size_t slot,
+                               const auto& hooks) {
+      EXPECT_TRUE(job.patch_match_stereo->geom_consistency);
+      EXPECT_TRUE(job.patch_match_stereo->filter);
+      EXPECT_EQ(job.outputs[0].filename(), job.reference_name + ".geometric.bin");
+      ++calls;
+      Complete(job, coordinator, slot, hooks);
+    }), EXIT_SUCCESS);
+    EXPECT_EQ(calls.load(), 2);
+  }
+  auto args = ListArgs({0, 1});
+  args.insert(args.end(), {"--host_lookahead", "1",
+                          "--host_lookahead_charge_bytes", "100"});
+  Reject(args);  // Even the no-next-epoch fallback must not permit geometry.
+  for (size_t j : {2, 3}) SetPatchMatchOption(j, "geom_consistency", "true");
+  Reject(ListArgs({0, 1, 2, 3}));
+  SetPatchMatchOption(0, "geom_consistency", "false");
+  Reject(ListArgs({0, 1}));  // Opposite mixed-phase direction.
+}
+
+TEST_F(OwnedPairTest, GeometryBadFlagsAndExistingOutputRejectBeforeDispatch) {
+  for (size_t j : {0, 1}) SetPatchMatchOption(j, "geom_consistency", "true");
+  for (const auto& option : std::vector<std::pair<std::string, std::string>>{
+           {"filter", "false"}, {"write_consistency_graph", "true"},
+           {"allow_missing_files", "true"}, {"window_radius", "4"},
+           {"window_step", "2"}}) {
+    SetPatchMatchOption(1, option.first, option.second);
+    Reject(ListArgs({0, 1}));
+    WriteJob(1);
+    SetPatchMatchOption(1, "geom_consistency", "true");
+  }
+  for (const auto* folder : {"depth_maps", "normal_maps"}) {
+    const auto path = Workspace(1) / "stereo" / folder /
+                      "reference 1.jpg.geometric.bin";
+    Put(path, "partial output");
+    Reject(ListArgs({0, 1}));
+    fs::remove(path);
+  }
+  JobOptions job;
+  job.patch_match_stereo->geom_consistency = true;
+  std::atomic<bool> cancelled{false};
+  EXPECT_THROW(PrepareFutureHostJob(job, 0, {1, 1}, cancelled), std::invalid_argument);
+}
+
+TEST_F(OwnedPairTest, GeometryEnvelopeUsesActualDimensionsAndPhotoIsUnchanged) {
+  const auto workspace = Workspace(0);
+  const float identity[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  const float translation[3] = {0, 0, 0};
+  std::vector<mvs::Image> images;
+  images.reserve(3);
+  const std::array<std::pair<int, int>, 3> shapes{{{2, 2}, {10, 3}, {3, 11}}};
+  for (size_t i = 0; i < shapes.size(); ++i) {
+    const auto [width, height] = shapes[i];
+    const auto name = "input" + Value(i) + ".png";
+    const auto path = workspace / "images" / name;
+    Bitmap bitmap(width, height, false);
+    bitmap.Fill(BitmapColor<uint8_t>(100));
+    ASSERT_TRUE(bitmap.Write(path));
+    images.emplace_back(path, width, height, identity, identity, translation);
+    mvs::DepthMap depth(width, height, 1, 8);
+    mvs::NormalMap normal(width, height);
+    for (const auto* folder : {"depth_maps", "normal_maps"}) {
+      fs::create_directories(workspace / "stereo" / folder);
+    }
+    depth.Write(workspace / "stereo/depth_maps" / (name + ".photometric.bin"));
+    normal.Write(workspace / "stereo/normal_maps" / (name + ".photometric.bin"));
+  }
+  mvs::PatchMatch::Problem problem;
+  problem.images = &images;
+  problem.ref_image_idx = 0;
+  problem.src_image_idxs = {2, 1};
+  // q=4+30+33=67, u=2*10*11=220, a=4; do not use reference
+  // dimensions or the sum of source pixels in place of padded upload layers.
+  const uint64_t q = 67, u = 220, a = 4;
+  const uint64_t rotation = pair::BuildOwnedRotationLayout(2, 2, 2).logical_bytes;
+  mvs::PatchMatchOptions options;
+  options.geom_consistency = true;
+  options.cache_size = (17 * q) / 1073741824.0;
+  const uint64_t host = 17 * q + 34 * q + 4 * u;
+  const uint64_t device = rotation + 5 * u + 2 * a + 688 * 2 + 32;
+  EXPECT_NO_THROW(CheckInputs(options, problem, {host, device}, workspace));
+  EXPECT_THROW(CheckInputs(options, problem, {host - 1, device}, workspace),
+               std::invalid_argument);
+  EXPECT_THROW(CheckInputs(options, problem, {host, device - 1}, workspace),
+               std::invalid_argument);
+  options.cache_size = (17 * q - 1) / 1073741824.0;
+  EXPECT_THROW(CheckInputs(options, problem, {host, device}, workspace),
+               std::invalid_argument);
+  options.cache_size = q / 1073741824.0;
+  EXPECT_THROW(CheckInputs(options, problem, {host, device}, workspace),
+               std::invalid_argument);
+  options.geom_consistency = false;
+  const uint64_t photo_host = q + 2 * q + u;
+  const uint64_t photo_device = rotation + u + 2 * a + 688 * 2 + 32;
+  fs::remove_all(workspace / "stereo");  // Photo needs no seeds.
+  EXPECT_NO_THROW(CheckInputs(options, problem, {photo_host, photo_device}, workspace));
+  EXPECT_THROW(CheckInputs(options, problem, {photo_host - 1, photo_device}, workspace),
+               std::invalid_argument);
+  EXPECT_THROW(CheckInputs(options, problem, {photo_host, photo_device - 1}, workspace),
+               std::invalid_argument);
+  options.cache_size = (q - 1) / 1073741824.0;
+  EXPECT_THROW(CheckInputs(options, problem, {photo_host, photo_device}, workspace),
+               std::invalid_argument);
+}
+
+TEST_F(OwnedPairTest, SeedHeaderPreflightRejectsMissingMalformedAndMismatchedMaps) {
+  const auto path = root_ / "seed.bin";
+  EXPECT_THROW(CheckSeedMap(path, 2, 3, 1), std::invalid_argument);
+  for (const std::string header : {"", "2&3&", "-2&3&1&", "2x3&1&",
+                                  "2&3&3&", "3&2&1&", "2&3&1&"}) {
+    Put(path, header);
+    EXPECT_THROW(CheckSeedMap(path, 2, 3, 1), std::invalid_argument);
+  }
+  Put(path, "2&3&1&" + std::string(24, '\0'));
+  EXPECT_NO_THROW(CheckSeedMap(path, 2, 3, 1));
+  Put(path, "2&3&1&" + std::string(25, '\0'));
+  EXPECT_THROW(CheckSeedMap(path, 2, 3, 1), std::invalid_argument);
+  Put(path, "18446744073709551616&3&1&");
+  EXPECT_THROW(CheckSeedMap(path, 2, 3, 1), std::overflow_error);
+}
+
 TEST_F(OwnedPairTest, InvalidFilterDoesNotSilentlyUseDefault) {
   SetPatchMatchOption(3, "filter", "not-a-bool");
   Reject(ListArgs({0, 1, 2, 3}));

@@ -329,8 +329,6 @@ PatchMatchController::PrepareOwnedPairJob(const size_t job,
                                         const int preparation_threads) {
   THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
   THROW_CHECK_LE(job, 1);
-  THROW_CHECK(!options_.geom_consistency)
-      << "Owned PAIR/preparation/lookahead is photometric-only";
   // Reject auto-selection before ReadGpuIndices can query CUDA devices.
   const auto explicit_gpu_indices = CSVToVector<int>(options_.gpu_index);
   THROW_CHECK_EQ(explicit_gpu_indices.size(), 1);
@@ -374,8 +372,6 @@ void PatchMatchController::RunOwnedPairJob(
     const size_t job,
     const OwnedPairHooks& hooks) {
   THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
-  THROW_CHECK(!options_.geom_consistency)
-      << "Owned PAIR/preparation/lookahead is photometric-only";
   THROW_CHECK(!owned_pair_started_);
   owned_pair_started_ = true;
   try {

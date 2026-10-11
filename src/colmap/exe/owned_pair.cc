@@ -94,10 +94,11 @@ uint64_t AffinityCount() {
 void ValidateJob(JobOptions& job, pair::ByteCharge charge) {
   auto& o = *job.patch_match_stereo;
   StringToLower(&job.format);
-  if (job.format != "colmap" || o.geom_consistency || o.window_radius != 5 ||
+  if (job.format != "colmap" || (o.geom_consistency && !o.filter) ||
+      o.window_radius != 5 ||
       o.window_step != 1 || o.num_iterations != 5 || o.max_image_size != -1 ||
       o.allow_missing_files || o.write_consistency_graph) {
-    throw std::invalid_argument("TWO prototype requires native COLMAP photo11/1, five iterations, complete inputs, no graph");
+    throw std::invalid_argument("TWO prototype requires native COLMAP 11/1, five iterations, complete inputs, no graph; geometry requires filter=1");
   }
   const uint64_t device = pair::ParseBytes(o.gpu_index);
   if (device > INT_MAX) throw std::invalid_argument("device index overflow");
@@ -148,7 +149,8 @@ void ValidateJob(JobOptions& job, pair::ByteCharge charge) {
     if (!pair::PathContains(stereo,dir) || dir==stereo) {
       throw std::invalid_argument("output directory escapes workspace stereo root");
     }
-    const auto output = dir / (job.reference_name + ".photometric.bin");
+    const auto output = dir / (job.reference_name +
+        (o.geom_consistency ? ".geometric.bin" : ".photometric.bin"));
     if (fs::exists(output) || fs::is_symlink(fs::symlink_status(output))) {
       throw std::invalid_argument("fresh outputs required (including partial results/symlinks)");
     }
@@ -160,13 +162,48 @@ void ValidateJob(JobOptions& job, pair::ByteCharge charge) {
   }
 }
 
+// Validate seed dimensions before parallel cache access: oversized maps could
+// otherwise evict a cache entry while another decoder copies its bitmap/map.
+// Native geometry retains one float depth and three float normal channels.
+void CheckSeedMap(const fs::path& path,
+                  uint64_t width,
+                  uint64_t height,
+                  uint64_t channels) {
+  std::ifstream input(path, std::ios::binary);
+  std::array<uint64_t, 3> dimensions{};
+  for (auto& dimension : dimensions) {
+    std::string field;
+    char c = 0;
+    while (input.get(c) && c != '&') {
+      if (field.size() == 20 || c < '0' || c > '9') {
+        throw std::invalid_argument("invalid seed map header: " + path.string());
+      }
+      field.push_back(c);
+    }
+    if (!input || c != '&' || field.empty()) {
+      throw std::invalid_argument("missing/invalid seed map header: " + path.string());
+    }
+    dimension = pair::ParseBytes(field);
+  }
+  if (dimensions != std::array<uint64_t, 3>{width, height, channels}) {
+    throw std::invalid_argument("seed map/model dimensions mismatch: " + path.string());
+  }
+  const uint64_t payload = pair::CheckedMultiply(
+      4, pair::CheckedMultiply(channels, pair::CheckedMultiply(width, height)));
+  if (fs::file_size(path) != pair::CheckedAdd(
+          static_cast<uint64_t>(input.tellg()), payload)) {
+    throw std::invalid_argument("seed map payload size mismatch: " + path.string());
+  }
+}
+
 // File-header/model-checked logical minima, not physical peak guarantees.
 // Inputs must remain immutable after admission. Requiring the
-// cache to retain the entire used grayscale input set also avoids returning a
-// bitmap reference after a concurrent cache eviction. No cache rewrite/pool.
+// cache to retain all used grayscale inputs and geometry maps also avoids
+// returning references after a concurrent cache eviction. No cache rewrite/pool.
 void CheckInputs(const mvs::PatchMatchOptions& options,
                  const mvs::PatchMatch::Problem& problem,
-                 pair::ByteCharge charge) {
+                 pair::ByteCharge charge,
+                 const fs::path& workspace) {
   const auto& images = *problem.images;
   const auto& ref = images.at(problem.ref_image_idx);
   const uint64_t a = pair::ReadPairBitmapPixels(
@@ -186,14 +223,37 @@ void CheckInputs(const mvs::PatchMatchOptions& options,
     if (!fs::is_regular_file(image.GetPath())) throw std::invalid_argument("source image missing");
   }
   const uint64_t cache=pair::CacheBytes(options.cache_size);
-  if (cache<q) throw std::invalid_argument("cache must retain complete TWO-job private input set per owner");
+  if (options.geom_consistency) {
+    for (const int idx : used) {
+      const auto& image = images.at(idx);
+      const auto name = image.GetPath().lexically_relative(workspace / "images").string();
+      for (const auto* folder : {"depth_maps", "normal_maps"}) {
+        CheckSeedMap(workspace / "stereo" / folder / (name + ".photometric.bin"),
+                     image.GetWidth(), image.GetHeight(),
+                     std::string(folder) == "depth_maps" ? 1 : 3);
+      }
+    }
+  }
+  const uint64_t retained = options.geom_consistency
+      ? pair::CheckedMultiply(17, q) : q;
+  if (cache<retained) throw std::invalid_argument("cache must retain complete TWO-job private input set per owner");
   const uint64_t u=pair::CheckedMultiply(s,pair::CheckedMultiply(max_w,max_h));
-  const uint64_t host=pair::CheckedAdd(cache,pair::CheckedAdd(pair::CheckedMultiply(2,q),
-                        std::max(u,pair::CheckedMultiply(24,a))));
+  // Local decoded inputs and the PatchMatch owned snapshot coexist during
+  // construction: each retains grayscale q + depth 4q + normals 12q.
+  // Source grayscale staging u and float-depth staging 4u are sequential;
+  // preserve the existing 24a result/reference scratch allowance.
+  const uint64_t staging = options.geom_consistency
+      ? pair::CheckedMultiply(4, u) : u;
+  const uint64_t host=pair::CheckedAdd(cache,pair::CheckedAdd(
+      pair::CheckedMultiply(2,retained),
+      std::max(staging,pair::CheckedMultiply(24,a))));
   // Persistent pitched layout plus source/pose arrays and both live reference
   // arrays during rebinding. This logical minimum is NOT a physical bound.
   uint64_t device=pair::CheckedAdd(pair::BuildOwnedRotationLayout(
       ref.GetWidth(),ref.GetHeight(),s).logical_bytes,u);
+  if (options.geom_consistency) {
+    device=pair::CheckedAdd(device,pair::CheckedMultiply(4,u));
+  }
   device=pair::CheckedAdd(device,pair::CheckedMultiply(2,a));
   device=pair::CheckedAdd(device,pair::CheckedMultiply(688,s));
   device=pair::CheckedAdd(device,32);  // Retained calibration policy allowance.
@@ -283,6 +343,13 @@ std::vector<std::unique_ptr<JobOptions>> LoadJobs(
       throw std::invalid_argument("conflicting process-global settings");
     }
     ValidateJob(job, settings.charges[j % 2]);
+    if (job.patch_match_stereo->geom_consistency !=
+        jobs.front()->patch_match_stereo->geom_consistency) {
+      throw std::invalid_argument("mixed photometric/geometric phases");
+    }
+    if (job.patch_match_stereo->geom_consistency && jobs.size() != 2) {
+      throw std::invalid_argument("geometry requires exactly TWO jobs");
+    }
     if (!references.insert(job.reference_name).second ||
         pair::ParseBytes(job.patch_match_stereo->gpu_index) !=
             pair::ParseBytes(jobs.front()->patch_match_stereo->gpu_index)) {
@@ -358,7 +425,7 @@ void RunPairEpoch(JobOptions& a,
                 "reserved_host="+Value(reserved.host)+" reserved_device="+Value(reserved.device));
     if (admitted) admitted();
     mvs::PatchMatchController::OwnedPairHooks hooks;
-    hooks.check_inputs=[&](size_t j,const auto& o,const auto& p){CheckInputs(o,p,charges[j]);};
+    hooks.check_inputs=[&](size_t j,const auto& o,const auto& p){CheckInputs(o,p,charges[j],jobs[j]->workspace);};
     hooks.metadata=[&](size_t j,const auto& o,const auto& p){Metadata(events,j,o,p);};
     hooks.sweep=[&](size_t j,int iteration,int sweep){events.Emit(j,"sweep_complete","iteration="+Value(iteration)+" sweep="+Value(sweep));};
     hooks.output_phase=[&](size_t j,const char* phase){events.Emit(j,phase);};
@@ -408,9 +475,12 @@ void HostLookaheadEvent(size_t target, bool enabled, const char* event,
   }
 }
 
-std::unique_ptr<PreparedHostJob> PrepareHostJob(
+std::unique_ptr<PreparedHostJob> PrepareFutureHostJob(
     JobOptions& job, size_t slot, pair::ByteCharge charge,
     const std::atomic<bool>& cancelled) {
+  if (job.patch_match_stereo->geom_consistency) {
+    throw std::invalid_argument("host lookahead is photometric-only");
+  }
   mvs::PatchMatchController controller(*job.patch_match_stereo, job.workspace,
       job.format, job.pmvs, job.config, mvs::PatchMatchExecution::kOwnedCuda);
   mvs::PatchMatchController::OwnedPairHooks hooks;
@@ -418,14 +488,14 @@ std::unique_ptr<PreparedHostJob> PrepareHostJob(
     if (cancelled.load(std::memory_order_relaxed)) {
       throw std::runtime_error("host preparation cancelled");
     }
-    CheckInputs(options, problem, charge);
+    CheckInputs(options, problem, charge, job.workspace);
   };
   return controller.PrepareOwnedPairJob(slot, hooks, 1);
 }
 
-template <class RunJob, class PrepareJob = decltype(&PrepareHostJob)>
+template <class RunJob, class PrepareJob = decltype(&PrepareFutureHostJob)>
 int RunPairs(int argc, char** argv, RunJob run_job,
-             PrepareJob prepare_job = &PrepareHostJob) {
+             PrepareJob prepare_job = &PrepareFutureHostJob) {
   std::set<std::string> keys = {
       "dispatch", "host_budget_bytes", "device_budget_bytes",
       "job_a_host_charge_bytes", "job_a_device_charge_bytes",
@@ -484,6 +554,9 @@ int RunPairs(int argc, char** argv, RunJob run_job,
       AffinityCount(), bytes("io_threads_limit")};
   BaseOptionManager globals(false);
   auto jobs = LoadJobs(JobProjectPaths(args), settings);
+  if (lookahead_requested && jobs.front()->patch_match_stereo->geom_consistency) {
+    throw std::invalid_argument("geometry host lookahead is unsupported");
+  }
   const auto& g = jobs.front()->globals;
   std::vector<std::string> common = {
       "colmap_owned_pair", "--default_random_seed", Value(g.seed),

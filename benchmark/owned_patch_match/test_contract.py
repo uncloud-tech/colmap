@@ -246,7 +246,118 @@ int main() {
                            ('RunPreparedOwnedPairJob', 'ExecutePreparedOwnedPairJob')]:
             start = source.index('PatchMatchController::' + entry)
             block = source[start:source.index('PatchMatchController::' + end, start)]
-            self.assertIn('THROW_CHECK(!options_.geom_consistency)', block)
+            if entry == 'RunPreparedOwnedPairJob':
+                self.assertIn('THROW_CHECK(!options_.geom_consistency)', block)
+            else:
+                self.assertNotIn('THROW_CHECK(!options_.geom_consistency)', block)
+
+    def test_paired_geometry_admission_and_accounting(self):
+        source = (ROOT / 'src/colmap/exe/owned_pair.cc').read_text()
+        self.assertIn('(o.geom_consistency && !o.filter)', source)
+        self.assertIn('geometry requires exactly TWO jobs', source)
+        self.assertIn('mixed photometric/geometric phases', source)
+        self.assertIn('geometry host lookahead is unsupported', source)
+        future = source[source.index('PrepareFutureHostJob('):
+                        source.index('template <class RunJob, class PrepareJob')]
+        self.assertLess(future.index('if (job.patch_match_stereo->geom_consistency)'),
+                        future.index('mvs::PatchMatchController controller'))
+        self.assertIn('host lookahead is photometric-only', future)
+        check = source[source.index('void CheckInputs('):source.index('template<class T>')]
+        self.assertIn('CheckSeedMap(', check)
+        self.assertIn('pair::CheckedMultiply(17, q) : q', check)
+        self.assertIn('pair::CheckedMultiply(2,retained)', check)
+        self.assertIn('pair::CheckedMultiply(4, u) : u', check)
+        self.assertIn('pair::CheckedMultiply(4,u)', check)
+        self.assertIn('pair::CheckedMultiply(max_w,max_h)', check)
+        self.assertIn('std::max(staging,pair::CheckedMultiply(24,a))', check)
+
+
+    def test_paired_geometry_envelope_cpu(self):
+        # Compile the actual runner preflight, with image/rotation stubs only.
+        # Native bitmap decoding and controller lifetime are covered by GTest.
+        source = (ROOT / 'src/colmap/exe/owned_pair.cc').read_text()
+        preflight = source[source.index('void CheckSeedMap('):
+                           source.index('template<class T>')]
+        self.compile_cpu(r'''
+#include "colmap/mvs/owned_pair_validation.h"
+#include <algorithm>
+#include <array>
+#include <cassert>
+#include <filesystem>
+#include <fstream>
+#include <set>
+#include <vector>
+namespace fs = std::filesystem;
+namespace colmap::mvs::owned {
+struct ByteCharge { uint64_t host, device; };
+struct Layout { uint64_t logical_bytes; };
+inline Layout BuildOwnedRotationLayout(uint64_t, uint64_t, uint64_t) { return {42}; }
+inline uint64_t ReadPairBitmapPixels(const fs::path&, uint64_t w, uint64_t h) {
+  return CheckedMultiply(w, h);
+}
+}
+namespace pair = colmap::mvs::owned;
+namespace mvs {
+struct Image {
+  fs::path path; uint64_t width, height;
+  const fs::path& GetPath() const { return path; }
+  uint64_t GetWidth() const { return width; }
+  uint64_t GetHeight() const { return height; }
+};
+struct PatchMatchOptions { bool geom_consistency; double cache_size; };
+struct PatchMatch { struct Problem {
+  const std::vector<Image>* images; int ref_image_idx;
+  std::vector<int> src_image_idxs;
+}; };
+}
+''' + preflight + r'''
+void Seed(const fs::path& path, uint64_t w, uint64_t h, uint64_t channels) {
+  fs::create_directories(path.parent_path());
+  std::ofstream out(path, std::ios::binary);
+  out << w << "&" << h << "&" << channels << "&";
+  std::string payload(w*h*channels*4, 0);
+  out.write(payload.data(), payload.size());
+}
+int main(int argc, char** argv) {
+  assert(argc == 1);
+  const auto root = fs::path(argv[0]).parent_path() / "workspace";
+  fs::create_directories(root / "images");
+  std::vector<mvs::Image> images{{root/"images/a",2,2},
+                               {root/"images/b",10,3},
+                               {root/"images/c",3,11}};
+  for (const auto& image : images) {
+    std::ofstream(image.path).put(0);
+    const auto name = image.path.filename().string() + ".photometric.bin";
+    Seed(root/"stereo/depth_maps"/name, image.width, image.height, 1);
+    Seed(root/"stereo/normal_maps"/name, image.width, image.height, 3);
+  }
+  mvs::PatchMatch::Problem p{&images, 0, {2, 1}};
+  mvs::PatchMatchOptions o{true, 1139/1073741824.0};
+  const uint64_t host = 1139+2278+880;
+  const uint64_t device = 42+1100+8+1376+32;
+  CheckInputs(o, p, {host, device}, root);
+  auto rejects = [&](pair::ByteCharge charge) {
+    bool caught=false;
+    try { CheckInputs(o, p, charge, root); }
+    catch(const std::invalid_argument&) { caught=true; }
+    assert(caught);
+  };
+  rejects({host-1,device}); rejects({host,device-1});
+  o.cache_size=1138/1073741824.0; rejects({host,device});
+  o.cache_size=67/1073741824.0; rejects({host,device});
+  o.geom_consistency=false;
+  fs::remove_all(root/"stereo");
+  CheckInputs(o,p,{67+134+220,42+220+8+1376+32},root);
+  rejects({67+134+220-1,device});
+  o.geom_consistency=true; o.cache_size=1139/1073741824.0;
+  rejects({host,device});  // Missing seeds, not a photo estimate.
+  Seed(root/"stereo/depth_maps/a.photometric.bin",2,2,1);
+  CheckSeedMap(root/"stereo/depth_maps/a.photometric.bin",2,2,1);
+  Seed(root/"stereo/depth_maps/a.photometric.bin",3,2,1);
+  rejects({host,device});
+  fs::remove_all(root);
+}
+''')
 
     def test_constructor_failure_fenced_before_unwind(self):
         source = self.source('patch_match_cuda_owned.cu')

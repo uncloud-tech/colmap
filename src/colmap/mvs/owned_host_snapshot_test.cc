@@ -289,17 +289,120 @@ TEST_F(OwnedHostSnapshotTest, UnsupportedModesRejectBeforeDecodeOrDeviceWork) {
                 std::string::npos);
     }
   }
+}
+
+TEST_F(OwnedHostSnapshotTest, PreparedGeometrySurvivesInputRetirement) {
+  SyntheticDatasetOptions synthetic;
+  synthetic.num_rigs = 1;
+  synthetic.num_cameras_per_rig = 1;
+  synthetic.num_frames_per_rig = 4;
+  synthetic.camera_width = kWidth;
+  synthetic.camera_height = kHeight;
+  synthetic.camera_model_id = SimplePinholeCameraModel::model_id;
+  synthetic.camera_params = {12, 5, 4};
+  Reconstruction reconstruction;
+  SynthesizeDataset(synthetic, &reconstruction);
+  reconstruction.Write(workspace_path_ / "sparse");
+  Model model;
+  model.ReadFromCOLMAP(workspace_path_, "sparse", "images");
+  const auto ref_name = reconstruction.Image(1).Name();
+  const auto first_name = reconstruction.Image(4).Name();
+  const auto second_name = reconstruction.Image(2).Name();
+  const int reference = model.GetImageIdx(ref_name);
+  const int unused = model.GetImageIdx(reconstruction.Image(3).Name());
+  const std::vector<int> configured{model.GetImageIdx(first_name),
+                                    model.GetImageIdx(second_name)};
+  FlatHashSet<int> used(configured.begin(), configured.end());
+  used.insert(reference);
+  std::vector<int> effective;
+  for (const int idx : used) {
+    if (idx != reference) effective.push_back(idx);
+    Bitmap bitmap(kWidth, kHeight, false);
+    bitmap.Fill(BitmapColor<uint8_t>(20 + idx));
+    ASSERT_TRUE(bitmap.Write(model.images.at(idx).GetPath()));
+    DepthMap depth(kWidth, kHeight, 1.25, 8.5);
+    NormalMap normal(kWidth, kHeight);
+    depth.Fill(2 + idx);
+    normal.Fill(0.25 + idx);
+    const auto name = model.GetImageName(idx) + ".photometric.bin";
+    depth.Write(workspace_path_ / "stereo" / "depth_maps" / name);
+    normal.Write(workspace_path_ / "stereo" / "normal_maps" / name);
+  }
+  {
+    std::ofstream config(config_path_);
+    config << ref_name << '\n' << first_name << ',' << second_name << '\n';
+    ASSERT_TRUE(config.good());
+  }
   auto options = Options();
   options.geom_consistency = true;
-  for (const int preparation_threads : {0, 1}) {
-    try {
-      auto controller = Controller(options);
-      controller->PrepareOwnedPairJob(0, {}, preparation_threads);
-      ADD_FAILURE() << "Geometric preparation/lookahead was accepted";
-    } catch (const std::invalid_argument& error) {
-      EXPECT_NE(std::string(error.what()).find("photometric-only"),
-                std::string::npos);
+  int checks = 0;
+  PatchMatchController::OwnedPairHooks hooks;
+  hooks.check_inputs = [&](size_t, const auto& o, const auto& p) {
+    ++checks;
+    EXPECT_TRUE(o.geom_consistency);
+    EXPECT_EQ(p.src_image_idxs, effective);
+  };
+  std::array<std::unique_ptr<PatchMatchController::OwnedPreparedJob>, 2> prepared;
+  for (size_t job = 0; job < 2; ++job) {
+    auto controller = Controller(options);
+    prepared[job] = controller->PrepareOwnedPairJob(job, hooks);
+    // Shared preparation releases Workspace/local inputs before returning;
+    // controller retirement must not invalidate the maps or bitmaps either.
+  }
+  EXPECT_EQ(checks, 2);
+  std::filesystem::remove_all(workspace_path_);
+  for (const auto& job : prepared) {
+    const auto& engine = *job->patch_match;
+    const auto& problem = engine.GetProblem();
+    EXPECT_TRUE(engine.GetOptions().geom_consistency);
+    EXPECT_EQ(problem.ref_image_idx, reference);
+    EXPECT_EQ(problem.src_image_idxs, effective);  // Native hash order, not sorted.
+    ASSERT_EQ(problem.depth_maps->size(), 4);
+    ASSERT_EQ(problem.normal_maps->size(), 4);
+    EXPECT_EQ(problem.depth_maps->at(unused).GetWidth(), 0);
+    EXPECT_EQ(problem.normal_maps->at(unused).GetWidth(), 0);
+    EXPECT_EQ(problem.images->at(unused).GetBitmap().Width(), 0);
+    for (const int idx : used) {
+      EXPECT_FLOAT_EQ(problem.depth_maps->at(idx).Get(0, 0), 2 + idx);
+      for (size_t channel = 0; channel < 3; ++channel) {
+        EXPECT_FLOAT_EQ(problem.normal_maps->at(idx).Get(0, 0, channel),
+                        0.25 + idx);
+      }
+      EXPECT_EQ(problem.images->at(idx).GetBitmap().GetPixel(0, 0)->r, 20 + idx);
     }
+    EXPECT_EQ(job->depth_map_path.filename(), ref_name + ".geometric.bin");
+    EXPECT_EQ(job->normal_map_path.filename(), ref_name + ".geometric.bin");
+    EXPECT_NO_THROW(engine.Check());
+  }
+}
+
+TEST_F(OwnedHostSnapshotTest, GeometryPreparationRejectsUnsupportedFlags) {
+  std::filesystem::remove_all(workspace_path_);
+  for (int flag = 0; flag < 3; ++flag) {
+    auto options = Options();
+    options.geom_consistency = true;
+    options.filter = flag != 0;
+    options.write_consistency_graph = flag == 1;
+    options.allow_missing_files = flag == 2;
+    EXPECT_THROW(Controller(options), std::invalid_argument);
+  }
+}
+
+TEST_F(OwnedHostSnapshotTest, PreparedGeometryRejectsMissingSeedsAndFreshOutputs) {
+  auto options = Options();
+  options.geom_consistency = true;
+  EXPECT_THROW(Controller(options)->PrepareOwnedPairJob(0, {}),
+               std::invalid_argument);
+  for (const auto* folder : {"depth_maps", "normal_maps"}) {
+    const auto path = workspace_path_ / "stereo" / folder /
+                      (image_names_[0] + ".geometric.bin");
+    {
+      std::ofstream output(path);
+      output << "partial";
+    }
+    EXPECT_THROW(Controller(options)->PrepareOwnedPairJob(0, {}),
+               std::invalid_argument);
+    std::filesystem::remove(path);
   }
 }
 
