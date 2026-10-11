@@ -188,7 +188,11 @@ class OwnedPairTest : public testing::Test {
     const float translation[3] = {0, 0, 0};
     // Use distinct reference indices for the two owners; preceding synthetic
     // entries are unused and never decoded or reported as sources.
-    std::vector<mvs::Image> images(slot);
+    // Do not relocate default Image placeholders: their unused matrix arrays
+    // are uninitialized. Reserve before creating them, then append in place.
+    std::vector<mvs::Image> images;
+    images.reserve(slot + 1);
+    images.resize(slot);
     images.emplace_back(job.workspace / "images" / job.reference_name,
                         1, 1, identity, identity, translation);
     mvs::PatchMatch::Problem problem;
