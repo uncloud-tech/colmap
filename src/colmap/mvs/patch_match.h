@@ -162,7 +162,7 @@ class PatchMatchController : public BaseController {
   // CPU-only preparation. No coordinator, events, or CUDA calls; all workspace
   // and decode owners are released before returning the owned engine.
   std::unique_ptr<OwnedPreparedJob> PrepareOwnedPairJob(
-      size_t job, const OwnedPairHooks& hooks);
+      size_t job, const OwnedPairHooks& hooks, int preparation_threads = 0);
   // Consumes a prefetched engine on a fresh owner-thread controller, acquiring
   // the normal preparation lease before the first CUDA backend construction.
   void RunPreparedOwnedPairJob(std::unique_ptr<OwnedPreparedJob> prepared,

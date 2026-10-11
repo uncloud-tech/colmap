@@ -183,6 +183,14 @@ class OwnedPairTest : public testing::Test {
     for (auto& arg : args) argv.push_back(arg.data());
     return RunPairs(static_cast<int>(argv.size()), argv.data(), run_job);
   }
+  template <class RunJob, class PrepareJob>
+  int InvokePrepared(std::vector<std::string> args, RunJob run_job,
+                     PrepareJob prepare_job) {
+    std::vector<char*> argv;
+    for (auto& arg : args) argv.push_back(arg.data());
+    return RunPairs(static_cast<int>(argv.size()), argv.data(),
+                    run_job, prepare_job);
+  }
   void Reject(std::vector<std::string> args) {
     std::atomic<size_t> calls{0};
     EventCapture capture;
@@ -499,6 +507,85 @@ TEST_F(OwnedPairTest, CallbackFailuresAbortLaterEpochsAndDestroyOwnerResources) 
     EXPECT_EQ(joins, 1);
     EXPECT_EQ(finishes, 0);
   }
+}
+
+TEST_F(OwnedPairTest, HostLookaheadParserRejectsInvalidOrMissingReservation) {
+  auto args = ListArgs({0, 1, 2, 3});
+  args.insert(args.end(), {"--host_lookahead", "2"});
+  Reject(args);
+  args.back() = "1";
+  Reject(args);
+  args.insert(args.end(), {"--host_lookahead_charge_bytes", "0"});
+  Reject(args);
+}
+
+TEST_F(OwnedPairTest, HostLookaheadInsufficientBudgetFallsBackSynchronously) {
+  auto args = ListArgs({0, 1, 2, 3});
+  args.insert(args.end(), {"--host_lookahead", "1",
+                           "--host_lookahead_charge_bytes", "4000000"});
+  EventCapture capture;
+  EXPECT_EQ(Invoke(args, Complete), EXIT_SUCCESS);
+  const auto log = capture.Read();
+  EXPECT_NE(log.find("event=fallback enabled=0 reserved_host=0 reason=host_budget"),
+            std::string::npos);
+  EXPECT_EQ(log.find("event=prep_start"), std::string::npos);
+}
+
+TEST_F(OwnedPairTest, HostLookaheadRealDriverConsumesOnlyAfterNextAdmission) {
+  if (AffinityCount() < 2) GTEST_SKIP() << "lookahead requires two CPU slots";
+  auto args = ListArgs({0, 1, 2, 3});
+  args.insert(args.end(), {"--host_lookahead", "1",
+                           "--host_lookahead_charge_bytes", "100"});
+  std::atomic<size_t> preparations{0}, consumed{0};
+  EventCapture capture;
+  EXPECT_EQ(InvokePrepared(args,
+      [&](auto& job, auto& coordinator, size_t slot, const auto& hooks,
+          std::unique_ptr<PreparedHostJob> prepared) {
+        if (job.reference_name == "reference 2.jpg" ||
+            job.reference_name == "reference 3.jpg") {
+          EXPECT_NE(prepared, nullptr);
+          ++consumed;
+        } else EXPECT_EQ(prepared, nullptr);
+        Complete(job, coordinator, slot, hooks);
+      },
+      [&](auto&, size_t, pair::ByteCharge, const std::atomic<bool>& cancelled) {
+        EXPECT_FALSE(cancelled.load());
+        ++preparations;
+        return std::make_unique<PreparedHostJob>();
+      }), EXIT_SUCCESS);
+  EXPECT_EQ(preparations.load(), 2);
+  EXPECT_EQ(consumed.load(), 2);
+  const auto log = capture.Read();
+  const auto consume = log.find("event=consume");
+  ASSERT_NE(consume, std::string::npos);
+  EXPECT_LT(log.find("event=batch_finished"), consume);
+  EXPECT_EQ(log.substr(0, consume).find("event=admitted"),
+            log.find("event=admitted"));
+  size_t admissions = 0;
+  for (const auto& record : Records(log.substr(0, consume))) {
+    admissions += record.at("event") == "admitted";
+  }
+  EXPECT_EQ(admissions, 4);
+  EXPECT_NE(log.find("event=release enabled=1 reserved_host=0"), std::string::npos);
+}
+
+TEST_F(OwnedPairTest, HostPreparationFailureStopsNextEpochBeforeAdmission) {
+  if (AffinityCount() < 2) GTEST_SKIP() << "lookahead requires two CPU slots";
+  auto args = ListArgs({0, 1, 2, 3});
+  args.insert(args.end(), {"--host_lookahead", "1",
+                           "--host_lookahead_charge_bytes", "100"});
+  EventCapture capture;
+  EXPECT_THROW(InvokePrepared(args, Complete,
+      [](auto&, size_t slot, pair::ByteCharge, const std::atomic<bool>&) {
+        if (slot == 1) throw std::runtime_error("injected CPU preparation error");
+        return std::make_unique<PreparedHostJob>();
+      }), std::runtime_error);
+  const auto log = capture.Read();
+  size_t admissions = 0;
+  for (const auto& record : Records(log)) admissions += record.at("event") == "admitted";
+  EXPECT_EQ(admissions, 2);
+  EXPECT_NE(log.find("event=failed"), std::string::npos);
+  EXPECT_NE(log.find("event=release enabled=1 reserved_host=0"), std::string::npos);
 }
 
 TEST(OwnedPairEventsTest, SameClockTickTokensAreStrictlyIncreasing) {

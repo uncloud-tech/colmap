@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Finite two-owner epochs. Never a production queue scheduler.
 #include "colmap/controllers/option_manager.h"
+#include "colmap/mvs/owned_host_lookahead.h"
 #include "colmap/mvs/owned_pair_events.h"
 #include "colmap/mvs/owned_pair_image.h"
 #include "colmap/mvs/owned_pair_run.h"
@@ -25,6 +26,7 @@
 #include <set>
 #include <sstream>
 #include <tuple>
+#include <type_traits>
 #include <vector>
 #if defined(__linux__)
 #include <sched.h>
@@ -314,7 +316,9 @@ template <class RunJob>
 void RunPairEpoch(JobOptions& a,
                   JobOptions& b,
                   const PairSettings& settings,
-                  RunJob& run_job) {
+                  RunJob& run_job,
+                  const std::function<void()>& admitted = {},
+                  const std::function<void()>& solver_released = {}) {
   const std::array<JobOptions*, 2> jobs{{&a, &b}};
   const auto& capacity = settings.capacity;
   const auto& process = settings.process;
@@ -338,7 +342,12 @@ void RunPairEpoch(JobOptions& a,
       coordinator=std::make_unique<pair::PairCoordinator>(
         settings.dispatch=="serial"?pair::PairDispatch::kSerial:pair::PairDispatch::kPair,
         capacity,process,charges,std::chrono::milliseconds(300000),
-        [&](const pair::PairEvent& e){events.Coordinator(e);});
+        [&](const pair::PairEvent& e) {
+          events.Coordinator(e);
+          if (e.event == "solver_release" && e.job == 0 && solver_released) {
+            solver_released();
+          }
+        });
     } catch (...) {
       events.Emit(pair::PairEvents::kBatch,"admission_denied","reserved_host=0 reserved_device=0");
       throw;
@@ -346,6 +355,7 @@ void RunPairEpoch(JobOptions& a,
     const auto reserved = coordinator->ReservedBytes();
     events.Emit(pair::PairEvents::kBatch,"ledger_reserved",
                 "reserved_host="+Value(reserved.host)+" reserved_device="+Value(reserved.device));
+    if (admitted) admitted();
     mvs::PatchMatchController::OwnedPairHooks hooks;
     hooks.check_inputs=[&](size_t j,const auto& o,const auto& p){CheckInputs(o,p,charges[j]);};
     hooks.metadata=[&](size_t j,const auto& o,const auto& p){Metadata(events,j,o,p);};
@@ -369,8 +379,49 @@ void RunPairEpoch(JobOptions& a,
   }
 }
 
-template <class RunJob>
-int RunPairs(int argc, char** argv, RunJob run_job) {
+using PreparedHostJob = mvs::PatchMatchController::OwnedPreparedJob;
+using HostLookahead = pair::HostLookahead<PreparedHostJob>;
+
+void HostLookaheadEvent(size_t target, bool enabled, const char* event,
+                        int job, uint64_t reserved,
+                        const char* reason = nullptr) {
+  std::ostringstream line;
+  line << "\nOWNED_HOST_LOOKAHEAD pid=" << getpid()
+       << " monotonic_ns=" << pair::PairEvents::NowNs()
+       << " target_epoch=" << target << " event=" << event
+       << " enabled=" << (enabled ? 1 : 0)
+       << " reserved_host=" << reserved;
+  if (job >= 0) line << " job=" << (job == 0 ? "A" : "B");
+  if (reason) line << " reason=" << reason;
+  line << " io_threads=" << (enabled ? 1 : 0) << '\n';
+  const auto text = line.str();
+  if (text.size() > 4096) throw std::length_error("lookahead event too long");
+  ssize_t written;
+  do { written = write(STDOUT_FILENO, text.data(), text.size()); }
+  while (written < 0 && errno == EINTR);
+  if (written < 0 || static_cast<size_t>(written) != text.size()) {
+    throw std::runtime_error("lookahead event write failed");
+  }
+}
+
+std::unique_ptr<PreparedHostJob> PrepareHostJob(
+    JobOptions& job, size_t slot, pair::ByteCharge charge,
+    const std::atomic<bool>& cancelled) {
+  mvs::PatchMatchController controller(*job.patch_match_stereo, job.workspace,
+      job.format, job.pmvs, job.config, mvs::PatchMatchExecution::kOwnedCuda);
+  mvs::PatchMatchController::OwnedPairHooks hooks;
+  hooks.check_inputs = [&](size_t, const auto& options, const auto& problem) {
+    if (cancelled.load(std::memory_order_relaxed)) {
+      throw std::runtime_error("host preparation cancelled");
+    }
+    CheckInputs(options, problem, charge);
+  };
+  return controller.PrepareOwnedPairJob(slot, hooks, 1);
+}
+
+template <class RunJob, class PrepareJob = decltype(&PrepareHostJob)>
+int RunPairs(int argc, char** argv, RunJob run_job,
+             PrepareJob prepare_job = &PrepareHostJob) {
   std::set<std::string> keys = {
       "dispatch", "host_budget_bytes", "device_budget_bytes",
       "job_a_host_charge_bytes", "job_a_device_charge_bytes",
@@ -384,12 +435,18 @@ int RunPairs(int argc, char** argv, RunJob run_job) {
     for (const auto& key : keys) std::cout << "  --" << key << " <value>\n";
     std::cout << "  --job_a_project_path <INI> --job_b_project_path <INI>\n"
                  "OR --job_project_list_path <list: one INI path per line, "
-                 "relative to list directory or absolute>\n";
+                 "relative to list directory or absolute>\n"
+                 "Optional: --host_lookahead 0|1 (default 0) "
+                 "--host_lookahead_charge_bytes <separate host reservation>\n";
     return EXIT_SUCCESS;
   }
   bool list_mode = false;
   for (int i = 1; i < argc; i += 2) {
     list_mode = list_mode || std::string(argv[i]) == "--job_project_list_path";
+    if (std::string(argv[i]) == "--host_lookahead") keys.insert("host_lookahead");
+    if (std::string(argv[i]) == "--host_lookahead_charge_bytes") {
+      keys.insert("host_lookahead_charge_bytes");
+    }
   }
   if (list_mode) {
     keys.insert("job_project_list_path");
@@ -401,6 +458,17 @@ int RunPairs(int argc, char** argv, RunJob run_job) {
   const auto args = pair::ParseStrictArguments(argc, argv, keys);
   if (args.at("dispatch") != "serial" && args.at("dispatch") != "pair") {
     throw std::invalid_argument("invalid dispatch");
+  }
+  const bool lookahead_requested = args.count("host_lookahead") &&
+                                   args.at("host_lookahead") == "1";
+  if (args.count("host_lookahead") && args.at("host_lookahead") != "0" &&
+      args.at("host_lookahead") != "1") {
+    throw std::invalid_argument("host_lookahead must be 0 or 1");
+  }
+  const uint64_t lookahead_charge = args.count("host_lookahead_charge_bytes")
+      ? pair::ParseBytes(args.at("host_lookahead_charge_bytes")) : 0;
+  if (lookahead_requested && lookahead_charge == 0) {
+    throw std::invalid_argument("lookahead requires separate positive host charge");
   }
   const auto bytes = [&](const char* key) { return pair::ParseBytes(args.at(key)); };
   const PairSettings settings{
@@ -425,11 +493,58 @@ int RunPairs(int argc, char** argv, RunJob run_job) {
   if (!globals.Parse(static_cast<int>(common_argv.size()), common_argv.data())) {
     throw std::invalid_argument("invalid global settings");
   }
+  // The full additional transient charge is held even after CPU preparation
+  // completes. Never lend current owner/process credits to future snapshots.
+  const bool host_room = pair::CanReserveHostLookahead(
+      settings.capacity.host, settings.process.host, settings.charges[0].host,
+      settings.charges[1].host, lookahead_charge);
+  std::unique_ptr<HostLookahead> next;
+  if (lookahead_requested && jobs.size() == 2) {
+    HostLookaheadEvent(1, false, "fallback", -1, 0, "no_next_epoch");
+  }
   for (size_t first = 0; first < jobs.size(); first += 2) {
-    // The complete prior epoch (including events/coordinator and both owner
-    // controllers) is destroyed before the next admission. Failure escapes
-    // immediately, even if cancellation managed to return the prior credits.
-    RunPairEpoch(*jobs[first], *jobs[first + 1], settings, run_job);
+    // Prior owners/controllers/coordinator have been destroyed. Join and check
+    // CPU errors BEFORE next GPU admission, then transfer only after admission.
+    auto pending = std::move(next);
+    if (pending) pending->Join();
+    HostLookahead::Pair prepared;
+    auto admitted = [&] {
+      if (pending) prepared = pending->Consume();
+    };
+    auto execute = [&](JobOptions& job, pair::PairCoordinator& coordinator,
+                       size_t slot, const auto& hooks) {
+      if constexpr (std::is_invocable_v<RunJob&, JobOptions&,
+                        pair::PairCoordinator&, size_t, decltype(hooks),
+                        std::unique_ptr<PreparedHostJob>>) {
+        run_job(job, coordinator, slot, hooks, std::move(prepared[slot]));
+      } else {
+        if (prepared[slot]) throw std::logic_error("caller cannot consume snapshot");
+        run_job(job, coordinator, slot, hooks);
+      }
+    };
+    auto solver_released = [&] {
+      if (first + 2 == jobs.size()) return;
+      const size_t target = first / 2 + 1;
+      if (!lookahead_requested) {
+        HostLookaheadEvent(target, false, "disabled", -1, 0);
+        return;
+      }
+      if (!host_room || settings.affinity < 2) {
+        HostLookaheadEvent(target, false, "fallback", -1, 0,
+                           host_room ? "cpu_io_budget" : "host_budget");
+        return;
+      }
+      next = std::make_unique<HostLookahead>(lookahead_charge,
+          [target](const char* event, int slot, uint64_t reserved) {
+            HostLookaheadEvent(target, true, event, slot, reserved);
+          });
+      next->Start([&, first](size_t slot, const std::atomic<bool>& cancelled) {
+        return prepare_job(*jobs[first + 2 + slot], slot,
+                           settings.charges[slot], cancelled);
+      });
+    };
+    RunPairEpoch(*jobs[first], *jobs[first + 1], settings, execute,
+                 admitted, solver_released);
   }
   return EXIT_SUCCESS;
 }
@@ -438,10 +553,15 @@ int RunPair(int argc, char** argv) {
   return RunPairs(argc, argv, [](JobOptions& job,
                                  pair::PairCoordinator& coordinator,
                                  size_t slot,
-                                 const mvs::PatchMatchController::OwnedPairHooks& hooks) {
+                                 const mvs::PatchMatchController::OwnedPairHooks& hooks,
+                                 std::unique_ptr<PreparedHostJob> prepared) {
     mvs::PatchMatchController controller(*job.patch_match_stereo, job.workspace,
         job.format, job.pmvs, job.config, mvs::PatchMatchExecution::kOwnedCuda);
-    controller.RunOwnedPairJob(coordinator, slot, hooks);
+    if (prepared) {
+      controller.RunPreparedOwnedPairJob(std::move(prepared), coordinator, slot, hooks);
+    } else {
+      controller.RunOwnedPairJob(coordinator, slot, hooks);
+    }
   });
 }
 }  // namespace

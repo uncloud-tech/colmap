@@ -122,11 +122,23 @@ if(CUDA_ENABLED)
             owned_pair_output.h
             owned_pair_events.h
             owned_pair_run.h
+            owned_host_lookahead.h
         PUBLIC_LINK_LIBS
             colmap_mvs
             colmap_util_cuda
             CUDA::cudart
             CUDA::curand
+    )
+
+    COLMAP_ADD_TEST(
+        NAME owned_host_lookahead_test
+        SRCS owned_host_lookahead_test.cc
+        LINK_LIBS colmap_mvs_cuda
+    )
+    COLMAP_ADD_TEST(
+        NAME owned_host_snapshot_test
+        SRCS owned_host_snapshot_test.cc
+        LINK_LIBS colmap_mvs_cuda
     )
 
     # Work around NVCC miscompilation on Blackwell GPUs (sm_100+).

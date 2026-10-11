@@ -305,7 +305,8 @@ void PatchMatchController::Run() {
 
 std::unique_ptr<PatchMatchController::OwnedPreparedJob>
 PatchMatchController::PrepareOwnedPairJob(const size_t job,
-                                        const OwnedPairHooks& hooks) {
+                                        const OwnedPairHooks& hooks,
+                                        const int preparation_threads) {
   THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
   THROW_CHECK_LE(job, 1);
   THROW_CHECK(!options_.geom_consistency);
@@ -314,6 +315,8 @@ PatchMatchController::PrepareOwnedPairJob(const size_t job,
   THROW_CHECK_EQ(explicit_gpu_indices.size(), 1);
   THROW_CHECK_GE(explicit_gpu_indices.front(), 0);
   THROW_CHECK_GT(options_.num_threads, 0);
+  THROW_CHECK_GE(preparation_threads, 0);
+  THROW_CHECK_LE(preparation_threads, options_.num_threads);
   THROW_CHECK(!workspace_ && !io_thread_pool_ && !thread_pool_);
 
   const auto release_inputs = [this] {
@@ -328,7 +331,11 @@ PatchMatchController::PrepareOwnedPairJob(const size_t job,
     ReadProblems();
     THROW_CHECK_EQ(problems_.size(), 1);
     ReadGpuIndices();
-    io_thread_pool_ = std::make_unique<ThreadPool>(options_.num_threads);
+    // A lookahead worker may use fewer decode threads without changing the
+    // frozen PatchMatch numerical/options metadata. Default synchronous
+    // preparation retains the configured decode parallelism.
+    io_thread_pool_ = std::make_unique<ThreadPool>(
+        preparation_threads == 0 ? options_.num_threads : preparation_threads);
     auto prepared = std::make_unique<OwnedPreparedJob>();
     // Shared with stock dispatch: identical options, source ordering and decode.
     ProcessProblemInputs(options_, 0, prepared.get(), job, hooks);
@@ -371,6 +378,8 @@ void PatchMatchController::RunPreparedOwnedPairJob(
     THROW_CHECK(!workspace_ && !io_thread_pool_ && !thread_pool_);
     THROW_CHECK_NOTNULL(prepared.get());
     THROW_CHECK_NOTNULL(prepared->patch_match.get());
+    THROW_CHECK(!ExistsFile(prepared->depth_map_path));
+    THROW_CHECK(!ExistsFile(prepared->normal_map_path));
     coordinator.BeginPreparation(job);
     ExecutePreparedOwnedPairJob(*prepared, coordinator, job, hooks);
   } catch (...) {
