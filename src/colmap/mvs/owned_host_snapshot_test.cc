@@ -30,6 +30,7 @@ class OwnedHostSnapshotTest : public ::testing::Test {
     workspace_path_ = CreateTestDir();
     CreateDirIfNotExists(workspace_path_ / "sparse");
     CreateDirIfNotExists(workspace_path_ / "images");
+    CreateDirIfNotExists(workspace_path_ / "stereo");
     CreateDirIfNotExists(workspace_path_ / "stereo" / "depth_maps");
     CreateDirIfNotExists(workspace_path_ / "stereo" / "normal_maps");
 

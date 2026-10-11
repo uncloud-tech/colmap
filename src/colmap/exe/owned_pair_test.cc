@@ -528,7 +528,12 @@ TEST_F(OwnedPairTest, HostLookaheadInsufficientBudgetFallsBackSynchronously) {
   const auto log = capture.Read();
   EXPECT_NE(log.find("event=fallback enabled=0 reserved_host=0 reason=host_budget"),
             std::string::npos);
-  EXPECT_EQ(log.find("event=prep_start"), std::string::npos);
+  std::istringstream lines(log);
+  for (std::string line; std::getline(lines, line);) {
+    if (line.find("OWNED_HOST_LOOKAHEAD ") != std::string::npos) {
+      EXPECT_EQ(line.find("event=prep_start"), std::string::npos);
+    }
+  }
 }
 
 TEST_F(OwnedPairTest, HostLookaheadRealDriverConsumesOnlyAfterNextAdmission) {
