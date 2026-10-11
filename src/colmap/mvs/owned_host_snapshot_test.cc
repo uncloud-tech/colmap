@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "colmap/mvs/patch_match.h"
+#include "colmap/mvs/workspace.h"
 #include "colmap/mvs/model.h"
 #include "colmap/util/hash_containers.h"
 
