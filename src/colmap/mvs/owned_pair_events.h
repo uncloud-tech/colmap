@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
@@ -44,7 +45,9 @@ class PairEvents {
     throw std::runtime_error("owned pair events require Linux qualification");
 #endif
     start_ns_ = NowNs();
-    batch_ = std::to_string(pid_) + "-" + std::to_string(start_ns_);
+    // Identity is unique even when concurrent constructors observe the same
+    // clock tick. Keep start_ns_ unchanged: the token is not a timing sample.
+    batch_ = std::to_string(pid_) + "-" + std::to_string(NextBatchToken(start_ns_));
   }
   void Owner(size_t job) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -90,6 +93,23 @@ class PairEvents {
   }
 
  private:
+  friend struct PairEventsTestAccess;
+
+  static uint64_t NextBatchToken(uint64_t now) {
+    uint64_t previous = last_batch_token_.load(std::memory_order_relaxed);
+    while (true) {
+      if (previous == std::numeric_limits<uint64_t>::max()) {
+        throw std::overflow_error("owned pair batch identity exhausted");
+      }
+      const uint64_t next = std::max(now, previous + 1);
+      if (last_batch_token_.compare_exchange_weak(
+              previous, next, std::memory_order_relaxed)) {
+        return next;
+      }
+    }
+  }
+  inline static std::atomic<uint64_t> last_batch_token_{0};
+
   void EmitLocked(size_t job, const std::string& event,
                   const std::string& fields) {
     if (job != kBatch && job > 1) throw std::invalid_argument("bad event job");

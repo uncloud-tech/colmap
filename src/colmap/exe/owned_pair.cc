@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
-// Optional finite TWO-owner experiment. Never a production queue scheduler.
+// Finite two-owner epochs. Never a production queue scheduler.
 #include "colmap/controllers/option_manager.h"
 #include "colmap/mvs/owned_pair_events.h"
 #include "colmap/mvs/owned_pair_image.h"
@@ -16,9 +16,11 @@
 #include <array>
 #include <climits>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <set>
 #include <sstream>
@@ -224,54 +226,107 @@ void Metadata(pair::PairEvents& events, size_t job,
   events.Emit(job,"effective_metadata_end","option_count="+Value(count));
 }
 
-int RunPair(int argc,char** argv) {
-  const std::set<std::string> keys={"dispatch","job_a_project_path","job_b_project_path",
-    "host_budget_bytes","device_budget_bytes","job_a_host_charge_bytes","job_a_device_charge_bytes",
-    "job_b_host_charge_bytes","job_b_device_charge_bytes","process_host_charge_bytes","process_device_charge_bytes",
-    "io_threads_limit"};
-  if(argc==2 && (std::string(argv[1])=="-h" || std::string(argv[1])=="--help")) {
-    std::cout<<"Finite TWO owned references; --dispatch serial|pair (SOLVER serial only). Required:\n";
-    for(const auto& key:keys)std::cout<<"  --"<<key<<" <value>\n";
-    return EXIT_SUCCESS;
+struct PairSettings {
+  std::string dispatch;
+  pair::ByteCharge capacity;
+  pair::ByteCharge process;
+  std::array<pair::ByteCharge, 2> charges;
+  uint64_t affinity;
+  uint64_t io_cap;
+};
+
+std::vector<fs::path> JobProjectPaths(
+    const std::map<std::string, std::string>& args) {
+  const auto list = args.find("job_project_list_path");
+  if (list == args.end()) {
+    return {args.at("job_a_project_path"), args.at("job_b_project_path")};
   }
-  const auto args=pair::ParseStrictArguments(argc,argv,keys);
-  if(args.at("dispatch")!="serial" && args.at("dispatch")!="pair") throw std::invalid_argument("invalid dispatch");
-  pair::PairEvents events(args.at("dispatch"));
-  try {
-    BaseOptionManager globals(false);
-    std::array<JobOptions,2> jobs;
-    if(!jobs[0].Read(args.at("job_a_project_path"),false) || !jobs[1].Read(args.at("job_b_project_path"),false)) {
-      throw std::invalid_argument("invalid job INI");
+  const auto path = fs::absolute(list->second);
+  std::ifstream stream(path);
+  if (!stream) throw std::invalid_argument("cannot read job project list");
+  std::vector<fs::path> paths;
+  std::string line;
+  while (std::getline(stream, line)) {
+    // A line is a literal path, not shell syntax. Keep spaces, including at
+    // either end; only remove the CR in a CRLF line ending.
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (line.empty() || line.find('\0') != std::string::npos) {
+      throw std::invalid_argument("empty or invalid job project list entry");
     }
-    if(!(jobs[0].globals==jobs[1].globals)) throw std::invalid_argument("conflicting process-global settings");
-    auto bytes=[&](const char* key){return pair::ParseBytes(args.at(key));};
-    const pair::ByteCharge capacity{bytes("host_budget_bytes"),bytes("device_budget_bytes")};
-    const pair::ByteCharge process{bytes("process_host_charge_bytes"),bytes("process_device_charge_bytes")};
-    const std::array<pair::ByteCharge,2> charges{{
-      {bytes("job_a_host_charge_bytes"),bytes("job_a_device_charge_bytes")},
-      {bytes("job_b_host_charge_bytes"),bytes("job_b_device_charge_bytes")}}};
-    const uint64_t affinity=AffinityCount(),io_cap=bytes("io_threads_limit");
-    pair::ValidateIo(jobs[0].patch_match_stereo->num_threads,jobs[1].patch_match_stereo->num_threads,io_cap,affinity);
-    for(size_t j=0;j<2;++j)ValidateJob(jobs[j],charges[j]);
-    if(jobs[0].reference_name==jobs[1].reference_name ||
-       pair::ParseBytes(jobs[0].patch_match_stereo->gpu_index)!=pair::ParseBytes(jobs[1].patch_match_stereo->gpu_index)) {
+    fs::path entry(line);
+    paths.push_back(entry.is_absolute() ? entry : path.parent_path() / entry);
+  }
+  if (!stream.eof() || paths.empty() || paths.size() % 2 != 0) {
+    throw std::invalid_argument("job project list requires an even count >= 2");
+  }
+  return paths;
+}
+
+std::vector<std::unique_ptr<JobOptions>> LoadJobs(
+    const std::vector<fs::path>& paths, const PairSettings& settings) {
+  std::vector<std::unique_ptr<JobOptions>> jobs;
+  jobs.reserve(paths.size());
+  // All registrations are constructed on the main thread, before any INI is
+  // read and before process globals are set. No owner starts during validation.
+  for (size_t j = 0; j < paths.size(); ++j) {
+    jobs.push_back(std::make_unique<JobOptions>());
+  }
+  std::set<std::string> references;
+  for (size_t j = 0; j < jobs.size(); ++j) {
+    auto& job = *jobs[j];
+    if (!job.Read(paths[j].string(), false)) {
+      throw std::invalid_argument("invalid job INI: " + paths[j].string());
+    }
+    if (!(job.globals == jobs.front()->globals)) {
+      throw std::invalid_argument("conflicting process-global settings");
+    }
+    ValidateJob(job, settings.charges[j % 2]);
+    if (!references.insert(job.reference_name).second ||
+        pair::ParseBytes(job.patch_match_stereo->gpu_index) !=
+            pair::ParseBytes(jobs.front()->patch_match_stereo->gpu_index)) {
       throw std::invalid_argument("duplicate reference or mixed device");
     }
-    if(pair::PathsAlias(jobs[0].workspace,jobs[1].workspace)) throw std::invalid_argument("workspace/output roots alias");
-    for(const auto& a:jobs[0].output_dirs)for(const auto& b:jobs[1].output_dirs) {
-      if(pair::PathsAlias(a,b)) throw std::invalid_argument("resolved output directories alias");
+    for (size_t previous = 0; previous < j; ++previous) {
+      if (pair::PathsAlias(job.workspace, jobs[previous]->workspace)) {
+        throw std::invalid_argument("workspace/output roots alias");
+      }
+      for (const auto& a : job.output_dirs) {
+        for (const auto& b : jobs[previous]->output_dirs) {
+          if (pair::PathsAlias(a, b)) {
+            throw std::invalid_argument("resolved output directories alias");
+          }
+        }
+      }
     }
-    const auto& g=jobs[0].globals;
-    std::vector<std::string> common={"colmap_owned_pair","--default_random_seed",Value(g.seed),"--log_target",g.target,
-      "--log_path",g.path,"--log_level",Value(g.level),"--log_severity",Value(g.severity)};
-#if COLMAP_GLOG_HAS_COLOR_SUPPORT
-    common.insert(common.end(),{"--log_color",Value(g.color)});
-#endif
-    std::vector<char*> common_argv;for(auto& value:common)common_argv.push_back(value.data());
-    if(!globals.Parse(static_cast<int>(common_argv.size()),common_argv.data())) throw std::invalid_argument("invalid global settings");
+    if (j % 2 == 1) {
+      pair::ValidateIo(jobs[j - 1]->patch_match_stereo->num_threads,
+                       job.patch_match_stereo->num_threads,
+                       settings.io_cap,
+                       settings.affinity);
+    }
+  }
+  return jobs;
+}
+
+// RunJob owns the controller and all per-job resources in its call scope.
+// The injected CPU test owner follows the SAME coordinator/owner orchestration.
+template <class RunJob>
+void RunPairEpoch(JobOptions& a,
+                  JobOptions& b,
+                  const PairSettings& settings,
+                  RunJob& run_job) {
+  const std::array<JobOptions*, 2> jobs{{&a, &b}};
+  const auto& capacity = settings.capacity;
+  const auto& process = settings.process;
+  const auto& charges = settings.charges;
+  const auto affinity = settings.affinity;
+  const auto io_cap = settings.io_cap;
+  const auto& g = a.globals;
+  pair::PairEvents events(settings.dispatch);
+  try {
     events.Emit(pair::PairEvents::kBatch,"validated",
       "driver_executable=colmap_owned_pair io_threads_limit="+Value(io_cap)+" affinity="+Value(affinity)+
-      " io_a="+Value(jobs[0].patch_match_stereo->num_threads)+" io_b="+Value(jobs[1].patch_match_stereo->num_threads)+
+      " io_a="+Value(jobs[0]->patch_match_stereo->num_threads)+" io_b="+Value(jobs[1]->patch_match_stereo->num_threads)+
       " host_budget="+Value(capacity.host)+" device_budget="+Value(capacity.device)+
       " hp="+Value(process.host)+" ha="+Value(charges[0].host)+" hb="+Value(charges[1].host)+
       " dp="+Value(process.device)+" da="+Value(charges[0].device)+" db="+Value(charges[1].device)+
@@ -281,7 +336,7 @@ int RunPair(int argc,char** argv) {
     std::unique_ptr<pair::PairCoordinator> coordinator;
     try {
       coordinator=std::make_unique<pair::PairCoordinator>(
-        args.at("dispatch")=="serial"?pair::PairDispatch::kSerial:pair::PairDispatch::kPair,
+        settings.dispatch=="serial"?pair::PairDispatch::kSerial:pair::PairDispatch::kPair,
         capacity,process,charges,std::chrono::milliseconds(300000),
         [&](const pair::PairEvent& e){events.Coordinator(e);});
     } catch (...) {
@@ -298,12 +353,13 @@ int RunPair(int argc,char** argv) {
     hooks.output_phase=[&](size_t j,const char* phase){events.Emit(j,phase);};
     pair::RunPairOwners(*coordinator,[&](size_t job){
       events.Owner(job);
-      mvs::PatchMatchController controller(*jobs[job].patch_match_stereo,jobs[job].workspace,
-          jobs[job].format,jobs[job].pmvs,jobs[job].config,mvs::PatchMatchExecution::kOwnedCuda);
-      controller.RunOwnedPairJob(*coordinator,job,hooks);
+      run_job(*jobs[job], *coordinator, job, hooks);
     },[&](size_t job,const char* event){events.Emit(job,event);});
+    const auto remaining = coordinator->ReservedBytes();
+    if (remaining.host != 0 || remaining.device != 0) {
+      throw std::logic_error("epoch finished with unreleased ledger credits");
+    }
     events.Finished();
-    return EXIT_SUCCESS;
   } catch (const std::exception& e) {
     try {events.Emit(pair::PairEvents::kBatch,"batch_failed","status=failure error_hex="+pair::Hex(e.what()));}catch(...){}
     throw;
@@ -311,6 +367,82 @@ int RunPair(int argc,char** argv) {
     try {events.Emit(pair::PairEvents::kBatch,"batch_failed","status=failure error_hex="+pair::Hex("unknown exception"));}catch(...){}
     throw;
   }
+}
+
+template <class RunJob>
+int RunPairs(int argc, char** argv, RunJob run_job) {
+  std::set<std::string> keys = {
+      "dispatch", "host_budget_bytes", "device_budget_bytes",
+      "job_a_host_charge_bytes", "job_a_device_charge_bytes",
+      "job_b_host_charge_bytes", "job_b_device_charge_bytes",
+      "process_host_charge_bytes", "process_device_charge_bytes",
+      "io_threads_limit"};
+  if (argc == 2 && (std::string(argv[1]) == "-h" ||
+                    std::string(argv[1]) == "--help")) {
+    std::cout << "Finite even owned references; --dispatch serial|pair "
+                 "(SOLVER serial only). Required:\n";
+    for (const auto& key : keys) std::cout << "  --" << key << " <value>\n";
+    std::cout << "  --job_a_project_path <INI> --job_b_project_path <INI>\n"
+                 "OR --job_project_list_path <list: one INI path per line, "
+                 "relative to list directory or absolute>\n";
+    return EXIT_SUCCESS;
+  }
+  bool list_mode = false;
+  for (int i = 1; i < argc; i += 2) {
+    list_mode = list_mode || std::string(argv[i]) == "--job_project_list_path";
+  }
+  if (list_mode) {
+    keys.insert("job_project_list_path");
+  } else {
+    keys.insert("job_a_project_path");
+    keys.insert("job_b_project_path");
+  }
+  // Selecting one exact key set also rejects mixed legacy/list arguments.
+  const auto args = pair::ParseStrictArguments(argc, argv, keys);
+  if (args.at("dispatch") != "serial" && args.at("dispatch") != "pair") {
+    throw std::invalid_argument("invalid dispatch");
+  }
+  const auto bytes = [&](const char* key) { return pair::ParseBytes(args.at(key)); };
+  const PairSettings settings{
+      args.at("dispatch"),
+      {bytes("host_budget_bytes"), bytes("device_budget_bytes")},
+      {bytes("process_host_charge_bytes"), bytes("process_device_charge_bytes")},
+      {{{bytes("job_a_host_charge_bytes"), bytes("job_a_device_charge_bytes")},
+        {bytes("job_b_host_charge_bytes"), bytes("job_b_device_charge_bytes")}}},
+      AffinityCount(), bytes("io_threads_limit")};
+  BaseOptionManager globals(false);
+  auto jobs = LoadJobs(JobProjectPaths(args), settings);
+  const auto& g = jobs.front()->globals;
+  std::vector<std::string> common = {
+      "colmap_owned_pair", "--default_random_seed", Value(g.seed),
+      "--log_target", g.target, "--log_path", g.path,
+      "--log_level", Value(g.level), "--log_severity", Value(g.severity)};
+#if COLMAP_GLOG_HAS_COLOR_SUPPORT
+  common.insert(common.end(), {"--log_color", Value(g.color)});
+#endif
+  std::vector<char*> common_argv;
+  for (auto& value : common) common_argv.push_back(value.data());
+  if (!globals.Parse(static_cast<int>(common_argv.size()), common_argv.data())) {
+    throw std::invalid_argument("invalid global settings");
+  }
+  for (size_t first = 0; first < jobs.size(); first += 2) {
+    // The complete prior epoch (including events/coordinator and both owner
+    // controllers) is destroyed before the next admission. Failure escapes
+    // immediately, even if cancellation managed to return the prior credits.
+    RunPairEpoch(*jobs[first], *jobs[first + 1], settings, run_job);
+  }
+  return EXIT_SUCCESS;
+}
+
+int RunPair(int argc, char** argv) {
+  return RunPairs(argc, argv, [](JobOptions& job,
+                                 pair::PairCoordinator& coordinator,
+                                 size_t slot,
+                                 const mvs::PatchMatchController::OwnedPairHooks& hooks) {
+    mvs::PatchMatchController controller(*job.patch_match_stereo, job.workspace,
+        job.format, job.pmvs, job.config, mvs::PatchMatchExecution::kOwnedCuda);
+    controller.RunOwnedPairJob(coordinator, slot, hooks);
+  });
 }
 }  // namespace
 }  // namespace colmap
