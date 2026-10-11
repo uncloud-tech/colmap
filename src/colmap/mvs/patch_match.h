@@ -62,6 +62,10 @@ class PatchMatch {
              PatchMatchExecution execution = PatchMatchExecution::kStock);
   ~PatchMatch();
 
+  // In owned mode, Problem pointers refer to this engine's input snapshots.
+  const PatchMatchOptions& GetOptions() const { return options_; }
+  const Problem& GetProblem() const { return problem_; }
+
   // Check the options and the problem for validity.
   void Check() const;
 
@@ -136,6 +140,12 @@ class PatchMatchController : public BaseController {
     std::function<void(size_t, int, int)> sweep;
     std::function<void(size_t, const char*)> output_phase;
   };
+  struct OwnedPreparedJob {
+    std::unique_ptr<PatchMatch> patch_match;
+    std::filesystem::path depth_map_path;
+    std::filesystem::path normal_map_path;
+  };
+
   PatchMatchController(const PatchMatchOptions& options,
                        const std::filesystem::path& workspace_path,
                        const std::string& workspace_format,
@@ -149,11 +159,31 @@ class PatchMatchController : public BaseController {
                        size_t job,
                        const OwnedPairHooks& hooks);
 
+  // CPU-only preparation. No coordinator, events, or CUDA calls; all workspace
+  // and decode owners are released before returning the owned engine.
+  std::unique_ptr<OwnedPreparedJob> PrepareOwnedPairJob(
+      size_t job, const OwnedPairHooks& hooks);
+  // Consumes a prefetched engine on a fresh owner-thread controller, acquiring
+  // the normal preparation lease before the first CUDA backend construction.
+  void RunPreparedOwnedPairJob(std::unique_ptr<OwnedPreparedJob> prepared,
+                               owned::PairCoordinator& coordinator,
+                               size_t job,
+                               const OwnedPairHooks& hooks);
+
  private:
+  void ExecutePreparedOwnedPairJob(OwnedPreparedJob& prepared,
+                                   owned::PairCoordinator& coordinator,
+                                   size_t job,
+                                   const OwnedPairHooks& hooks);
   void ReadWorkspace();
   void ReadProblems();
   void ReadGpuIndices();
   void ProcessProblem(const PatchMatchOptions& options, size_t problem_idx);
+  void ProcessProblemInputs(const PatchMatchOptions& options,
+                            size_t problem_idx,
+                            OwnedPreparedJob* prepared,
+                            size_t job,
+                            const OwnedPairHooks& hooks);
 
   const PatchMatchOptions options_;
   const PatchMatchExecution execution_;
@@ -162,9 +192,7 @@ class PatchMatchController : public BaseController {
   const std::string pmvs_option_name_;
   const std::filesystem::path config_path_;
 
-  owned::PairCoordinator* owned_pair_ = nullptr;
-  size_t owned_pair_job_ = 0;
-  OwnedPairHooks owned_pair_hooks_;
+  bool owned_pair_started_ = false;
 
   std::unique_ptr<ThreadPool> thread_pool_;
   std::unique_ptr<ThreadPool> io_thread_pool_;

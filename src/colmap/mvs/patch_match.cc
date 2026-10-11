@@ -303,28 +303,118 @@ void PatchMatchController::Run() {
   run_timer.PrintMinutes();
 }
 
+std::unique_ptr<PatchMatchController::OwnedPreparedJob>
+PatchMatchController::PrepareOwnedPairJob(const size_t job,
+                                        const OwnedPairHooks& hooks) {
+  THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
+  THROW_CHECK_LE(job, 1);
+  THROW_CHECK(!options_.geom_consistency);
+  // Reject auto-selection before ReadGpuIndices can query CUDA devices.
+  const auto explicit_gpu_indices = CSVToVector<int>(options_.gpu_index);
+  THROW_CHECK_EQ(explicit_gpu_indices.size(), 1);
+  THROW_CHECK_GE(explicit_gpu_indices.front(), 0);
+  THROW_CHECK_GT(options_.num_threads, 0);
+  THROW_CHECK(!workspace_ && !io_thread_pool_ && !thread_pool_);
+
+  const auto release_inputs = [this] {
+    io_thread_pool_.reset();
+    problems_.clear();
+    workspace_.reset();
+    depth_ranges_.clear();
+    gpu_indices_.clear();
+  };
+  try {
+    ReadWorkspace();
+    ReadProblems();
+    THROW_CHECK_EQ(problems_.size(), 1);
+    ReadGpuIndices();
+    io_thread_pool_ = std::make_unique<ThreadPool>(options_.num_threads);
+    auto prepared = std::make_unique<OwnedPreparedJob>();
+    // Shared with stock dispatch: identical options, source ordering and decode.
+    ProcessProblemInputs(options_, 0, prepared.get(), job, hooks);
+    THROW_CHECK_NOTNULL(prepared->patch_match.get());
+    release_inputs();
+    return prepared;
+  } catch (...) {
+    release_inputs();
+    throw;
+  }
+}
+
 void PatchMatchController::RunOwnedPairJob(
     owned::PairCoordinator& coordinator,
     const size_t job,
     const OwnedPairHooks& hooks) {
   THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
-  THROW_CHECK(!owned_pair_);
-  owned_pair_ = &coordinator;
-  owned_pair_job_ = job;
-  owned_pair_hooks_ = hooks;
+  THROW_CHECK(!owned_pair_started_);
+  owned_pair_started_ = true;
   try {
+    // Keep synchronous CPU preparation inside the existing single-prep lease.
     coordinator.BeginPreparation(job);
-    ReadWorkspace();
-    ReadProblems();
-    THROW_CHECK_EQ(problems_.size(), 1);
-    ReadGpuIndices();
-    THROW_CHECK_EQ(gpu_indices_.size(), 1);
-    THROW_CHECK_GT(options_.num_threads, 0);
-    io_thread_pool_ = std::make_unique<ThreadPool>(options_.num_threads);
-    // Deliberately synchronous: the caller is the actual CUDA owner worker.
-    ProcessProblem(options_, 0);
+    auto prepared = PrepareOwnedPairJob(job, hooks);
+    ExecutePreparedOwnedPairJob(*prepared, coordinator, job, hooks);
   } catch (...) {
     coordinator.Cancel(job, std::current_exception());
+    throw;
+  }
+}
+
+void PatchMatchController::RunPreparedOwnedPairJob(
+    std::unique_ptr<OwnedPreparedJob> prepared,
+    owned::PairCoordinator& coordinator,
+    const size_t job,
+    const OwnedPairHooks& hooks) {
+  THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
+  THROW_CHECK(!owned_pair_started_);
+  owned_pair_started_ = true;
+  try {
+    THROW_CHECK(!workspace_ && !io_thread_pool_ && !thread_pool_);
+    THROW_CHECK_NOTNULL(prepared.get());
+    THROW_CHECK_NOTNULL(prepared->patch_match.get());
+    coordinator.BeginPreparation(job);
+    ExecutePreparedOwnedPairJob(*prepared, coordinator, job, hooks);
+  } catch (...) {
+    coordinator.Cancel(job, std::current_exception());
+    throw;
+  }
+}
+
+void PatchMatchController::ExecutePreparedOwnedPairJob(
+    OwnedPreparedJob& prepared,
+    owned::PairCoordinator& coordinator,
+    const size_t job,
+    const OwnedPairHooks& hooks) {
+  auto& patch_match = prepared.patch_match;
+  try {
+    if (CheckIfStopped()) {
+      THROW_CHECK(false) << "Owned pair stopped before solver";
+    }
+    if (hooks.metadata) {
+      hooks.metadata(job, patch_match->GetOptions(), patch_match->GetProblem());
+    }
+    patch_match->PrepareOwned();
+    patch_match->SetOwnedSweepObserver([&hooks, job](int iteration, int sweep) {
+      if (hooks.sweep) hooks.sweep(job, iteration, sweep);
+    });
+    coordinator.ReadyAndWait(job);
+    patch_match->RunPreparedOwned();
+    coordinator.SolverDone(job);
+    coordinator.BeginOutput(job);
+    if (hooks.output_phase) hooks.output_phase(job, "depth_begin");
+    owned::WriteCheckedMat(patch_match->GetDepthMap(), prepared.depth_map_path);
+    if (hooks.output_phase) {
+      hooks.output_phase(job, "depth_end");
+      hooks.output_phase(job, "normal_begin");
+    }
+    owned::WriteCheckedMat(patch_match->GetNormalMap(),
+                           prepared.normal_map_path);
+    if (hooks.output_phase) hooks.output_phase(job, "normal_end");
+    coordinator.EndOutput(job);
+    coordinator.AwaitOutputs(job);
+  } catch (...) {
+    coordinator.CancelAndAwaitCleanup(job, std::current_exception(), [&] {
+      patch_match->DrainOwned();
+    });
     throw;
   }
 }
@@ -507,8 +597,17 @@ void PatchMatchController::ReadGpuIndices() {
 
 void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
                                           const size_t problem_idx) {
+  ProcessProblemInputs(options, problem_idx, nullptr, 0, OwnedPairHooks{});
+}
+
+void PatchMatchController::ProcessProblemInputs(
+    const PatchMatchOptions& options,
+    const size_t problem_idx,
+    OwnedPreparedJob* prepared,
+    const size_t job,
+    const OwnedPairHooks& hooks) {
   if (CheckIfStopped()) {
-    if (owned_pair_) {
+    if (prepared) {
       THROW_CHECK(false) << "Owned pair stopped before solver";
     }
     return;
@@ -517,7 +616,7 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
   const auto& model = workspace_->GetModel();
 
   auto& problem = problems_.at(problem_idx);
-  const int gpu_index = owned_pair_
+  const int gpu_index = prepared
                             ? gpu_indices_.front()
                             : gpu_indices_.at(thread_pool_->GetThreadIndex());
   THROW_CHECK_GE(gpu_index, -1);
@@ -627,11 +726,10 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
       }
     }
 
-    if (owned_pair_ && owned_pair_hooks_.check_inputs) {
+    if (prepared && hooks.check_inputs) {
       auto budget_problem = problem;
       budget_problem.src_image_idxs = src_image_idxs;
-      owned_pair_hooks_.check_inputs(
-          owned_pair_job_, patch_match_options, budget_problem);
+      hooks.check_inputs(job, patch_match_options, budget_problem);
     }
 
     // Read images in parallel using the shared I/O thread pool.
@@ -649,15 +747,14 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
         }));
       }
     } catch (...) {
-      if (!owned_pair_) throw;
+      if (!prepared) throw;
       input_error = std::current_exception();
-      owned_pair_->Cancel(owned_pair_job_, input_error);
     }
-    if (owned_pair_) {
+    if (prepared) {
+      // CPU preparation has no coordinator. Drain every launched task and the
+      // pool's checker queue before local images or workspace can unwind.
       owned::DrainPairInputs(io_thread_pool_, futures, input_error,
-                            [this](std::exception_ptr error) noexcept {
-                              owned_pair_->Cancel(owned_pair_job_, error);
-                            });
+                            [](std::exception_ptr) noexcept {});
     } else {
       for (auto& future : futures) future.get();
     }
@@ -668,49 +765,12 @@ void PatchMatchController::ProcessProblem(const PatchMatchOptions& options,
   problem.Print();
   patch_match_options.Print();
 
-  if (owned_pair_) {
-    // Declared outside try: cancellation is published before engine/input
-    // owners unwind, including constructor and output failures.
-    std::unique_ptr<PatchMatch> patch_match;
-    try {
-      if (owned_pair_hooks_.metadata) {
-        owned_pair_hooks_.metadata(owned_pair_job_, patch_match_options, problem);
-      }
-      patch_match =
-          std::make_unique<PatchMatch>(patch_match_options, problem, execution_);
-      patch_match->PrepareOwned();
-      patch_match->SetOwnedSweepObserver([this](int iteration, int sweep) {
-        if (owned_pair_hooks_.sweep) {
-          owned_pair_hooks_.sweep(owned_pair_job_, iteration, sweep);
-        }
-      });
-      // No inactive second decode pool is retained at the both-ready barrier.
-      io_thread_pool_.reset();
-      owned_pair_->ReadyAndWait(owned_pair_job_);
-      patch_match->RunPreparedOwned();
-      owned_pair_->SolverDone(owned_pair_job_);
-      owned_pair_->BeginOutput(owned_pair_job_);
-      if (owned_pair_hooks_.output_phase) {
-        owned_pair_hooks_.output_phase(owned_pair_job_, "depth_begin");
-      }
-      owned::WriteCheckedMat(patch_match->GetDepthMap(), depth_map_path);
-      if (owned_pair_hooks_.output_phase) {
-        owned_pair_hooks_.output_phase(owned_pair_job_, "depth_end");
-        owned_pair_hooks_.output_phase(owned_pair_job_, "normal_begin");
-      }
-      owned::WriteCheckedMat(patch_match->GetNormalMap(), normal_map_path);
-      if (owned_pair_hooks_.output_phase) {
-        owned_pair_hooks_.output_phase(owned_pair_job_, "normal_end");
-      }
-      owned_pair_->EndOutput(owned_pair_job_);
-      owned_pair_->AwaitOutputs(owned_pair_job_);
-    } catch (...) {
-      owned_pair_->CancelAndAwaitCleanup(
-          owned_pair_job_, std::current_exception(), [&] {
-            if (patch_match) patch_match->DrainOwned();
-          });
-      throw;
-    }
+  if (prepared) {
+    prepared->depth_map_path = depth_map_path;
+    prepared->normal_map_path = normal_map_path;
+    prepared->patch_match =
+        std::make_unique<PatchMatch>(patch_match_options, problem, execution_);
+    prepared->patch_match->Check();
     return;
   }
 
