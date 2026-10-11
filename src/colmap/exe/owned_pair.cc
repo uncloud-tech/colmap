@@ -318,7 +318,8 @@ void RunPairEpoch(JobOptions& a,
                   const PairSettings& settings,
                   RunJob& run_job,
                   const std::function<void()>& admitted = {},
-                  const std::function<void()>& solver_released = {}) {
+                  const std::function<void()>& solver_released = {},
+                  const std::function<void(size_t)>& cleanup_inputs = {}) {
   const std::array<JobOptions*, 2> jobs{{&a, &b}};
   const auto& capacity = settings.capacity;
   const auto& process = settings.process;
@@ -364,7 +365,10 @@ void RunPairEpoch(JobOptions& a,
     pair::RunPairOwners(*coordinator,[&](size_t job){
       events.Owner(job);
       run_job(*jobs[job], *coordinator, job, hooks);
-    },[&](size_t job,const char* event){events.Emit(job,event);});
+    },[&](size_t job,const char* event){events.Emit(job,event);},
+      pair::PairThreadFactory{}, [&](size_t job) {
+        if (cleanup_inputs) cleanup_inputs(job);
+      });
     const auto remaining = coordinator->ReservedBytes();
     if (remaining.host != 0 || remaining.device != 0) {
       throw std::logic_error("epoch finished with unreleased ledger credits");
@@ -544,7 +548,8 @@ int RunPairs(int argc, char** argv, RunJob run_job,
       });
     };
     RunPairEpoch(*jobs[first], *jobs[first + 1], settings, execute,
-                 admitted, solver_released);
+                 admitted, solver_released,
+                 [&](size_t slot) { prepared[slot].reset(); });
   }
   return EXIT_SUCCESS;
 }

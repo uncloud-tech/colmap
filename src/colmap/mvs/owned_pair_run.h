@@ -17,24 +17,38 @@ struct PairThreadFactory {
   }
 };
 
-// RunJob's scope must own ALL job resources; returning or throwing means those
-// objects were destroyed. CUDA cleanup uncertainty must not return normally.
-// Observer is telemetry, never the owner of a backend/input/cache allocation.
-template <class RunJob, class Observer, class ThreadFactory = PairThreadFactory>
+struct PairOwnerNoopCleanup {
+  void operator()(size_t) const noexcept {}
+};
+
+// RunJob's scope must own all resources it consumes. Cleanup also destroys
+// unconsumed inputs when an owner never starts or fails before RunJob consumes
+// them. Both must finish before retirement. CUDA cleanup uncertainty must not
+// return normally. Observer is telemetry, never an ownership-cleanup callback.
+template <class RunJob, class Observer, class ThreadFactory = PairThreadFactory,
+          class Cleanup = PairOwnerNoopCleanup>
 void RunPairOwners(PairCoordinator& coordinator,
                    RunJob run_job,
                    Observer observer,
-                   ThreadFactory create_thread = {}) {
+                   ThreadFactory create_thread = {},
+                   Cleanup cleanup = {}) {
   std::array<std::thread, 2> owners;
   size_t started = 0;
   auto retire = [&](size_t job) {
+    bool cleanup_proven = true;
     try {
-      observer(job, "cleanup_complete");
+      cleanup(job);
+    } catch (...) {
+      cleanup_proven = false;
+      coordinator.Cancel(job, std::current_exception());
+    }
+    try {
+      if (cleanup_proven) observer(job, "cleanup_complete");
     } catch (...) {
       coordinator.Cancel(job, std::current_exception());
     }
     try {
-      coordinator.Retire(job, true);
+      coordinator.Retire(job, cleanup_proven);
     } catch (...) {
       coordinator.Cancel(job, std::current_exception());
     }

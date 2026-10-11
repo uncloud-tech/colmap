@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "colmap/mvs/owned_host_lookahead.h"
+#include "colmap/mvs/owned_pair_run.h"
 
 #include <atomic>
 #include <cstdint>
@@ -89,6 +90,72 @@ struct Journal {
   Lifetime& lifetime;
   std::vector<Observation> entries;
 };
+
+TEST(OwnedHostLookahead, UnstartedAndPreExecutionOwnersDropSnapshotsBeforeRetirement) {
+  // Reproduce consumption after active admission, then each failure boundary
+  // before an actual owner can take its snapshot from the outer handoff array.
+  for (const int fail_launch : {0, 1, -1}) {
+    SCOPED_TRACE(fail_launch);
+    Lifetime lifetime;
+    Lookahead future(kCharge, {});
+    future.Start([&](size_t slot, const std::atomic<bool>&) {
+      return std::make_unique<Snapshot>(lifetime, slot);
+    });
+    future.Join();
+    std::atomic<int> release_count{0};
+    PairCoordinator coordinator(PairDispatch::kPair, {100, 100}, {10, 10},
+        {{{20, 20}, {20, 20}}}, std::chrono::milliseconds(1000),
+        [&](const PairEvent& event) {
+          if (event.event == "ledger_release") {
+            EXPECT_EQ(lifetime.live.load(), 0);
+            ++release_count;
+          }
+        });
+    auto handoff = future.Consume();
+    ASSERT_EQ(lifetime.live.load(), 2);
+    int launched = 0;
+    auto factory = [&](std::function<void()> fn) {
+      if (launched++ == fail_launch) throw std::runtime_error("owner launch failed");
+      return std::thread(std::move(fn));
+    };
+    auto run = [&](size_t slot) {
+      if (fail_launch == -1 && slot == 0) {
+        throw std::runtime_error("owner identity event failed before execute");
+      }
+      auto owned = std::move(handoff[slot]);
+      coordinator.BeginPreparation(slot);
+      coordinator.ReadyAndWait(slot);
+      coordinator.SolverDone(slot);
+      coordinator.BeginOutput(slot);
+      coordinator.EndOutput(slot);
+      coordinator.AwaitOutputs(slot);
+    };
+    auto observer = [&](size_t slot, const char* event) {
+      if (std::string(event) == "cleanup_complete") EXPECT_EQ(handoff[slot], nullptr);
+    };
+    EXPECT_THROW(RunPairOwners(coordinator, run, observer, factory,
+                             [&](size_t slot) { handoff[slot].reset(); }),
+                 std::runtime_error);
+    EXPECT_EQ(lifetime.live.load(), 0);
+    EXPECT_EQ(lifetime.destroyed.load(), 2);
+    EXPECT_EQ(release_count.load(), 1);
+    EXPECT_EQ(coordinator.ReservedBytes().host, 0);
+  }
+}
+
+TEST(OwnedHostLookahead, UnprovenInputCleanupCannotReleaseActiveCredits) {
+  PairCoordinator coordinator(PairDispatch::kPair, {100, 100}, {10, 10},
+      {{{20, 20}, {20, 20}}}, std::chrono::milliseconds(1000));
+  auto no_thread = [](std::function<void()>) -> std::thread {
+    throw std::runtime_error("owner launch failed");
+  };
+  EXPECT_THROW(RunPairOwners(coordinator, [](size_t) {},
+      [](size_t, const char*) {}, no_thread,
+      [](size_t) { throw std::runtime_error("input cleanup not proven"); }),
+      std::runtime_error);
+  EXPECT_EQ(coordinator.ReservedBytes().host, 50);
+  EXPECT_EQ(coordinator.ReservedBytes().device, 50);
+}
 
 TEST(OwnedHostLookahead, ReservationUsesSameBudgetWithoutOverflow) {
   EXPECT_TRUE(CanReserveHostLookahead(100, 20, 25, 25, 30));

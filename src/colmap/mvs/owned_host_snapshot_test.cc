@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "colmap/mvs/patch_match.h"
+#include "colmap/mvs/model.h"
+#include "colmap/util/hash_containers.h"
 
 #include "colmap/scene/synthetic.h"
 #include "colmap/sensor/bitmap.h"
@@ -208,6 +210,61 @@ TEST_F(OwnedHostSnapshotTest, InputsSurviveControllersAndWorkspaceDeletion) {
       EXPECT_FLOAT_EQ(left.GetT()[element], right.GetT()[element]);
     }
   }
+}
+
+TEST_F(OwnedHostSnapshotTest, IoOneOverrideKeepsMultiSourceOrderAndAutomaticDepth) {
+  SyntheticDatasetOptions synthetic;
+  synthetic.num_rigs = 1;
+  synthetic.num_cameras_per_rig = 1;
+  synthetic.num_frames_per_rig = 3;
+  synthetic.camera_width = kWidth;
+  synthetic.camera_height = kHeight;
+  synthetic.camera_model_id = SimplePinholeCameraModel::model_id;
+  synthetic.camera_params = {12, 5, 4};
+  Reconstruction reconstruction;
+  SynthesizeDataset(synthetic, &reconstruction);
+  reconstruction.Write(workspace_path_ / "sparse");
+  const auto third_name = reconstruction.Image(3).Name();
+  Bitmap bitmap(kWidth, kHeight, false);
+  bitmap.Fill(BitmapColor<uint8_t>(120));
+  ASSERT_TRUE(bitmap.Write(workspace_path_ / "images" / third_name));
+  {
+    std::ofstream config(config_path_);
+    config << image_names_[0] << '\n' << third_name << ',' << image_names_[1] << '\n';
+    ASSERT_TRUE(config.good());
+  }
+  Model model;
+  model.ReadFromCOLMAP(workspace_path_, "sparse", "images");
+  const int reference = model.GetImageIdx(image_names_[0]);
+  const auto depth = model.ComputeDepthRanges().at(reference);
+  ASSERT_GT(depth.first, 0);
+  ASSERT_GT(depth.second, depth.first);
+  const std::vector<int> configured{model.GetImageIdx(third_name),
+                                    model.GetImageIdx(image_names_[1])};
+  FlatHashSet<int> used(configured.begin(), configured.end());
+  used.insert(reference);
+  std::vector<int> effective;
+  for (const int index : used) if (index != reference) effective.push_back(index);
+  auto options = Options();
+  options.num_threads = 2;
+  options.depth_min = options.depth_max = -1;
+  auto synchronous = Controller(options)->PrepareOwnedPairJob(0, {});
+  auto lookahead = Controller(options)->PrepareOwnedPairJob(1, {}, 1);
+  for (const auto* prepared : {synchronous.get(), lookahead.get()}) {
+    const auto& engine = *prepared->patch_match;
+    EXPECT_EQ(engine.GetOptions().num_threads, 2);
+    EXPECT_EQ(engine.GetOptions().depth_min, depth.first);
+    EXPECT_EQ(engine.GetOptions().depth_max, depth.second);
+    EXPECT_EQ(engine.GetProblem().ref_image_idx, reference);
+    EXPECT_EQ(engine.GetProblem().src_image_idxs, effective);
+  }
+  std::filesystem::remove_all(workspace_path_);
+  for (size_t i = 0; i < model.images.size(); ++i) {
+    EXPECT_EQ(synchronous->patch_match->GetProblem().images->at(i).GetBitmap().RowMajorData(),
+              lookahead->patch_match->GetProblem().images->at(i).GetBitmap().RowMajorData());
+  }
+  EXPECT_NO_THROW(synchronous->patch_match->Check());
+  EXPECT_NO_THROW(lookahead->patch_match->Check());
 }
 
 TEST_F(OwnedHostSnapshotTest, UnsupportedModesRejectBeforeDecodeOrDeviceWork) {
