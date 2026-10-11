@@ -9,6 +9,7 @@
 #include "colmap/sensor/bitmap.h"
 #include "colmap/util/file.h"
 #include "colmap/util/testing.h"
+#include "colmap/util/threading.h"
 
 #include <array>
 #include <cstdint>
@@ -387,9 +388,14 @@ TEST_F(OwnedHostSnapshotTest, GeometryRequiresExistingSeedsWithoutPhotoPrepass) 
   try {
     Controller(options)->Run();
     ADD_FAILURE() << "Missing photometric seeds accepted";
-  } catch (const std::invalid_argument& error) {
-    EXPECT_NE(std::string(error.what()).find("Missing image or map dependency"),
-              std::string::npos);
+  } catch (const AggregateException& error) {
+    ASSERT_EQ(error.exceptions().size(), 1);
+    try {
+      std::rethrow_exception(error.exceptions().front());
+    } catch (const std::invalid_argument& cause) {
+      EXPECT_NE(std::string(cause.what()).find("Missing image or map dependency"),
+                std::string::npos);
+    }
   }
   for (const auto& name : image_names_) {
     EXPECT_FALSE(ExistsFile(workspace_path_ / "stereo" / "depth_maps" /
@@ -413,9 +419,14 @@ TEST_F(OwnedHostSnapshotTest, GeometryRequiresBothOutputPathsFresh) {
     try {
       Controller(options)->Run();
       ADD_FAILURE() << "Partial existing geometric output accepted";
-    } catch (const std::invalid_argument& error) {
-      EXPECT_NE(std::string(error.what()).find("fresh output paths"),
-                std::string::npos);
+    } catch (const AggregateException& error) {
+      ASSERT_EQ(error.exceptions().size(), 1);
+      try {
+        std::rethrow_exception(error.exceptions().front());
+      } catch (const std::invalid_argument& cause) {
+        EXPECT_NE(std::string(cause.what()).find("fresh output paths"),
+                  std::string::npos);
+      }
     }
     std::filesystem::remove(path);
   }
