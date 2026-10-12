@@ -328,7 +328,7 @@ PatchMatchController::PrepareOwnedPairJob(const size_t job,
                                         const OwnedPairHooks& hooks,
                                         const int preparation_threads) {
   THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
-  THROW_CHECK_LE(job, 1);
+  THROW_CHECK_LE(job, 2);
   // Reject auto-selection before ReadGpuIndices can query CUDA devices.
   const auto explicit_gpu_indices = CSVToVector<int>(options_.gpu_index);
   THROW_CHECK_EQ(explicit_gpu_indices.size(), 1);

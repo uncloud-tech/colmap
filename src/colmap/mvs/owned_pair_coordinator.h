@@ -2,10 +2,10 @@
 
 #pragma once
 
-// Finite TWO-owner coordination for the opt-in owned PatchMatch pair driver.
+// Finite two-or-three-owner coordination for the opt-in owned driver.
 //
 // This header is a standard-library-only finite state machine that admits,
-// prepares, dispatches, schedules output for and retires exactly two owned
+// prepares, dispatches, schedules output for and retires two or three owned
 // jobs that share one process/primary CUDA context. It deliberately has NO
 // CUDA or COLMAP dependency (including no logging header) so that it can be
 // exercised by bounded standalone CPU tests. The coordinator owns no device
@@ -14,9 +14,10 @@
 //
 // Failure model: the first recorded exception is preserved, every bounded
 // waiter is notified, and no success or credit is fabricated. Resource credits
-// are returned only after BOTH jobs prove retirement; cancellation alone
+// are returned only after ALL active jobs prove retirement; cancellation alone
 // releases no credits.
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <condition_variable>
@@ -97,9 +98,11 @@ class PairCoordinator {
     return "unknown";
   }
 
-  static void RequireJob(const size_t job) {
-    if (job > 1) {
-      throw std::invalid_argument("owned pair: job index must be 0 or 1");
+  void RequireJob(const size_t job) const {
+    if (job >= count_) {
+      throw std::invalid_argument(count_ == 2
+          ? "owned pair: job index must be 0 or 1"
+          : "owned pair: job index must be 0, 1 or 2");
     }
   }
 
@@ -112,7 +115,7 @@ class PairCoordinator {
   }
 
  public:
-  // Validates and reserves the complete TWO-job bundle atomically before any
+  // Validates and reserves the complete default TWO-job bundle before any
   // worker exists. A positive timeout is required; waits are bounded by it.
   PairCoordinator(PairDispatch dispatch,
                   ByteCharge capacity,
@@ -122,11 +125,49 @@ class PairCoordinator {
                   std::function<void(const PairEvent&)> sink = {},
                   EarlyGeometryPermits early_geometry_permits =
                       EarlyGeometryPermits::kOff)
+      : PairCoordinator(dispatch, capacity, process_charge,
+                        std::vector<ByteCharge>(job_charges.begin(),
+                                                job_charges.end()),
+                        timeout, std::move(sink), early_geometry_permits, 2) {}
+
+  // Static-three only: same full retention in both arms. This is not a queue.
+  PairCoordinator(PairDispatch dispatch,
+                  ByteCharge capacity,
+                  ByteCharge process_charge,
+                  std::array<ByteCharge, 3> job_charges,
+                  std::chrono::milliseconds timeout,
+                  std::function<void(const PairEvent&)> sink,
+                  size_t solver_permits)
+      : PairCoordinator(dispatch, capacity, process_charge,
+                        std::vector<ByteCharge>(job_charges.begin(),
+                                                job_charges.end()),
+                        timeout, std::move(sink), EarlyGeometryPermits::kOn,
+                        solver_permits) {}
+
+  size_t JobCount() const noexcept { return count_; }
+
+ private:
+  PairCoordinator(PairDispatch dispatch, ByteCharge capacity,
+                  ByteCharge process_charge, std::vector<ByteCharge> job_charges,
+                  std::chrono::milliseconds timeout,
+                  std::function<void(const PairEvent&)> sink,
+                  EarlyGeometryPermits early_geometry_permits,
+                  size_t solver_permits)
       : dispatch_(dispatch),
+        count_(job_charges.size()),
+        solver_permits_(solver_permits),
         early_geometry_permits_(early_geometry_permits),
         timeout_(timeout),
-        sink_(std::move(sink)),
-        state_{JobState::kReserved, JobState::kReserved} {
+        sink_(std::move(sink)) {
+    state_.fill(JobState::kReserved);
+    if (count_ != 2 && count_ != 3) {
+      throw std::invalid_argument("owned pair: count must be 2 or 3");
+    }
+    if (count_ == 3 && (dispatch_ != PairDispatch::kPair ||
+                       (solver_permits_ != 2 && solver_permits_ != 3))) {
+      throw std::invalid_argument(
+          "static three requires pair and 2 or 3 solver permits");
+    }
     if (dispatch_ != PairDispatch::kSerial && dispatch_ != PairDispatch::kPair) {
       throw std::invalid_argument("owned pair: unsupported dispatch");
     }
@@ -141,11 +182,9 @@ class PairCoordinator {
       const char* name;
       ByteCharge charge;
     };
-    const std::array<Row, 3> rows = {{
-        {"process", process_charge},
-        {"job_a", job_charges[0]},
-        {"job_b", job_charges[1]},
-    }};
+    std::vector<Row> rows{{"process", process_charge}};
+    const char* names[] = {"job_a", "job_b", "job_c"};
+    for (size_t j = 0; j < count_; ++j) rows.push_back({names[j], job_charges[j]});
     ByteCharge reserved;
     for (const Row& row : rows) {
       if (row.charge.host == 0 || row.charge.device == 0) {
@@ -164,15 +203,15 @@ class PairCoordinator {
       throw std::invalid_argument("owned pair: device budget insufficient");
     }
     reserved_ = reserved;
-    Emit(0, "admitted");
-    Emit(1, "admitted");
+    for (size_t j = 0; j < count_; ++j) Emit(j, "admitted");
   }
 
+ public:
   PairCoordinator(const PairCoordinator&) = delete;
   PairCoordinator& operator=(const PairCoordinator&) = delete;
 
-  // Acquires the single preparation lease and marks the job Preparing. Job 1
-  // waits until job 0 has released preparation (A prepares before B). Blocks,
+  // Acquires the single preparation lease and marks the job Preparing. Peers
+  // wait for preceding preparation releases (A then B then optional C). Blocks,
   // bounded and cancellation-aware. No mutex is held across the return.
   void BeginPreparation(size_t job) {
     RequireJob(job);
@@ -184,7 +223,7 @@ class PairCoordinator {
       }
       AwaitLocked(
           lock, "preparation", job,
-          [&]() { return !prep_in_use_ && (job == 0 || prep_released_by_a_); },
+          [&]() { return !prep_in_use_ && job == next_prep_; },
           deadline);
       prep_in_use_ = true;
       state_[job] = JobState::kPreparing;
@@ -207,22 +246,22 @@ class PairCoordinator {
         ThrowState(job, "ReadyAndWait", state_[job]);
       }
       prep_in_use_ = false;
-      if (job == 0) {
-        prep_released_by_a_ = true;
-      }
+      ++next_prep_;
       pending.push_back(MakeEventLocked(job, "prep_end"));
       state_[job] = JobState::kReady;
       ready_[job] = true;
       pending.push_back(MakeEventLocked(job, "ready"));
       const bool early = dispatch_ == PairDispatch::kPair &&
                          early_geometry_permits_ == EarlyGeometryPermits::kOn;
-      if (early) {
+      if (early && (count_ == 2 || job < 2 || solver_permits_ == 3 ||
+                    successful_initial_solver_)) {
         permit_[job] = true;
         pending.push_back(MakeEventLocked(job, "solver_release"));
       }
-      if (!both_ready_closed_ && ready_[0] && ready_[1]) {
+      if (!both_ready_closed_ && All(ready_)) {
         both_ready_closed_ = true;
-        pending.push_back(MakeEventLocked(kNoJob, "both_ready"));
+        pending.push_back(MakeEventLocked(
+            kNoJob, count_ == 2 ? "both_ready" : "all_ready"));
         if (!early && dispatch_ == PairDispatch::kPair) {
           permit_[0] = true;
           permit_[1] = true;
@@ -260,6 +299,12 @@ class PairCoordinator {
       solver_active_[job] = false;
       cv_.notify_all();
       pending.push_back(MakeEventLocked(job, "solver_end"));
+      if (job < 2) successful_initial_solver_ = true;
+      if (count_ == 3 && job < 2 && ready_[2] && !permit_[2] && !cancelled_) {
+        permit_[2] = true;
+        pending.push_back(MakeEventLocked(2, "solver_release"));
+        cv_.notify_all();
+      }
       if (dispatch_ == PairDispatch::kSerial && job == 0) {
         permit_[1] = true;
         pending.push_back(MakeEventLocked(1, "solver_release"));
@@ -269,8 +314,8 @@ class PairCoordinator {
     FlushEvents(pending);
   }
 
-  // Acquires the single output lease and marks the job Outputting. Readiness
-  // (ComputeDone) is required. Bounded and cancellation-aware.
+  // Acquires the single output lease (ordered A/B/C for static three only).
+  // Readiness (ComputeDone) is required. Bounded and cancellation-aware.
   void BeginOutput(size_t job) {
     RequireJob(job);
     const Clock::time_point deadline = Clock::now() + timeout_;
@@ -280,8 +325,9 @@ class PairCoordinator {
       if (state_[job] != JobState::kComputeDone) {
         ThrowState(job, "BeginOutput", state_[job]);
       }
-      AwaitLocked(lock, "output", job, [&]() { return !output_in_use_; },
-                  deadline);
+      AwaitLocked(lock, "output", job, [&]() {
+        return !output_in_use_ && (count_ == 2 || job == next_output_);
+      }, deadline);
       output_in_use_ = true;
       output_owner_ = job;
       state_[job] = JobState::kOutputting;
@@ -306,6 +352,7 @@ class PairCoordinator {
       output_owner_ = kNoJob;
       state_[job] = JobState::kOutputDone;
       output_done_[job] = true;
+      ++next_output_;
       event = MakeEventLocked(job, "output_end");
       cv_.notify_all();
     }
@@ -313,7 +360,7 @@ class PairCoordinator {
   }
 
   // Batch-final wait: requires the output lease already released and waits for
-  // both OutputDone (or cancellation) while owned objects remain alive.
+  // all active OutputDone (or cancellation) while owned objects remain alive.
   void AwaitOutputs(size_t job) {
     RequireJob(job);
     const Clock::time_point deadline = Clock::now() + timeout_;
@@ -322,7 +369,7 @@ class PairCoordinator {
       ThrowState(job, "AwaitOutputs", state_[job]);
     }
     AwaitLocked(lock, "outputs", job,
-                [&]() { return output_done_[0] && output_done_[1]; }, deadline);
+                [&]() { return All(output_done_); }, deadline);
   }
 
   // Latches the first error, wakes every bounded waiter and releases no
@@ -362,7 +409,8 @@ class PairCoordinator {
       cv_.notify_all();
       const auto deadline = Clock::now() + timeout_;
       if (!cv_.wait_until(lock, deadline, [&] {
-            return !solver_active_[0] && !solver_active_[1];
+            return std::none_of(solver_active_.begin(), solver_active_.begin() + count_,
+                                [](bool active) { return active; });
           })) {
         std::terminate();
       }
@@ -374,7 +422,7 @@ class PairCoordinator {
   // Called AFTER the real job resources have been destroyed. Supports
   // cancelled and unstarted jobs. Duplicate or unsafe retirement rejects.
   // Retirement records proven cleanup but NEVER releases batch credits; only
-  // Finish does that, and only when BOTH retirements proved cleanup.
+  // Finish does that, and only when ALL active retirements proved cleanup.
   void Retire(size_t job, bool completion_proven = true) {
     RequireJob(job);
     PairEvent event;
@@ -416,8 +464,8 @@ class PairCoordinator {
     InvokeSink(event);
   }
 
-  // AFTER both owner joins. Releases the full reservation exactly once, but
-  // only when BOTH retirements proved cleanup; a clean cancellation may release
+  // AFTER all active owner joins. Releases the full reservation exactly once,
+  // only when ALL active retirements proved cleanup; a clean cancellation may release
   // and then rethrow its first failure. Unknown cleanup retains the full
   // reservation, emits no ledger_release, and throws (earlier first error wins).
   void Finish() {
@@ -426,13 +474,15 @@ class PairCoordinator {
     bool release = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (!retired_[0] || !retired_[1]) {
+      if (!All(retired_)) {
         // Missing retirement proof must retain credits, but must not replace
         // the originating failure with a secondary protocol diagnostic.
         if (first_error_) std::rethrow_exception(first_error_);
-        throw std::logic_error("owned pair: Finish before both jobs retired");
+        throw std::logic_error(count_ == 2
+            ? "owned pair: Finish before both jobs retired"
+            : "owned pair: Finish before all three jobs retired");
       }
-      if (proven_retired_[0] && proven_retired_[1]) {
+      if (All(proven_retired_)) {
         if (!credits_released_) {
           credits_released_ = true;
           reserved_ = ByteCharge{0, 0};
@@ -464,7 +514,7 @@ class PairCoordinator {
     }
   }
 
-  // Full reservation until both retirements proved cleanup AND Finish runs;
+  // Full reservation until all active retirements proved cleanup AND Finish runs;
   // then zero. Unknown cleanup never releases.
   ByteCharge ReservedBytes() const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -569,7 +619,15 @@ class PairCoordinator {
     cv_.notify_all();
   }
 
+  bool All(const std::array<bool, 3>& values) const {
+    return std::all_of(values.begin(), values.begin() + count_,
+                       [](bool value) { return value; });
+  }
+
   PairDispatch dispatch_;
+  const size_t count_;
+  const size_t solver_permits_;
+  bool successful_initial_solver_ = false;
   EarlyGeometryPermits early_geometry_permits_;
   std::chrono::milliseconds timeout_;
   std::function<void(const PairEvent&)> sink_;
@@ -578,18 +636,19 @@ class PairCoordinator {
   uint64_t next_sequence_ = 1;
   bool cancelled_ = false;
   std::exception_ptr first_error_;
-  std::array<JobState, 2> state_;
+  std::array<JobState, 3> state_;
   bool prep_in_use_ = false;
-  bool prep_released_by_a_ = false;
-  bool ready_[2] = {false, false};
+  size_t next_prep_ = 0;
+  size_t next_output_ = 0;
+  std::array<bool, 3> ready_{};
   bool both_ready_closed_ = false;
-  bool permit_[2] = {false, false};
-  bool solver_active_[2] = {false, false};
+  std::array<bool, 3> permit_{};
+  std::array<bool, 3> solver_active_{};
   bool output_in_use_ = false;
   size_t output_owner_ = kNoJob;
-  bool output_done_[2] = {false, false};
-  bool retired_[2] = {false, false};
-  bool proven_retired_[2] = {false, false};
+  std::array<bool, 3> output_done_{};
+  std::array<bool, 3> retired_{};
+  std::array<bool, 3> proven_retired_{};
   bool credits_released_ = false;
   ByteCharge reserved_;
 };

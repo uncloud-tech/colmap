@@ -878,7 +878,8 @@ class PairCoordinatorTest(unittest.TestCase):
 
     def test_mutant_bypassed_peer_cleanup_fence(self):
         def mutation(source):
-            old = 'return !solver_active_[0] && !solver_active_[1];'
+            old = ('return std::none_of(solver_active_.begin(), solver_active_.begin() + count_,\n'
+                   '                                [](bool active) { return active; });')
             self.assertEqual(source.count(old), 1)
             return source.replace(old, 'return true;')
 
@@ -888,7 +889,7 @@ class PairCoordinatorTest(unittest.TestCase):
 
     def test_mutant_missing_both_ready_gate(self):
         def mutation(source):
-            old = 'if (!both_ready_closed_ && ready_[0] && ready_[1]) {'
+            old = 'if (!both_ready_closed_ && All(ready_)) {'
             self.assertEqual(source.count(old), 1,
                              'both-ready gate anchor not unique')
             return source.replace(old, 'if (!both_ready_closed_) {  // mutant')

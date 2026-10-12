@@ -73,6 +73,19 @@ int main(int argc, char** argv) {
   for(auto& spec:specs) spec.options.geom_consistency=false;
   assert(load().size()==4); // global phase barrier still permits all-photo lists
   write(2); assert(load().size()==2);
+  settings.static_three_solver_permits = 2;
+  settings.affinity = 3;
+  auto triple_args = args;
+  triple_args.emplace("static_three_solver_permits", "2");
+  auto triple = [&] { return LoadJobs(JobProjectPaths(triple_args), settings); };
+  write(3); assert(triple().size() == 3);
+  for (size_t count : {0,1,2,4,6}) { write(count); assert(Reject(triple)); }
+  write(3);
+  specs[2].options.num_threads = 2; assert(Reject(triple)); specs[2].options.num_threads = 1;
+  const auto c = specs[2];
+  specs[2].workspace = specs[0].workspace; assert(Reject(triple)); specs[2] = c;
+  specs[2].dirs[0] = specs[0].dirs[0]; assert(Reject(triple)); specs[2] = c;
+  specs[2].options.geom_consistency = true; assert(Reject(triple)); specs[2] = c;
   // Dev1 full forecast: no active-credit reduction or cap expansion.
   constexpr uint64_t gib=1ULL<<30;
   assert(!pair::CanReserveHostLookahead(32*gib,2*gib,15*gib,15*gib,22777529106ULL));
@@ -113,7 +126,7 @@ namespace pair = colmap::mvs::owned;
 ''' + settings + r'''
 static bool geometry = false;
 static size_t count = 2;
-uint64_t AffinityCount() { return 2; }
+uint64_t AffinityCount() { return 3; }
 struct BaseOptionManager { explicit BaseOptionManager(bool) {} };
 struct Options { bool geom_consistency = geometry; };
 struct Job { std::unique_ptr<Options> patch_match_stereo = std::make_unique<Options>(); };
@@ -125,7 +138,7 @@ std::vector<std::unique_ptr<Job>> LoadJobs(const std::vector<int>&, const PairSe
 }
 int Parse(int argc, char** argv) {
 ''' + parser + r'''
-  return settings.geometry_early_permits ? 1 : 0;
+  return settings.static_three_solver_permits ? settings.static_three_solver_permits : settings.geometry_early_permits ? 1 : 0;
 }
 int Invoke(std::vector<std::string> args) {
   std::vector<char*> argv;
@@ -175,6 +188,23 @@ int main() {
   assert(Invoke(args) == 1);
   args.insert(args.end(), {"--geometry_early_permits", "1"});
   assert(Reject(args)); // duplicate selection is not silently accepted
+  args = base;
+  args.insert(args.end(), {"--static_three_solver_permits", "2",
+      "--job_c_project_path", "c.ini", "--job_c_host_charge_bytes", "100",
+      "--job_c_device_charge_bytes", "100"});
+  assert(Reject(args)); // exactly three only
+  count = 3;
+  assert(Invoke(args) == 2);
+  args[args.size()-7] = "3";
+  assert(Invoke(args) == 3);
+  for (auto invalid : {"1", "4", "03", "-1"}) {
+    args[args.size()-7] = invalid; assert(Reject(args));
+  }
+  args[args.size()-7] = "2";
+  geometry = false; assert(Reject(args)); geometry = true;
+  args[2] = "serial"; assert(Reject(args)); args[2] = "pair";
+  count = 6; assert(Reject(args)); count = 3;
+  args.insert(args.end(), {"--host_lookahead", "0"}); assert(Reject(args));
   std::cout << "early geometry CLI checks passed\n";
 }
 '''

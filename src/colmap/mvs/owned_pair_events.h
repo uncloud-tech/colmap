@@ -38,7 +38,9 @@ class PairEvents {
     throw std::runtime_error("owned pair events require Linux qualification");
 #endif
   }
-  explicit PairEvents(std::string dispatch) : dispatch_(std::move(dispatch)) {
+  explicit PairEvents(std::string dispatch, size_t count = 2)
+      : count_(count), dispatch_(std::move(dispatch)) {
+    if (count != 2 && count != 3) throw std::invalid_argument("bad event count");
 #if defined(__linux__)
     pid_ = static_cast<uint64_t>(getpid());
 #else
@@ -50,21 +52,26 @@ class PairEvents {
     batch_ = std::to_string(pid_) + "-" + std::to_string(NextBatchToken(start_ns_));
   }
   void Owner(size_t job) {
+    RequireJob(job);
     std::lock_guard<std::mutex> lock(mutex_);
     owner_.at(job) = ThreadId();
   }
   void Identity(size_t job, int reference, int device) {
+    RequireJob(job);
     if (reference < 0 || device < 0) throw std::invalid_argument("bad identity");
     std::lock_guard<std::mutex> lock(mutex_);
     reference_.at(job) = reference;
     device_.at(job) = device;
   }
   void Coordinator(const PairEvent& event) {
+    if (event.job != kBatch) RequireJob(event.job);
     const uint64_t transition_ns =
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             event.timestamp.time_since_epoch()).count();
     std::lock_guard<std::mutex> lock(mutex_);
-    if (event.event == "both_ready") ready_ns_ = transition_ns;
+    if (event.event == "both_ready" || event.event == "all_ready") {
+      ready_ns_ = transition_ns;
+    }
     if (event.event == "solver_end") {
       solver_done_.at(event.job) = true;
       solver_end_ns_ = std::max(solver_end_ns_, transition_ns);
@@ -83,7 +90,9 @@ class PairEvents {
   }
   void Finished() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!ready_ns_ || !solver_done_[0] || !solver_done_[1]) {
+    if (!ready_ns_ ||
+        !std::all_of(solver_done_.begin(), solver_done_.begin() + count_,
+                     [](bool done) { return done; })) {
       throw std::logic_error("incomplete owned pair timing state");
     }
     EmitLocked(kBatch, "batch_finished",
@@ -110,9 +119,13 @@ class PairEvents {
   }
   inline static std::atomic<uint64_t> last_batch_token_{0};
 
+  void RequireJob(size_t job) const {
+    if (job >= count_) throw std::invalid_argument("bad event job");
+  }
+
   void EmitLocked(size_t job, const std::string& event,
                   const std::string& fields) {
-    if (job != kBatch && job > 1) throw std::invalid_argument("bad event job");
+    if (job != kBatch && job >= count_) throw std::invalid_argument("bad event job");
     if (event.find_first_of(" \r\n") != std::string::npos ||
         fields.find_first_of("\r\n") != std::string::npos) {
       throw std::invalid_argument("invalid event token/line");
@@ -129,7 +142,7 @@ class PairEvents {
          << " seq=" << ++sequence_ << " monotonic_ns=" << NowNs()
          << " pid=" << pid_ << " emitter_tid=" << ThreadId()
          << " owner_tid=" << (batch ? 0 : owner_[job])
-         << " job=" << (batch ? "batch" : (job == 0 ? "A" : "B"))
+         << " job=" << (batch ? "batch" : (job == 0 ? "A" : job == 1 ? "B" : "C"))
          << " reference=" << (batch ? -1 : reference_[job])
          << " device_index=" << (batch ? -1 : device_[job])
          << " dispatch=" << dispatch_ << " event=" << event;
@@ -146,6 +159,7 @@ class PairEvents {
     }
 #endif
   }
+  const size_t count_;
   std::mutex mutex_;
   std::string dispatch_;
   std::string batch_;
@@ -154,10 +168,10 @@ class PairEvents {
   uint64_t start_ns_ = 0;
   uint64_t ready_ns_ = 0;
   uint64_t solver_end_ns_ = 0;
-  std::array<uint64_t, 2> owner_{{0, 0}};
-  std::array<int, 2> reference_{{-1, -1}};
-  std::array<int, 2> device_{{-1, -1}};
-  std::array<bool, 2> solver_done_{{false, false}};
+  std::array<uint64_t, 3> owner_{};
+  std::array<int, 3> reference_{{-1, -1, -1}};
+  std::array<int, 3> device_{{-1, -1, -1}};
+  std::array<bool, 3> solver_done_{};
 };
 
 }  // namespace colmap::mvs::owned

@@ -238,6 +238,78 @@ class OwnedPairTest : public testing::Test {
   fs::path root_;
 };
 
+TEST_F(OwnedPairTest, StaticThreeRealParserOwnerAndEventContract) {
+  for (size_t j = 0; j < 3; ++j) {
+    SetPatchMatchOption(j, "geom_consistency", "true");
+  }
+  for (const auto* permits : {"2", "3"}) {
+    auto args = ListArgs({0, 1, 2});
+    args.insert(args.end(), {"--static_three_solver_permits", permits,
+                            "--job_c_host_charge_bytes", "524288",
+                            "--job_c_device_charge_bytes", "128"});
+    EventCapture capture;
+    std::atomic<size_t> calls{0};
+    EXPECT_EQ(Invoke(args, [&](auto& job, auto& coordinator, size_t slot,
+                              const auto& hooks) {
+      ++calls;
+      EXPECT_EQ(coordinator.JobCount(), 3);
+      Complete(job, coordinator, slot, hooks);
+    }), EXIT_SUCCESS);
+    EXPECT_EQ(calls.load(), 3);
+    const auto records = Records(capture.Read());
+    std::set<std::string> ready;
+    size_t all_ready = 0, release = 0, retired = 0, joined = 0;
+    for (const auto& record : records) {
+      const auto& event = record.at("event");
+      if (event == "validated") {
+        EXPECT_EQ(record.at("job_count"), "3");
+        EXPECT_EQ(record.at("static_three_solver_permits"), permits);
+        EXPECT_EQ(record.at("hc"), "524288");
+        EXPECT_EQ(record.at("dc"), "128");
+        EXPECT_EQ(record.at("io_c"), "1");
+      }
+      if (event == "ready") ready.insert(record.at("job"));
+      if (event == "all_ready") ++all_ready;
+      EXPECT_NE(event, "both_ready");
+      if (event == "retired") ++retired;
+      if (event == "owners_joined") ++joined;
+      if (event == "ledger_release") {
+        ++release;
+        EXPECT_EQ(retired, 3);
+        EXPECT_EQ(joined, 1);
+      }
+    }
+    EXPECT_EQ(ready, (std::set<std::string>{"A", "B", "C"}));
+    EXPECT_EQ(all_ready, 1);
+    EXPECT_EQ(release, 1);
+  }
+}
+
+TEST_F(OwnedPairTest, StaticThreeRejectsUnsupportedModesBeforeOwners) {
+  auto triple = [&](std::vector<size_t> slots) {
+    auto args = ListArgs(slots);
+    args.insert(args.end(), {"--static_three_solver_permits", "2",
+                            "--job_c_host_charge_bytes", "524288",
+                            "--job_c_device_charge_bytes", "128"});
+    return args;
+  };
+  Reject(triple({0, 1, 2})); // photometric
+  for (size_t j = 0; j < 4; ++j) SetPatchMatchOption(j, "geom_consistency", "true");
+  Reject(triple({0, 1}));
+  Reject(triple({0, 1, 2, 3}));
+  auto args = triple({0, 1, 2});
+  args[2] = "serial";
+  Reject(args);
+  args = triple({0, 1, 2});
+  args.insert(args.end(), {"--host_lookahead", "0"});
+  Reject(args);
+  args = triple({0, 1, 2});
+  args.insert(args.end(), {"--geometry_early_permits", "1"});
+  Reject(args);
+  SetPatchMatchOption(2, "geom_consistency", "false");
+  Reject(triple({0, 1, 2}));
+}
+
 TEST_F(OwnedPairTest, RejectsEmptyOddAndDuplicateLists) {
   Reject(ListArgs({}));
   Reject(ListArgs({0, 1, 2}));

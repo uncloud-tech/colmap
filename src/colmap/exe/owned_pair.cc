@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
-// Finite two-owner epochs. Never a production queue scheduler.
+// Finite two-owner epochs or one experimental static triple. Never a queue.
 #include "colmap/controllers/option_manager.h"
 #include "colmap/mvs/owned_host_lookahead.h"
 #include "colmap/mvs/owned_pair_events.h"
@@ -292,17 +292,20 @@ struct PairSettings {
   std::string dispatch;
   pair::ByteCharge capacity;
   pair::ByteCharge process;
-  std::array<pair::ByteCharge, 2> charges;
+  std::array<pair::ByteCharge, 3> charges;
   uint64_t affinity;
   uint64_t io_cap;
   bool geometry_early_permits = false;
+  size_t static_three_solver_permits = 0;
 };
 
 std::vector<fs::path> JobProjectPaths(
     const std::map<std::string, std::string>& args) {
   const auto list = args.find("job_project_list_path");
   if (list == args.end()) {
-    return {args.at("job_a_project_path"), args.at("job_b_project_path")};
+    std::vector<fs::path> paths{args.at("job_a_project_path"), args.at("job_b_project_path")};
+    if (args.count("job_c_project_path")) paths.push_back(args.at("job_c_project_path"));
+    return paths;
   }
   const auto path = fs::absolute(list->second);
   std::ifstream stream(path);
@@ -319,8 +322,11 @@ std::vector<fs::path> JobProjectPaths(
     fs::path entry(line);
     paths.push_back(entry.is_absolute() ? entry : path.parent_path() / entry);
   }
-  if (!stream.eof() || paths.empty() || paths.size() % 2 != 0) {
-    throw std::invalid_argument("job project list requires an even count >= 2");
+  if (!stream.eof() || paths.empty() || (args.count("static_three_solver_permits")
+      ? paths.size() != 3 : paths.size() % 2 != 0)) {
+    throw std::invalid_argument(args.count("static_three_solver_permits")
+        ? "static three list requires exactly three jobs"
+        : "job project list requires an even count >= 2");
   }
   return paths;
 }
@@ -343,7 +349,7 @@ std::vector<std::unique_ptr<JobOptions>> LoadJobs(
     if (!(job.globals == jobs.front()->globals)) {
       throw std::invalid_argument("conflicting process-global settings");
     }
-    ValidateJob(job, settings.charges[j % 2]);
+    ValidateJob(job, settings.charges[j % (settings.static_three_solver_permits ? 3 : 2)]);
     if (job.patch_match_stereo->geom_consistency !=
         jobs.front()->patch_match_stereo->geom_consistency) {
       throw std::invalid_argument("mixed photometric/geometric phases");
@@ -365,7 +371,11 @@ std::vector<std::unique_ptr<JobOptions>> LoadJobs(
         }
       }
     }
-    if (j % 2 == 1) {
+    if (settings.static_three_solver_permits) {
+      pair::ValidateIo(job.patch_match_stereo->num_threads,
+                       job.patch_match_stereo->num_threads,
+                       settings.io_cap, settings.affinity);
+    } else if (j % 2 == 1) {
       pair::ValidateIo(jobs[j - 1]->patch_match_stereo->num_threads,
                        job.patch_match_stereo->num_threads,
                        settings.io_cap,
@@ -384,18 +394,20 @@ void RunPairEpoch(JobOptions& a,
                   RunJob& run_job,
                   const std::function<void()>& admitted = {},
                   const std::function<void()>& solver_released = {},
-                  const std::function<void(size_t)>& cleanup_inputs = {}) {
-  const std::array<JobOptions*, 2> jobs{{&a, &b}};
+                  const std::function<void(size_t)>& cleanup_inputs = {},
+                  JobOptions* c = nullptr) {
+  const std::array<JobOptions*, 3> jobs{{&a, &b, c}};
   const auto& capacity = settings.capacity;
   const auto& process = settings.process;
   const auto& charges = settings.charges;
   const auto affinity = settings.affinity;
   const auto io_cap = settings.io_cap;
   const auto& g = a.globals;
-  pair::PairEvents events(settings.dispatch);
+  pair::PairEvents events(settings.dispatch, c ? 3 : 2);
   try {
     events.Emit(pair::PairEvents::kBatch,"validated",
-      "driver_executable=colmap_owned_pair"+std::string(settings.geometry_early_permits ? " geometry_early_permits=1" : "")+" io_threads_limit="+Value(io_cap)+" affinity="+Value(affinity)+
+      "driver_executable=colmap_owned_pair"+(c ? " job_count=3 static_three_solver_permits="+Value(settings.static_three_solver_permits)+
+      " io_c="+Value(c->patch_match_stereo->num_threads)+" hc="+Value(charges[2].host)+" dc="+Value(charges[2].device) : std::string{})+std::string(settings.geometry_early_permits ? " geometry_early_permits=1" : "")+" io_threads_limit="+Value(io_cap)+" affinity="+Value(affinity)+
       " io_a="+Value(jobs[0]->patch_match_stereo->num_threads)+" io_b="+Value(jobs[1]->patch_match_stereo->num_threads)+
       " host_budget="+Value(capacity.host)+" device_budget="+Value(capacity.device)+
       " hp="+Value(process.host)+" ha="+Value(charges[0].host)+" hb="+Value(charges[1].host)+
@@ -405,16 +417,25 @@ void RunPairEpoch(JobOptions& a,
       " log_severity="+Value(g.severity)+" log_color="+Value(g.color));
     std::unique_ptr<pair::PairCoordinator> coordinator;
     try {
-      coordinator=std::make_unique<pair::PairCoordinator>(
-        settings.dispatch=="serial"?pair::PairDispatch::kSerial:pair::PairDispatch::kPair,
-        capacity,process,charges,std::chrono::milliseconds(300000),
-        [&](const pair::PairEvent& e) {
-          events.Coordinator(e);
-          if (e.event == "solver_release" && e.job == 0 && solver_released) {
-            solver_released();
-          }
-        }, settings.geometry_early_permits ? pair::EarlyGeometryPermits::kOn
-                                          : pair::EarlyGeometryPermits::kOff);
+      auto sink = [&](const pair::PairEvent& e) {
+        events.Coordinator(e);
+        if (e.event == "solver_release" && e.job == 0 && solver_released) {
+          solver_released();
+        }
+      };
+      const auto dispatch = settings.dispatch == "serial"
+          ? pair::PairDispatch::kSerial : pair::PairDispatch::kPair;
+      if (c) {
+        coordinator = std::make_unique<pair::PairCoordinator>(dispatch,
+            capacity, process, charges, std::chrono::milliseconds(300000),
+            sink, settings.static_three_solver_permits);
+      } else {
+        const std::array<pair::ByteCharge, 2> two{{charges[0], charges[1]}};
+        coordinator = std::make_unique<pair::PairCoordinator>(dispatch,
+            capacity, process, two, std::chrono::milliseconds(300000), sink,
+            settings.geometry_early_permits ? pair::EarlyGeometryPermits::kOn
+                                            : pair::EarlyGeometryPermits::kOff);
+      }
     } catch (...) {
       events.Emit(pair::PairEvents::kBatch,"admission_denied","reserved_host=0 reserved_device=0");
       throw;
@@ -513,12 +534,20 @@ int RunPairs(int argc, char** argv, RunJob run_job,
                  "--host_lookahead_charge_bytes <separate host reservation>\n"
                  "  --geometry_early_permits 0|1 (experimental, default 0; "
                  "geometry-only, two owners per closed epoch, lookahead OFF; "
-                 "SERIAL unchanged)\n";
+                 "SERIAL unchanged)\n"
+                 "  --static_three_solver_permits 2|3 (one geometry-only triple; pair dispatch; no lookahead)\n"
+                 "  --job_c_project_path <INI> (or exactly-three list)\n"
+                 "  --job_c_host_charge_bytes <bytes> --job_c_device_charge_bytes <bytes>\n";
     return EXIT_SUCCESS;
   }
   bool list_mode = false;
   for (int i = 1; i < argc; i += 2) {
     list_mode = list_mode || std::string(argv[i]) == "--job_project_list_path";
+    if (std::string(argv[i]) == "--static_three_solver_permits") {
+      keys.insert("static_three_solver_permits");
+      keys.insert("job_c_host_charge_bytes");
+      keys.insert("job_c_device_charge_bytes");
+    }
     if (std::string(argv[i]) == "--geometry_early_permits") {
       keys.insert("geometry_early_permits");
     }
@@ -532,6 +561,7 @@ int RunPairs(int argc, char** argv, RunJob run_job,
   } else {
     keys.insert("job_a_project_path");
     keys.insert("job_b_project_path");
+    if (keys.count("static_three_solver_permits")) keys.insert("job_c_project_path");
   }
   // Selecting one exact key set also rejects mixed legacy/list arguments.
   const auto args = pair::ParseStrictArguments(argc, argv, keys);
@@ -542,6 +572,18 @@ int RunPairs(int argc, char** argv, RunJob run_job,
       args.at("geometry_early_permits") != "0" &&
       args.at("geometry_early_permits") != "1") {
     throw std::invalid_argument("geometry_early_permits must be 0 or 1");
+  }
+  size_t static_three_permits = 0;
+  if (args.count("static_three_solver_permits")) {
+    if (args.at("static_three_solver_permits") != "2" &&
+        args.at("static_three_solver_permits") != "3") {
+      throw std::invalid_argument("static_three_solver_permits must be 2 or 3");
+    }
+    static_three_permits = pair::ParseBytes(args.at("static_three_solver_permits"));
+    if (args.at("dispatch") != "pair" || args.count("host_lookahead") ||
+        args.count("host_lookahead_charge_bytes") || args.count("geometry_early_permits")) {
+      throw std::invalid_argument("static three requires pair, no lookahead/other permit flags");
+    }
   }
   const bool early_permits_requested = args.count("geometry_early_permits") &&
                                       args.at("geometry_early_permits") == "1";
@@ -562,10 +604,17 @@ int RunPairs(int argc, char** argv, RunJob run_job,
       {bytes("host_budget_bytes"), bytes("device_budget_bytes")},
       {bytes("process_host_charge_bytes"), bytes("process_device_charge_bytes")},
       {{{bytes("job_a_host_charge_bytes"), bytes("job_a_device_charge_bytes")},
-        {bytes("job_b_host_charge_bytes"), bytes("job_b_device_charge_bytes")}}},
-      AffinityCount(), bytes("io_threads_limit"), early_permits_requested};
+        {bytes("job_b_host_charge_bytes"), bytes("job_b_device_charge_bytes")},
+        {static_three_permits ? bytes("job_c_host_charge_bytes") : 0,
+         static_three_permits ? bytes("job_c_device_charge_bytes") : 0}}},
+      AffinityCount(), bytes("io_threads_limit"), early_permits_requested, static_three_permits};
   BaseOptionManager globals(false);
   auto jobs = LoadJobs(JobProjectPaths(args), settings);
+  if (static_three_permits &&
+      (jobs.size() != 3 || !jobs.front()->patch_match_stereo->geom_consistency ||
+       settings.affinity < 3)) {
+    throw std::invalid_argument("static three requires exactly three geometry jobs and three CPU equivalents");
+  }
   if (early_permits_requested &&
       (!jobs.front()->patch_match_stereo->geom_consistency || lookahead_requested)) {
     throw std::invalid_argument(
@@ -586,6 +635,20 @@ int RunPairs(int argc, char** argv, RunJob run_job,
   for (auto& value : common) common_argv.push_back(value.data());
   if (!globals.Parse(static_cast<int>(common_argv.size()), common_argv.data())) {
     throw std::invalid_argument("invalid global settings");
+  }
+  if (static_three_permits) {
+    auto execute = [&](JobOptions& job, pair::PairCoordinator& coordinator,
+                       size_t slot, const auto& hooks) {
+      if constexpr (std::is_invocable_v<RunJob&, JobOptions&,
+                        pair::PairCoordinator&, size_t, decltype(hooks),
+                        std::unique_ptr<PreparedHostJob>>) {
+        run_job(job, coordinator, slot, hooks, nullptr);
+      } else {
+        run_job(job, coordinator, slot, hooks);
+      }
+    };
+    RunPairEpoch(*jobs[0], *jobs[1], settings, execute, {}, {}, {}, jobs[2].get());
+    return EXIT_SUCCESS;
   }
   // The full additional transient charge is held even after CPU preparation
   // completes. Never lend current owner/process credits to future snapshots.

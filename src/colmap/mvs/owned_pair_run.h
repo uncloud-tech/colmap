@@ -32,7 +32,7 @@ void RunPairOwners(PairCoordinator& coordinator,
                    Observer observer,
                    ThreadFactory create_thread = {},
                    Cleanup cleanup = {}) {
-  std::array<std::thread, 2> owners;
+  std::array<std::thread, 3> owners;
   size_t started = 0;
   auto retire = [&](size_t job) {
     bool cleanup_proven = true;
@@ -54,7 +54,7 @@ void RunPairOwners(PairCoordinator& coordinator,
     }
   };
   try {
-    for (size_t job = 0; job < 2; ++job) {
+    for (size_t job = 0; job < coordinator.JobCount(); ++job) {
       owners[job] = create_thread([&, job] {
         try {
           run_job(job);
@@ -70,7 +70,7 @@ void RunPairOwners(PairCoordinator& coordinator,
                        std::current_exception());
     // Slots whose thread never existed own no resources. Mark them after
     // cancellation so a started owner waiting for its peer can drain and exit.
-    for (size_t job = started; job < 2; ++job) retire(job);
+    for (size_t job = started; job < coordinator.JobCount(); ++job) retire(job);
   }
   for (auto& owner : owners) {
     if (owner.joinable()) owner.join();
