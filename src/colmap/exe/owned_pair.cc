@@ -398,7 +398,7 @@ void RunPairEpoch(JobOptions& a,
   pair::PairEvents events(settings.dispatch);
   try {
     events.Emit(pair::PairEvents::kBatch,"validated",
-      "driver_executable=colmap_owned_pair geometry_early_permits="+Value(settings.geometry_early_permits)+" io_threads_limit="+Value(io_cap)+" affinity="+Value(affinity)+
+      "driver_executable=colmap_owned_pair"+std::string(settings.geometry_early_permits ? " geometry_early_permits=1" : "")+" io_threads_limit="+Value(io_cap)+" affinity="+Value(affinity)+
       " io_a="+Value(jobs[0]->patch_match_stereo->num_threads)+" io_b="+Value(jobs[1]->patch_match_stereo->num_threads)+
       " host_budget="+Value(capacity.host)+" device_budget="+Value(capacity.device)+
       " hp="+Value(process.host)+" ha="+Value(charges[0].host)+" hb="+Value(charges[1].host)+
