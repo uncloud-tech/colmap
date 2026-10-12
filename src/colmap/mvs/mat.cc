@@ -15,31 +15,6 @@
 namespace colmap {
 namespace mvs {
 
-namespace {
-
-// Accept the canonical decimal W&H&D& header emitted by Mat<float>::Write.
-size_t ReadDimension(std::istream& stream) {
-  size_t value = 0;
-  bool has_digit = false;
-  char c;
-  while (stream.get(c)) {
-    if (c == '&') {
-      THROW_CHECK(has_digit && value > 0) << "Invalid float map dimension";
-      return value;
-    }
-    THROW_CHECK(c >= '0' && c <= '9') << "Invalid float map header";
-    const size_t digit = c - '0';
-    THROW_CHECK_LE(value, (std::numeric_limits<size_t>::max() - digit) / 10)
-        << "Float map dimension overflow";
-    value = value * 10 + digit;
-    has_digit = true;
-  }
-  THROW_CHECK(false) << "Incomplete float map header";
-  return 0;
-}
-
-}  // namespace
-
 namespace internal {
 
 void ReadFloatMapPayload(std::istream& stream,
@@ -75,9 +50,14 @@ void Mat<float>::Read(const std::filesystem::path& path) {
   std::ifstream file(path, std::ios::binary);
   THROW_CHECK_FILE_OPEN(file, path);
 
-  const size_t width = ReadDimension(file);
-  const size_t height = ReadDimension(file);
-  const size_t depth = ReadDimension(file);
+  SetFullPrecTextStream(file);
+  size_t width = 0, height = 0, depth = 0;
+  char unused_char;
+  file >> width >> unused_char >> height >> unused_char >> depth >> unused_char;
+  THROW_CHECK(file) << "Invalid float map header: " << path;
+  THROW_CHECK_GT(width, 0) << path;
+  THROW_CHECK_GT(height, 0) << path;
+  THROW_CHECK_GT(depth, 0) << path;
   const size_t max_size = std::numeric_limits<size_t>::max();
   THROW_CHECK_LE(width, max_size / height) << path;
   const size_t area = width * height;
