@@ -24,7 +24,15 @@
 
 // The number of threads per Cuda thread block. Warning: Do not change this
 // value, since the templated window sizes rely on this value.
-#define THREADS_PER_BLOCK 32
+#ifndef COLMAP_OWNED_SWEEP_THREADS
+#define COLMAP_OWNED_SWEEP_THREADS 32
+#endif
+static_assert(COLMAP_OWNED_SWEEP_THREADS == 8 ||
+                  COLMAP_OWNED_SWEEP_THREADS == 16 ||
+                  COLMAP_OWNED_SWEEP_THREADS == 32,
+              "Owned sweep width must be 8, 16, or 32");
+#define THREADS_PER_BLOCK COLMAP_OWNED_SWEEP_THREADS
+constexpr int kOwnedElementwiseThreads = 32;
 
 // We must not include "util/math.h" to avoid any Eigen includes here,
 // since Visual Studio cannot compile some of the Eigen/Boost expressions.
@@ -316,6 +324,8 @@ __device__ inline void ComposeHomography(const ReferenceCalibration& calibration
 template <int kWindowSize>
 struct LocalRefImage {
   const static int kWindowRadius = kWindowSize / 2;
+  static_assert(kWindowRadius <= THREADS_PER_BLOCK,
+                "Owned sweep tile must cover the window radius");
   const static int kThreadBlockRadius = 1;
   const static int kThreadBlockSize = 2 * kThreadBlockRadius + 1;
   const static int kNumRows = kWindowSize;
@@ -1506,12 +1516,13 @@ void PatchMatchCuda::ComputeCudaConfig() {
   sweep_grid_size_.y = 1;
   sweep_grid_size_.z = 1;
 
-  elem_wise_block_size_.x = THREADS_PER_BLOCK;
-  elem_wise_block_size_.y = THREADS_PER_BLOCK;
+  elem_wise_block_size_.x = kOwnedElementwiseThreads;
+  elem_wise_block_size_.y = kOwnedElementwiseThreads;
   elem_wise_block_size_.z = 1;
-  elem_wise_grid_size_.x = (depth_map_->GetWidth() - 1) / THREADS_PER_BLOCK + 1;
+  elem_wise_grid_size_.x =
+      (depth_map_->GetWidth() - 1) / kOwnedElementwiseThreads + 1;
   elem_wise_grid_size_.y =
-      (depth_map_->GetHeight() - 1) / THREADS_PER_BLOCK + 1;
+      (depth_map_->GetHeight() - 1) / kOwnedElementwiseThreads + 1;
   elem_wise_grid_size_.z = 1;
 }
 
