@@ -22,16 +22,6 @@
 #include <locale>
 #include <sstream>
 
-// The number of threads per Cuda thread block. Warning: Do not change this
-// value, since the templated window sizes rely on this value.
-#ifndef COLMAP_OWNED_SWEEP_THREADS
-#define COLMAP_OWNED_SWEEP_THREADS 32
-#endif
-static_assert(COLMAP_OWNED_SWEEP_THREADS == 8 ||
-                  COLMAP_OWNED_SWEEP_THREADS == 16 ||
-                  COLMAP_OWNED_SWEEP_THREADS == 32,
-              "Owned sweep width must be 8, 16, or 32");
-#define THREADS_PER_BLOCK COLMAP_OWNED_SWEEP_THREADS
 constexpr int kOwnedElementwiseThreads = 32;
 
 // We must not include "util/math.h" to avoid any Eigen includes here,
@@ -313,23 +303,23 @@ __device__ inline void ComposeHomography(const ReferenceCalibration& calibration
 }
 
 // Each thread in the current warp / thread block reads in 3 columns of the
-// reference image. The shared memory holds 3 * THREADS_PER_BLOCK columns and
+// reference image. The shared memory holds 3 * kTileThreads columns and
 // kWindowSize rows of the reference image. Each thread copies every
-// THREADS_PER_BLOCK-th column from global to shared memory offset by its ID.
-// For example, if THREADS_PER_BLOCK = 32, then thread 0 reads columns 0, 32, 64
+// kTileThreads-th column from global to shared memory offset by its ID.
+// For example, if kTileThreads = 32, then thread 0 reads columns 0, 32, 64
 // and thread 1 columns 1, 33, 65. When computing the photoconsistency, which is
 // shared among each thread block, each thread can then read the reference image
 // colors from shared memory. Note that this limits the window radius to a
-// maximum of THREADS_PER_BLOCK.
-template <int kWindowSize>
+// maximum of kTileThreads.
+template <int kWindowSize, int kTileThreads>
 struct LocalRefImage {
   const static int kWindowRadius = kWindowSize / 2;
-  static_assert(kWindowRadius <= THREADS_PER_BLOCK,
+  static_assert(kWindowRadius <= kTileThreads,
                 "Owned sweep tile must cover the window radius");
   const static int kThreadBlockRadius = 1;
   const static int kThreadBlockSize = 2 * kThreadBlockRadius + 1;
   const static int kNumRows = kWindowSize;
-  const static int kNumColumns = kThreadBlockSize * THREADS_PER_BLOCK;
+  const static int kNumColumns = kThreadBlockSize * kTileThreads;
   const static int kDataSize = kNumRows * kNumColumns;
 
   __device__ explicit LocalRefImage(const cudaTextureObject_t ref_image_texture)
@@ -349,7 +339,7 @@ struct LocalRefImage {
 
     const int local_col_start = thread_id;
     const int global_col_start = thread_block_first_id -
-                                 kThreadBlockRadius * THREADS_PER_BLOCK +
+                                 kThreadBlockRadius * kTileThreads +
                                  thread_id;
 
     if (row == 0) {
@@ -361,8 +351,8 @@ struct LocalRefImage {
         for (int block = 0; block < kThreadBlockSize; ++block) {
           data[local_row * kNumColumns + local_col] =
               tex2D<float>(ref_image_texture_, global_col, global_row);
-          local_col += THREADS_PER_BLOCK;
-          global_col += THREADS_PER_BLOCK;
+          local_col += kTileThreads;
+          global_col += kTileThreads;
         }
       }
     } else {
@@ -373,7 +363,7 @@ struct LocalRefImage {
         for (int block = 0; block < kThreadBlockSize; ++block) {
           data[(local_row - 1) * kNumColumns + local_col] =
               data[local_row * kNumColumns + local_col];
-          local_col += THREADS_PER_BLOCK;
+          local_col += kTileThreads;
         }
       }
 
@@ -386,8 +376,8 @@ struct LocalRefImage {
       for (int block = 0; block < kThreadBlockSize; ++block) {
         data[local_row * kNumColumns + local_col] =
             tex2D<float>(ref_image_texture_, global_col, global_row);
-        local_col += THREADS_PER_BLOCK;
-        global_col += THREADS_PER_BLOCK;
+        local_col += kTileThreads;
+        global_col += kTileThreads;
       }
     }
   }
@@ -427,7 +417,7 @@ __device__ inline float SampleLayeredBilinear(const cudaTextureObject_t texture,
 
 // The return values is 1 - NCC, so the range is [0, 2], the smaller the
 // value, the better the color consistency.
-template <int kWindowSize, int kWindowStep>
+template <int kWindowSize, int kWindowStep, int kTileThreads>
 struct PhotoConsistencyCostComputer {
   const static int kWindowRadius = kWindowSize / 2;
 
@@ -450,7 +440,7 @@ struct PhotoConsistencyCostComputer {
   const float kMaxCost = 2.0f;
 
   // Thread warp local reference image data around current patch.
-  typedef LocalRefImage<kWindowSize> LocalRefImageType;
+  typedef LocalRefImage<kWindowSize, kTileThreads> LocalRefImageType;
   LocalRefImageType local_ref_image;
 
   // Precomputed sum of raw and squared image intensities.
@@ -494,12 +484,12 @@ struct PhotoConsistencyCostComputer {
     float base_row_src = row_src;
     float base_z = z;
 
-    int ref_image_idx = THREADS_PER_BLOCK - kWindowRadius + thread_id;
+    int ref_image_idx = kTileThreads - kWindowRadius + thread_id;
     int ref_image_base_idx = ref_image_idx;
 
     const float ref_center_color =
         local_ref_image
-            .data[ref_image_idx + kWindowRadius * 3 * THREADS_PER_BLOCK +
+            .data[ref_image_idx + kWindowRadius * 3 * kTileThreads +
                   kWindowRadius];
     const float ref_color_sum = local_ref_sum;
     const float ref_color_squared_sum = local_ref_squared_sum;
@@ -543,7 +533,7 @@ struct PhotoConsistencyCostComputer {
         z += tform_step[6];
       }
 
-      ref_image_base_idx += kWindowStep * 3 * THREADS_PER_BLOCK;
+      ref_image_base_idx += kWindowStep * 3 * kTileThreads;
       ref_image_idx = ref_image_base_idx;
 
       base_col_src += tform_step[1];
@@ -847,7 +837,7 @@ __global__ void RotateNormalMap(GpuMatView<float> normal_map) {
   }
 }
 
-template <int kWindowSize, int kWindowStep>
+template <int kWindowSize, int kWindowStep, int kTileThreads>
 __global__ void ComputeInitialCost(const ReferenceCalibration calibration,
     GpuMatView<float> cost_map,
     const GpuMatView<float> depth_map,
@@ -861,7 +851,7 @@ __global__ void ComputeInitialCost(const ReferenceCalibration calibration,
     const float sigma_color) {
   const int col = blockDim.x * blockIdx.x + threadIdx.x;
 
-  typedef PhotoConsistencyCostComputer<kWindowSize, kWindowStep>
+  typedef PhotoConsistencyCostComputer<kWindowSize, kWindowStep, kTileThreads>
       PhotoConsistencyCostComputerType;
   PhotoConsistencyCostComputerType pcc_computer(calibration, ref_image_texture,
                                                 src_images_texture,
@@ -919,6 +909,7 @@ struct SweepOptions {
 
 template <int kWindowSize,
           int kWindowStep,
+          int kTileThreads,
           bool kGeomConsistencyTerm = false,
           bool kFilterPhotoConsistency = false,
           bool kFilterGeomConsistency = false>
@@ -979,7 +970,7 @@ __global__ void SweepFromTopToBottom(const ReferenceCalibration calibration,
   // Estimate parameters for remaining rows and compute selection probabilities.
   //////////////////////////////////////////////////////////////////////////////
 
-  typedef PhotoConsistencyCostComputer<kWindowSize, kWindowStep>
+  typedef PhotoConsistencyCostComputer<kWindowSize, kWindowStep, kTileThreads>
       PhotoConsistencyCostComputerType;
   PhotoConsistencyCostComputerType pcc_computer(calibration, ref_image_texture,
                                                 src_images_texture,
@@ -1275,8 +1266,10 @@ __global__ void SweepFromTopToBottom(const ReferenceCalibration calibration,
 }
 
 PatchMatchCuda::PatchMatchCuda(const PatchMatchOptions& options,
-                               const PatchMatch::Problem& problem)
+                               const PatchMatch::Problem& problem,
+                               const int owned_tile_threads)
     : options_(options),
+      owned_tile_threads_(ValidateOwnedTileThreads(owned_tile_threads)),
       problem_(problem),
       ref_width_(0),
       ref_height_(0),
@@ -1310,7 +1303,9 @@ PatchMatchCuda::~PatchMatchCuda() {
 
 void PatchMatchCuda::Run() {
   stream_->Activate();
-  RunWithWindowSizeAndStep<11, 1>();
+  DispatchOwnedTile(owned_tile_threads_, [this](auto tile) {
+    RunWithWindowSizeAndStep<11, 1, decltype(tile)::value>();
+  });
 }
 
 DepthMap PatchMatchCuda::GetDepthMap() const {
@@ -1359,7 +1354,7 @@ std::vector<int> PatchMatchCuda::GetConsistentImageIdxs() const {
   return consistent_image_idxs;
 }
 
-template <int kWindowSize, int kWindowStep>
+template <int kWindowSize, int kWindowStep, int kTileThreads>
 void PatchMatchCuda::RunWithWindowSizeAndStep() {
   // Wait for all initializations to finish.
   stream_->Synchronize();
@@ -1368,7 +1363,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
   OwnedCudaTimer init_timer(stream_->Get());
 
   ComputeCudaConfig();
-  ComputeInitialCost<kWindowSize, kWindowStep>
+  ComputeInitialCost<kWindowSize, kWindowStep, kTileThreads>
       <<<sweep_grid_size_, sweep_block_size_, 0, stream_->Get()>>>(
           CurrentCalibration(), cost_map_->View(),
           depth_map_->View(),
@@ -1424,6 +1419,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 #define CALL_SWEEP_FUNC                                   \
   SweepFromTopToBottom<kWindowSize,                       \
                        kWindowStep,                       \
+                       kTileThreads,                      \
                        kGeomConsistencyTerm,              \
                        kFilterPhotoConsistency,           \
                        kFilterGeomConsistency>            \
@@ -1509,10 +1505,10 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 }
 
 void PatchMatchCuda::ComputeCudaConfig() {
-  sweep_block_size_.x = THREADS_PER_BLOCK;
+  sweep_block_size_.x = owned_tile_threads_;
   sweep_block_size_.y = 1;
   sweep_block_size_.z = 1;
-  sweep_grid_size_.x = (depth_map_->GetWidth() - 1) / THREADS_PER_BLOCK + 1;
+  sweep_grid_size_.x = (depth_map_->GetWidth() - 1) / owned_tile_threads_ + 1;
   sweep_grid_size_.y = 1;
   sweep_grid_size_.z = 1;
 

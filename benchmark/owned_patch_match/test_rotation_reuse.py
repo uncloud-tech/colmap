@@ -7,7 +7,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 MVS = ROOT / 'src/colmap/mvs'
-BASE = '011f9a55ce443391e11868c519bc901947faff42'
+BASE = 'a16435ec2bcb024aa466663f6f0c02a3a6895293'
 
 
 def body(text, signature):
@@ -30,11 +30,16 @@ class RotationReuse(unittest.TestCase):
 
     def test_device_code_and_array_paths_unchanged(self):
         marker = 'PatchMatchCuda::PatchMatchCuda('
-        # Includes may be additive; all device definitions remain byte-identical.
+        # Undo only the tile template plumbing; arithmetic/device bodies must
+        # remain byte-identical to the accepted compile-width implementation.
         start = '__device__'
-        self.assertEqual(self.cu[self.cu.index(start):self.cu.index(marker)],
-                         self.base[self.base.index(start):self.base.index(marker)])
-        for name in ('InitSourceImages', 'InitTransforms', 'ComputeCudaConfig'):
+        device = self.cu[self.cu.index(start):self.cu.index(marker)]
+        device = device.replace('kTileThreads', 'THREADS_PER_BLOCK')
+        device = device.replace(', int THREADS_PER_BLOCK', '')
+        device = device.replace(', THREADS_PER_BLOCK>', '>')
+        device = device.replace('          int THREADS_PER_BLOCK,\n', '')
+        self.assertEqual(device, self.base[self.base.index(start):self.base.index(marker)])
+        for name in ('InitSourceImages', 'InitTransforms'):
             signature = 'void PatchMatchCuda::' + name + '()'
             self.assertEqual(body(self.cu, signature), body(self.base, signature))
         stock = 'src/colmap/mvs/patch_match_cuda.cu'
@@ -80,11 +85,11 @@ class RotationReuse(unittest.TestCase):
 
     def test_record_emission_precedes_ready_in_source(self):
         controller = (MVS / 'patch_match.cc').read_text()
-        prepare = body(controller, 'void PatchMatch::PrepareOwned()')
-        self.assertIn('std::make_unique<owned::PatchMatchCuda>(options_, problem_)', prepare)
-        pair = controller[controller.index('std::unique_ptr<PatchMatch> patch_match;'):]
-        self.assertLess(pair.index('patch_match->PrepareOwned();'), pair.index('owned_pair_->ReadyAndWait('))
-        self.assertLess(pair.index('owned_pair_->ReadyAndWait('), pair.index('} catch (...)'))
+        prepare = body(controller, 'void PatchMatch::PrepareOwned(const int owned_tile_threads)')
+        self.assertIn('std::make_unique<owned::PatchMatchCuda>(options_, problem_, owned_tile_threads)', prepare)
+        pair = controller[controller.index('void PatchMatchController::ExecutePreparedOwnedPairJob('):]
+        self.assertLess(pair.index('patch_match->PrepareOwned(hooks.owned_tile_threads);'), pair.index('coordinator.ReadyAndWait('))
+        self.assertLess(pair.index('coordinator.ReadyAndWait('), pair.index('} catch (...)'))
         ctor = body(self.cu, 'PatchMatchCuda::PatchMatchCuda(')
         self.assertLess(ctor.index('EmitRotationAllocations();'), ctor.index('} catch (...)'))
         self.assertEqual(ctor.count('EmitRotationAllocations();'), 1)

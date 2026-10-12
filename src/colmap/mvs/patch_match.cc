@@ -169,13 +169,13 @@ void PatchMatch::Run() {
   patch_match_cuda_->Run();
 }
 
-void PatchMatch::PrepareOwned() {
+void PatchMatch::PrepareOwned(const int owned_tile_threads) {
 #if !defined(COLMAP_HIP_ENABLED)
   THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
   THROW_CHECK(!owned_patch_match_cuda_) << "Owned instances prepare only once";
   Check();
   owned_patch_match_cuda_ =
-      std::make_unique<owned::PatchMatchCuda>(options_, problem_);
+      std::make_unique<owned::PatchMatchCuda>(options_, problem_, owned_tile_threads);
   LOG(INFO) << "PATCH_MATCH_BACKEND actual=owned_cuda reference="
             << problem_.ref_image_idx;
 #else
@@ -424,7 +424,7 @@ void PatchMatchController::ExecutePreparedOwnedPairJob(
     if (hooks.metadata) {
       hooks.metadata(job, patch_match->GetOptions(), patch_match->GetProblem());
     }
-    patch_match->PrepareOwned();
+    patch_match->PrepareOwned(hooks.owned_tile_threads);
     patch_match->SetOwnedSweepObserver([&hooks, job](int iteration, int sweep) {
       if (hooks.sweep) hooks.sweep(job, iteration, sweep);
     });

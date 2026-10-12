@@ -158,7 +158,7 @@ int main(int argc,char** argv){assert(argc==2);const fs::path root(argv[1]);
     def test_real_owned_prepare_run_host_methods(self):
         text = (MVS / 'patch_match.cc').read_text()
         bodies = '\n'.join(function(text, name) for name in (
-            'void PatchMatch::PrepareOwned()',
+            'void PatchMatch::PrepareOwned(const int owned_tile_threads)',
             'void PatchMatch::RunPreparedOwned()',
             'void PatchMatch::Run()'))
         source = r'''
@@ -174,7 +174,7 @@ struct Check { bool ok; explicit Check(bool b):ok(b){} ~Check() noexcept(false){
 enum class PatchMatchExecution { kStock, kOwnedCuda };
 struct Problem { int ref_image_idx=3; };
 int constructed=0,ran=0;bool fail=false;
-struct PatchMatchCuda { PatchMatchCuda(int,const Problem&){++constructed;} void Run(){++ran;if(fail)throw std::runtime_error("backend");} };
+struct PatchMatchCuda { PatchMatchCuda(int,const Problem&,int=32){++constructed;} void Run(){++ran;if(fail)throw std::runtime_error("backend");} };
 namespace owned {using PatchMatchCuda=::PatchMatchCuda;}
 struct PatchMatch {
   int options_=0; Problem problem_;
@@ -183,7 +183,7 @@ struct PatchMatch {
   std::unique_ptr<PatchMatchCuda> patch_match_cuda_;
   std::unique_ptr<owned::PatchMatchCuda> owned_patch_match_cuda_;
   void Check()const{}
-  void PrepareOwned();void RunPreparedOwned();void Run();
+  void PrepareOwned(int=32);void RunPreparedOwned();void Run();
 };
 ''' + bodies + r'''
 template<class F> bool rejects(F f){try{f();return false;}catch(const std::exception&){return true;}}

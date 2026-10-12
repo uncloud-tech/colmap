@@ -20,6 +20,7 @@ class EarlyGeometryCliTest(unittest.TestCase):
                         driver.index('// RunJob owns the controller')]
         source = r'''
 #include "colmap/mvs/owned_pair_validation.h"
+#include "colmap/mvs/owned_tile.h"
 #include "colmap/mvs/owned_host_lookahead.h"
 #include "colmap/mvs/owned_pair_coordinator.h"
 #include <cassert>
@@ -132,6 +133,7 @@ int main(int argc, char** argv) {
         parser = parser[:parser.index('  const auto& g = jobs.front()->globals;')]
         source = r'''
 #include "colmap/mvs/owned_pair_validation.h"
+#include "colmap/mvs/owned_tile.h"
 #include "colmap/mvs/owned_pair_coordinator.h"
 #include <array>
 #include <cassert>
@@ -142,12 +144,14 @@ namespace pair = colmap::mvs::owned;
 ''' + settings + r'''
 static bool geometry = false;
 static size_t count = 2;
+static int selected_tile = 0;
 uint64_t AffinityCount() { return 3; }
 struct BaseOptionManager { explicit BaseOptionManager(bool) {} };
 struct Options { bool geom_consistency = geometry; };
 struct Job { std::unique_ptr<Options> patch_match_stereo = std::make_unique<Options>(); };
 std::vector<int> JobProjectPaths(const std::map<std::string, std::string>&) { return {}; }
-std::vector<std::unique_ptr<Job>> LoadJobs(const std::vector<int>&, const PairSettings&) {
+std::vector<std::unique_ptr<Job>> LoadJobs(const std::vector<int>&, const PairSettings& settings) {
+  selected_tile = settings.owned_tile_threads;
   std::vector<std::unique_ptr<Job>> jobs;
   for (size_t i = 0; i < count; ++i) jobs.push_back(std::make_unique<Job>());
   return jobs;
@@ -173,7 +177,22 @@ int main() {
     "--job_b_device_charge_bytes", "100", "--process_host_charge_bytes", "10",
     "--process_device_charge_bytes", "10", "--io_threads_limit", "1",
     "--job_a_project_path", "a.ini", "--job_b_project_path", "b.ini"};
-  assert(Invoke(base) == 0);
+  assert(Invoke(base) == 0); assert(selected_tile == 32);
+  for (auto width : {"8", "16", "32"}) {
+    auto tile_args = base;
+    tile_args.insert(tile_args.end(), {"--owned_tile_threads", width});
+    assert(Invoke(tile_args) == 0); assert(selected_tile == std::stoi(width));
+    tile_args[2] = "serial";
+    assert(Invoke(tile_args) == 0); assert(selected_tile == std::stoi(width));
+    tile_args.insert(tile_args.end(), {"--owned_tile_threads", width});
+    assert(Reject(tile_args));
+  }
+  for (auto invalid : {"0", "4", "64", "-8", "+8", "08", "16 ", "", "auto"}) {
+    auto tile_args = base;
+    tile_args.insert(tile_args.end(), {"--owned_tile_threads", invalid});
+    selected_tile = 0;
+    assert(Reject(tile_args)); assert(selected_tile == 0); // before even job loading
+  }
   auto args = base;
   args.insert(args.end(), {"--geometry_early_permits", "0"});
   assert(Invoke(args) == 0);

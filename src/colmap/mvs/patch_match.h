@@ -74,7 +74,7 @@ class PatchMatch {
 
   // Experiment-only owned lifecycle. Prepare drains constructor work; solver
   // dispatch can then be coordinated without constructing another backend.
-  void PrepareOwned();
+  void PrepareOwned(int owned_tile_threads = 32);
   void RunPreparedOwned();
   // Failure-path completion proof while this instance still owns its buffers.
   void DrainOwned() noexcept;
@@ -137,6 +137,8 @@ class PatchMatch {
 class PatchMatchController : public BaseController {
  public:
   struct OwnedPairHooks {
+    // Copied from the immutable batch configuration into each CUDA owner.
+    int owned_tile_threads = 32;
     std::function<void(size_t, const PatchMatchOptions&, const PatchMatch::Problem&)> check_inputs;
     std::function<void(size_t, const PatchMatchOptions&, const PatchMatch::Problem&)> metadata;
     std::function<void(size_t, int, int)> sweep;

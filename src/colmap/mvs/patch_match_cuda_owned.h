@@ -4,6 +4,7 @@
 
 #if !defined(COLMAP_HIP_ENABLED)
 #include "colmap/mvs/owned_cuda_execution.h"
+#include "colmap/mvs/owned_tile.h"
 #include "colmap/mvs/owned_rotation_storage.h"
 #include "colmap/mvs/patch_match_calibration.h"
 
@@ -29,7 +30,8 @@ namespace owned {
 class PatchMatchCuda {
  public:
   PatchMatchCuda(const PatchMatchOptions& options,
-                 const PatchMatch::Problem& problem);
+                 const PatchMatch::Problem& problem,
+                 int owned_tile_threads = 32);
 
   ~PatchMatchCuda();
 
@@ -49,7 +51,7 @@ class PatchMatchCuda {
   std::vector<int> GetConsistentImageIdxs() const;
 
  private:
-  template <int kWindowSize, int kWindowStep>
+  template <int kWindowSize, int kWindowStep, int kTileThreads>
   void RunWithWindowSizeAndStep();
 
   ReferenceCalibration CurrentCalibration() const {
@@ -72,6 +74,7 @@ class PatchMatchCuda {
   void Rotate();
 
   const PatchMatchOptions options_;
+  const int owned_tile_threads_;
   const PatchMatch::Problem problem_;
 
   // Created after device selection; drained before resources, destroyed last.

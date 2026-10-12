@@ -5,6 +5,7 @@
 #include "colmap/mvs/owned_pair_events.h"
 #include "colmap/mvs/owned_pair_image.h"
 #include "colmap/mvs/owned_pair_run.h"
+#include "colmap/mvs/owned_tile.h"
 #include "colmap/mvs/owned_pair_validation.h"
 #include "colmap/mvs/owned_rotation_storage.h"
 #include "colmap/mvs/patch_match.h"
@@ -265,10 +266,12 @@ template<class T> std::string Value(const T& value) {
 }
 void Metadata(pair::PairEvents& events, size_t job,
               const mvs::PatchMatchOptions& o,
-              const mvs::PatchMatch::Problem& problem) {
+              const mvs::PatchMatch::Problem& problem,
+              int owned_tile_threads) {
   events.Identity(job,problem.ref_image_idx,static_cast<int>(pair::ParseBytes(o.gpu_index)));
   const auto& ref=problem.images->at(problem.ref_image_idx);
   events.Emit(job,"effective_metadata_begin","width="+Value(ref.GetWidth())+" height="+Value(ref.GetHeight())+
+              " owned_tile_threads="+Value(owned_tile_threads)+
               " ref_path_hex="+pair::Hex(ref.GetPath().string())+" sources="+Value(problem.src_image_idxs.size()));
   for(size_t i=0;i<problem.src_image_idxs.size();++i) {
     const int idx=problem.src_image_idxs[i];
@@ -297,6 +300,7 @@ struct PairSettings {
   uint64_t io_cap;
   bool geometry_early_permits = false;
   size_t static_three_solver_permits = 0;
+  int owned_tile_threads = 32;
 };
 
 std::vector<fs::path> JobProjectPaths(
@@ -406,7 +410,7 @@ void RunPairEpoch(JobOptions& a,
   pair::PairEvents events(settings.dispatch, c ? 3 : 2);
   try {
     events.Emit(pair::PairEvents::kBatch,"validated",
-      "driver_executable=colmap_owned_pair"+(c ? " job_count=3 static_three_solver_permits="+Value(settings.static_three_solver_permits)+
+      "driver_executable=colmap_owned_pair owned_tile_threads="+Value(settings.owned_tile_threads)+(c ? " job_count=3 static_three_solver_permits="+Value(settings.static_three_solver_permits)+
       " io_c="+Value(c->patch_match_stereo->num_threads)+" hc="+Value(charges[2].host)+" dc="+Value(charges[2].device) : std::string{})+std::string(settings.geometry_early_permits ? " geometry_early_permits=1" : "")+" io_threads_limit="+Value(io_cap)+" affinity="+Value(affinity)+
       " io_a="+Value(jobs[0]->patch_match_stereo->num_threads)+" io_b="+Value(jobs[1]->patch_match_stereo->num_threads)+
       " host_budget="+Value(capacity.host)+" device_budget="+Value(capacity.device)+
@@ -446,7 +450,8 @@ void RunPairEpoch(JobOptions& a,
     if (admitted) admitted();
     mvs::PatchMatchController::OwnedPairHooks hooks;
     hooks.check_inputs=[&](size_t j,const auto& o,const auto& p){CheckInputs(o,p,charges[j],jobs[j]->workspace);};
-    hooks.metadata=[&](size_t j,const auto& o,const auto& p){Metadata(events,j,o,p);};
+    hooks.owned_tile_threads = settings.owned_tile_threads;
+    hooks.metadata=[&](size_t j,const auto& o,const auto& p){Metadata(events,j,o,p,settings.owned_tile_threads);};
     hooks.sweep=[&](size_t j,int iteration,int sweep){events.Emit(j,"sweep_complete","iteration="+Value(iteration)+" sweep="+Value(sweep));};
     hooks.output_phase=[&](size_t j,const char* phase){events.Emit(j,phase);};
     pair::RunPairOwners(*coordinator,[&](size_t job){
@@ -530,7 +535,8 @@ int RunPairs(int argc, char** argv, RunJob run_job,
     std::cout << "  --job_a_project_path <INI> --job_b_project_path <INI>\n"
                  "OR --job_project_list_path <list: one INI path per line, "
                  "relative to list directory or absolute>\n"
-                 "Optional: --host_lookahead 0|1 (default 0) "
+                 "Optional: --owned_tile_threads 8|16|32 (default 32)\n"
+                 "  --host_lookahead 0|1 (default 0) "
                  "--host_lookahead_charge_bytes <separate host reservation>\n"
                  "  --geometry_early_permits 0|1 (experimental, default 0; "
                  "geometry-only, two owners per closed epoch, lookahead OFF; "
@@ -551,6 +557,7 @@ int RunPairs(int argc, char** argv, RunJob run_job,
     if (std::string(argv[i]) == "--geometry_early_permits") {
       keys.insert("geometry_early_permits");
     }
+    if (std::string(argv[i]) == "--owned_tile_threads") keys.insert("owned_tile_threads");
     if (std::string(argv[i]) == "--host_lookahead") keys.insert("host_lookahead");
     if (std::string(argv[i]) == "--host_lookahead_charge_bytes") {
       keys.insert("host_lookahead_charge_bytes");
@@ -565,6 +572,8 @@ int RunPairs(int argc, char** argv, RunJob run_job,
   }
   // Selecting one exact key set also rejects mixed legacy/list arguments.
   const auto args = pair::ParseStrictArguments(argc, argv, keys);
+  const int owned_tile_threads = args.count("owned_tile_threads")
+      ? pair::ParseOwnedTileThreads(args.at("owned_tile_threads")) : 32;
   if (args.at("dispatch") != "serial" && args.at("dispatch") != "pair") {
     throw std::invalid_argument("invalid dispatch");
   }
@@ -607,7 +616,7 @@ int RunPairs(int argc, char** argv, RunJob run_job,
         {bytes("job_b_host_charge_bytes"), bytes("job_b_device_charge_bytes")},
         {static_three_permits ? bytes("job_c_host_charge_bytes") : 0,
          static_three_permits ? bytes("job_c_device_charge_bytes") : 0}}},
-      AffinityCount(), bytes("io_threads_limit"), early_permits_requested, static_three_permits};
+      AffinityCount(), bytes("io_threads_limit"), early_permits_requested, static_three_permits, owned_tile_threads};
   BaseOptionManager globals(false);
   auto jobs = LoadJobs(JobProjectPaths(args), settings);
   if (static_three_permits &&

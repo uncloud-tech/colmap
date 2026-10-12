@@ -155,6 +155,7 @@ struct Options { int num_threads = 1; int reference = 17; };
 struct Problem {};
 struct PatchMatchController {
  struct OwnedPairHooks {
+  int owned_tile_threads=32;
   std::function<void(size_t,const Options&,const Problem&)> check_inputs,metadata;
   std::function<void(size_t,int,int)> sweep;
   std::function<void(size_t,const char*)> output_phase;
@@ -166,7 +167,7 @@ struct JobOptions { Globals globals; fs::path workspace;
  std::unique_ptr<mvs::Options> patch_match_stereo=std::make_unique<mvs::Options>(); };
 template<class T> std::string Value(const T& value){std::ostringstream s;s<<value;return s.str();}
 void CheckInputs(const mvs::Options&,const mvs::Problem&,pair::ByteCharge,const fs::path&) {}
-void Metadata(pair::PairEvents& e,size_t j,const mvs::Options& o,const mvs::Problem&){e.Identity(j,o.reference,0);}
+void Metadata(pair::PairEvents& e,size_t j,const mvs::Options& o,const mvs::Problem&,int tile){e.Identity(j,o.reference,0);e.Emit(j,"effective_metadata_begin","owned_tile_threads="+Value(tile));}
 ''' + settings + epoch + r'''
 using PreparedHostJob = int;
 template<class RunJob>
@@ -178,7 +179,7 @@ int RunStatic(std::vector<std::unique_ptr<JobOptions>>& jobs,
 }
 int main(int argc,char** argv){
  assert(argc==2); const int fail=std::stoi(argv[1]);
- for(size_t permits:{2,3}){
+ for(int tile:{8,16,32}) for(size_t permits:{2,3}){
   std::vector<std::unique_ptr<JobOptions>> jobs;
   for(size_t j=0;j<6;++j){
    jobs.push_back(std::make_unique<JobOptions>());
@@ -186,10 +187,10 @@ int main(int argc,char** argv){
    jobs.back()->patch_match_stereo->reference=17+j;
   }
   std::atomic<int> alive{0}; std::atomic<size_t> calls{0};
-  PairSettings settings{"pair",{38,30},{2,2},{{{13,10},{13,10},{10,8}}},3,1,false,permits};
+  PairSettings settings{"pair",{38,30},{2,2},{{{13,10},{13,10},{10,8}}},3,1,false,permits,tile};
   auto run=[&](JobOptions& job,pair::PairCoordinator& coord,size_t j,const auto& hooks){
    const int index=std::stoi(job.workspace.string());
-   assert(j==size_t(index)%3); ++calls;
+   assert(j==size_t(index)%3); assert(hooks.owned_tile_threads==tile); ++calls;
    struct Resource { std::atomic<int>& alive;
     explicit Resource(std::atomic<int>& a):alive(a){++alive;}
     ~Resource(){--alive;}
@@ -229,7 +230,9 @@ int main(int argc,char** argv){
                        if line.startswith('OWNED_PAIR_EVENT ')]
             validated = [r for r in records if r['event'] == 'validated']
             expected = ['2', '2', '3', '3'] if failure < 0 or failure >= 3 else ['2', '3']
-            self.assertEqual([r['static_three_solver_permits'] for r in validated], expected)
+            self.assertEqual([r['static_three_solver_permits'] for r in validated], expected * 3)
+            self.assertEqual([r['owned_tile_threads'] for r in validated],
+                             [str(t) for t in (8, 16, 32) for _ in expected])
             for record in validated:
                 self.assertEqual(record['job_count'], '3')
                 self.assertEqual((record['hc'], record['dc'], record['io_c']), ('10', '8', '1'))
@@ -249,7 +252,7 @@ int main(int argc,char** argv){
                     own = [r['event'] for r in epoch if r['job'] == job]
                     self.assertLess(own.index('cleanup_complete'), own.index('retired'))
                 if 'batch_finished' in events:
-                    first = 17 + 3 * (ordinal % 2) if len(batches) == 4 else 17
+                    first = 17 + 3 * (ordinal % 2) if len(batches) == 12 else 17
                     self.assertEqual({r['job']: int(r['reference']) for r in epoch if r['event'] == 'ready'},
                                      {'A': first, 'B': first + 1, 'C': first + 2})
                     self.assertLess(events.index('ledger_release'), events.index('batch_finished'))

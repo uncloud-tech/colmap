@@ -70,6 +70,7 @@ inline int cudaMemcpy3D(const cudaMemcpy3DParms*) { return 0; }
 GPU_MAT = r'''
 #pragma once
 #include "colmap/mvs/owned_cuda_execution.h"
+#include "colmap/mvs/owned_tile.h"
 namespace colmap { namespace mvs {
 template<class T> struct GpuMat {
  size_t w,h,d=1; int value=0;
@@ -111,12 +112,12 @@ struct RefPair {
 };
 class PatchMatchCuda {
  public:
- PatchMatchCuda(const PatchMatchOptions&,const PatchMatch::Problem&); ~PatchMatchCuda();
+ PatchMatchCuda(const PatchMatchOptions&,const PatchMatch::Problem&,int=32); ~PatchMatchCuda();
  void InitRefImage(); void BindRefImageTexture();
  void InitSourceImages() {} void InitTransforms() {} void InitWorkspaceMemory() {}
  void InitRotationStorage() {} void EmitRotationAllocations() {}
  void DrainForCleanup() noexcept { stream_->DrainBeforeDestruction(); }
- PatchMatchOptions options_; PatchMatch::Problem problem_;
+ PatchMatchOptions options_; const int owned_tile_threads_; PatchMatch::Problem problem_;
  std::unique_ptr<OwnedCudaStream> stream_;
  size_t ref_width_,ref_height_; int rotation_in_half_pi_,rotation_layout_;
  std::unique_ptr<CudaArrayLayeredTexture<uint8_t>> ref_image_textures_[2];

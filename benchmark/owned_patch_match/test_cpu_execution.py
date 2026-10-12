@@ -55,6 +55,7 @@ inline void SetBestCudaDevice(int x) { fake::device=x; }
 '''
 PROGRAM = r'''
 #include "colmap/mvs/owned_cuda_execution.h"
+#include "colmap/mvs/owned_tile.h"
 #include "colmap/mvs/patch_match_execution.h"
 #include <memory>
 namespace colmap { namespace mvs {
@@ -69,7 +70,7 @@ struct Resource {
 };
 class PatchMatchCuda {
  public:
- PatchMatchCuda(const PatchMatchOptions&,const PatchMatch::Problem&);
+ PatchMatchCuda(const PatchMatchOptions&,const PatchMatch::Problem&,int=32);
  ~PatchMatchCuda();
  void InitRefImage() { resource_=std::make_unique<Resource>(); fake::pending=true; }
  void InitSourceImages() { if(fake::fail_init) throw std::runtime_error("injected init failure"); }
@@ -78,7 +79,7 @@ class PatchMatchCuda {
  void InitRotationStorage() {}
  void EmitRotationAllocations() {}
  private:
- PatchMatchOptions options_; PatchMatch::Problem problem_;
+ PatchMatchOptions options_; const int owned_tile_threads_; PatchMatch::Problem problem_;
  std::unique_ptr<OwnedCudaStream> stream_;
  int ref_width_,ref_height_,rotation_in_half_pi_;
  std::unique_ptr<Resource> resource_;
@@ -113,6 +114,12 @@ int main() {
    throw std::runtime_error("local async API failure");
   } catch(const std::runtime_error&) { caught=true; }
   assert(caught && !fake::pending);
+ }
+ for(int tile:{0,4,64,-8}) {
+  fake::calls.clear(); fake::device=7; bool caught=false;
+  try { PatchMatchCuda engine(PatchMatchOptions{},PatchMatch::Problem{},tile); }
+  catch(const std::invalid_argument&) { caught=true; }
+  assert(caught && fake::calls.empty() && fake::device==7);
  }
  for(bool fail:{false,true}) {
   fake::calls.clear(); fake::fail_init=fail; bool caught=false;

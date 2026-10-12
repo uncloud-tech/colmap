@@ -238,6 +238,51 @@ class OwnedPairTest : public testing::Test {
   fs::path root_;
 };
 
+TEST_F(OwnedPairTest, RuntimeTileDefaultExplicitAndMetadata) {
+  for (const std::string mode : {"serial", "pair"}) {
+    for (const std::string tile : {"", "8", "16", "32"}) {
+      auto args = ListArgs({0, 1, 2, 3});
+      args[2] = mode;
+      if (!tile.empty()) args.insert(args.end(), {"--owned_tile_threads", tile});
+      const int expected = tile.empty() ? 32 : std::stoi(tile);
+      std::atomic<size_t> calls{0};
+      EventCapture capture;
+      EXPECT_EQ(Invoke(args, [&](auto& job, auto& coordinator, size_t slot,
+                                const auto& hooks) {
+        EXPECT_EQ(hooks.owned_tile_threads, expected);
+        pair::DispatchOwnedTile(hooks.owned_tile_threads, [&](auto selected) {
+          EXPECT_EQ(decltype(selected)::value, expected);
+          ++calls;
+        });
+        Complete(job, coordinator, slot, hooks);
+      }), EXIT_SUCCESS);
+      EXPECT_EQ(calls.load(), 4);
+      size_t validated = 0, metadata = 0;
+      for (const auto& record : Records(capture.Read())) {
+        if (record.at("event") == "validated") ++validated;
+        if (record.at("event") == "effective_metadata_begin") ++metadata;
+        if (record.at("event") == "validated" ||
+            record.at("event") == "effective_metadata_begin") {
+          EXPECT_EQ(record.at("owned_tile_threads"), Value(expected));
+        }
+      }
+      EXPECT_EQ(validated, 2);
+      EXPECT_EQ(metadata, 4);
+    }
+  }
+}
+
+TEST_F(OwnedPairTest, InvalidRuntimeTileRejectsBeforeOwners) {
+  for (const std::string tile : {"0", "4", "64", "-8", "+8", "08", "16 ", "", "auto"}) {
+    auto args = ListArgs({0, 1});
+    args.insert(args.end(), {"--owned_tile_threads", tile});
+    Reject(args);
+  }
+  auto args = ListArgs({0, 1});
+  args.insert(args.end(), {"--owned_tile_threads", "16", "--owned_tile_threads", "32"});
+  Reject(args);
+}
+
 TEST_F(OwnedPairTest, StaticThreeRealParserOwnerAndEventContract) {
   for (size_t j = 0; j < 3; ++j) {
     SetPatchMatchOption(j, "geom_consistency", "true");
