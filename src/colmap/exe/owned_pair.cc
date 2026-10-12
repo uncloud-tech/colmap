@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
-// Finite two-owner epochs or experimental closed static triples. Never a queue.
+// Optional bounded rolling geometry feed; default finite epochs unchanged.
 #include "colmap/controllers/option_manager.h"
 #include "colmap/mvs/owned_host_lookahead.h"
 #include "colmap/mvs/owned_pair_events.h"
@@ -301,6 +301,7 @@ struct PairSettings {
   bool geometry_early_permits = false;
   size_t static_three_solver_permits = 0;
   int owned_tile_threads = 32;
+  bool rolling_feed = false;
 };
 
 std::vector<fs::path> JobProjectPaths(
@@ -353,7 +354,15 @@ std::vector<std::unique_ptr<JobOptions>> LoadJobs(
     if (!(job.globals == jobs.front()->globals)) {
       throw std::invalid_argument("conflicting process-global settings");
     }
-    ValidateJob(job, settings.charges[j % (settings.static_three_solver_permits ? 3 : 2)]);
+    auto charge = settings.charges[j % (settings.static_three_solver_permits ? 3 : 2)];
+    if (settings.rolling_feed) {
+      // Validation only: actual admission and CheckInputs use a fitting slot.
+      for (const auto& slot : settings.charges) {
+        charge.host = std::max(charge.host, slot.host);
+        charge.device = std::max(charge.device, slot.device);
+      }
+    }
+    ValidateJob(job, charge);
     if (job.patch_match_stereo->geom_consistency !=
         jobs.front()->patch_match_stereo->geom_consistency) {
       throw std::invalid_argument("mixed photometric/geometric phases");
@@ -518,6 +527,97 @@ std::unique_ptr<PreparedHostJob> PrepareFutureHostJob(
   return controller.PrepareOwnedPairJob(slot, hooks, 1);
 }
 
+// Literal positive integer pairs: no inferred forecasts or added headroom.
+std::vector<pair::ByteCharge> ReadRollingForecasts(const fs::path& path,
+                                                 size_t count) {
+  std::ifstream input(path);
+  if (!input) throw std::invalid_argument("cannot read rolling forecasts");
+  std::vector<pair::ByteCharge> forecasts;
+  std::string line;
+  while (std::getline(input, line)) {
+    std::istringstream row(line);
+    std::string host, device, extra;
+    if (!(row >> host >> device) || (row >> extra))
+      throw std::invalid_argument("rolling forecast needs exactly two integer fields");
+    pair::ByteCharge charge{pair::ParseBytes(host), pair::ParseBytes(device)};
+    if (!charge.host || !charge.device)
+      throw std::invalid_argument("rolling forecast must be positive");
+    forecasts.push_back(charge);
+  }
+  if (!input.eof() || forecasts.size() != count)
+    throw std::invalid_argument("rolling forecast count mismatch");
+  return forecasts;
+}
+
+template <class RunJob>
+void RunRollingFeed(std::vector<std::unique_ptr<JobOptions>>& jobs,
+                    const PairSettings& settings,
+                    std::vector<pair::ByteCharge> forecasts, RunJob& run_job) {
+  pair::PairEvents events(settings.dispatch, jobs.size(), true);
+  std::unique_ptr<pair::PairCoordinator> coordinator;
+  try {
+    events.Emit(pair::PairEvents::kBatch, "validated",
+                "driver_executable=colmap_owned_pair io_threads_limit="+Value(settings.io_cap)+
+                " affinity="+Value(settings.affinity)+" job_count="+Value(jobs.size())+
+                " owned_tile_threads="+Value(settings.owned_tile_threads)+
+                " static_three_solver_permits=3 host_budget="+Value(settings.capacity.host)+
+                " device_budget="+Value(settings.capacity.device)+
+                " hp="+Value(settings.process.host)+" dp="+Value(settings.process.device)+
+                " ha="+Value(settings.charges[0].host)+" da="+Value(settings.charges[0].device)+
+                " hb="+Value(settings.charges[1].host)+" db="+Value(settings.charges[1].device)+
+                " hc="+Value(settings.charges[2].host)+" dc="+Value(settings.charges[2].device));
+    try {
+      coordinator = std::make_unique<pair::PairCoordinator>(
+          settings.capacity, settings.process, settings.charges, forecasts,
+          std::chrono::milliseconds(300000), [&](const pair::PairEvent& e) {
+            if (e.event == "admitted") {
+              events.BindSlot(e.job, coordinator->Slot(e.job));
+            }
+            events.Coordinator(e);
+            if (e.event == "admitted") {
+              const auto slot = settings.charges.at(coordinator->Slot(e.job));
+              events.Emit(e.job, "forecast_bound",
+                          "forecast_host="+Value(forecasts.at(e.job).host)+
+                          " forecast_device="+Value(forecasts.at(e.job).device)+
+                          " slot_host="+Value(slot.host)+" slot_device="+Value(slot.device));
+            }
+          });
+    } catch (...) {
+      events.Emit(pair::PairEvents::kBatch, "admission_denied",
+                  "reserved_host=0 reserved_device=0");
+      throw;
+    }
+    const auto reserved = coordinator->ReservedBytes();
+    events.Emit(pair::PairEvents::kBatch, "ledger_reserved",
+                "reserved_host="+Value(reserved.host)+" reserved_device="+Value(reserved.device));
+    mvs::PatchMatchController::OwnedPairHooks hooks;
+    hooks.owned_tile_threads = settings.owned_tile_threads;
+    hooks.check_inputs = [&](size_t j, const auto& o, const auto& p) {
+      // Check both the reviewed forecast and the assigned immutable full slot.
+      CheckInputs(o, p, forecasts.at(j), jobs.at(j)->workspace);
+      CheckInputs(o, p, settings.charges.at(coordinator->Slot(j)), jobs.at(j)->workspace);
+    };
+    hooks.metadata = [&](size_t j, const auto& o, const auto& p) {
+      Metadata(events, j, o, p, settings.owned_tile_threads);
+    };
+    hooks.sweep = [&](size_t j, int iteration, int sweep) {
+      events.Emit(j, "sweep_complete", "iteration="+Value(iteration)+" sweep="+Value(sweep));
+    };
+    hooks.output_phase = [&](size_t j, const char* phase) { events.Emit(j, phase); };
+    pair::RunRollingOwners(*coordinator, [&](size_t job) {
+      events.Owner(job);
+      run_job(*jobs.at(job), *coordinator, job, hooks);
+    }, [&](size_t job, const char* event) { events.Emit(job, event); });
+    if (coordinator->ReservedBytes().host || coordinator->ReservedBytes().device)
+      throw std::logic_error("rolling feed retained ledger on success");
+    events.Finished();
+  } catch (...) {
+    try { events.Emit(pair::PairEvents::kBatch, "batch_failed", "status=failure"); }
+    catch (...) {}
+    throw;
+  }
+}
+
 template <class RunJob, class PrepareJob = decltype(&PrepareFutureHostJob)>
 int RunPairs(int argc, char** argv, RunJob run_job,
              PrepareJob prepare_job = &PrepareFutureHostJob) {
@@ -535,6 +635,9 @@ int RunPairs(int argc, char** argv, RunJob run_job,
     std::cout << "  --job_a_project_path <INI> --job_b_project_path <INI>\n"
                  "OR --job_project_list_path <list: one INI path per line, "
                  "relative to list directory or absolute>\n"
+                 "Optional: --owned_feed_mode epochs|rolling (default epochs)\n"
+                 "  --job_forecast_list_path <FIFO host_bytes device_bytes lines; rolling only; final reviewed bounds including one headroom allowance>\n"
+                 "  Rolling requires geometry pair, three solver permits, no lookahead.\n"
                  "Optional: --owned_tile_threads 8|16|32 (default 32)\n"
                  "  --host_lookahead 0|1 (default 0) "
                  "--host_lookahead_charge_bytes <separate host reservation>\n"
@@ -557,6 +660,8 @@ int RunPairs(int argc, char** argv, RunJob run_job,
     if (std::string(argv[i]) == "--geometry_early_permits") {
       keys.insert("geometry_early_permits");
     }
+    if (std::string(argv[i]) == "--owned_feed_mode") keys.insert("owned_feed_mode");
+    if (std::string(argv[i]) == "--job_forecast_list_path") keys.insert("job_forecast_list_path");
     if (std::string(argv[i]) == "--owned_tile_threads") keys.insert("owned_tile_threads");
     if (std::string(argv[i]) == "--host_lookahead") keys.insert("host_lookahead");
     if (std::string(argv[i]) == "--host_lookahead_charge_bytes") {
@@ -594,6 +699,16 @@ int RunPairs(int argc, char** argv, RunJob run_job,
       throw std::invalid_argument("static three requires pair, no lookahead/other permit flags");
     }
   }
+  const std::string feed_mode = args.count("owned_feed_mode")
+      ? args.at("owned_feed_mode") : "epochs";
+  if (feed_mode != "epochs" && feed_mode != "rolling")
+    throw std::invalid_argument("owned_feed_mode must be epochs or rolling");
+  const bool rolling_feed = feed_mode == "rolling";
+  if (rolling_feed && (static_three_permits != 3 || args.at("dispatch") != "pair" ||
+                       !args.count("job_forecast_list_path")))
+    throw std::invalid_argument("rolling requires pair, three permits and reviewed forecasts");
+  if (!rolling_feed && args.count("job_forecast_list_path"))
+    throw std::invalid_argument("forecasts are rolling-only");
   const bool early_permits_requested = args.count("geometry_early_permits") &&
                                       args.at("geometry_early_permits") == "1";
   const bool lookahead_requested = args.count("host_lookahead") &&
@@ -616,7 +731,7 @@ int RunPairs(int argc, char** argv, RunJob run_job,
         {bytes("job_b_host_charge_bytes"), bytes("job_b_device_charge_bytes")},
         {static_three_permits ? bytes("job_c_host_charge_bytes") : 0,
          static_three_permits ? bytes("job_c_device_charge_bytes") : 0}}},
-      AffinityCount(), bytes("io_threads_limit"), early_permits_requested, static_three_permits, owned_tile_threads};
+      AffinityCount(), bytes("io_threads_limit"), early_permits_requested, static_three_permits, owned_tile_threads, rolling_feed};
   BaseOptionManager globals(false);
   auto jobs = LoadJobs(JobProjectPaths(args), settings);
   if (static_three_permits &&
@@ -645,6 +760,21 @@ int RunPairs(int argc, char** argv, RunJob run_job,
   for (auto& value : common) common_argv.push_back(value.data());
   if (!globals.Parse(static_cast<int>(common_argv.size()), common_argv.data())) {
     throw std::invalid_argument("invalid global settings");
+  }
+  if (rolling_feed) {
+    auto forecasts = ReadRollingForecasts(args.at("job_forecast_list_path"), jobs.size());
+    auto execute = [&](JobOptions& job, pair::PairCoordinator& coordinator,
+                       size_t generation, const auto& hooks) {
+      if constexpr (std::is_invocable_v<RunJob&, JobOptions&,
+                        pair::PairCoordinator&, size_t, decltype(hooks),
+                        std::unique_ptr<PreparedHostJob>>) {
+        run_job(job, coordinator, generation, hooks, nullptr);
+      } else {
+        run_job(job, coordinator, generation, hooks);
+      }
+    };
+    RunRollingFeed(jobs, settings, std::move(forecasts), execute);
+    return EXIT_SUCCESS;
   }
   if (static_three_permits) {
     auto execute = [&](JobOptions& job, pair::PairCoordinator& coordinator,

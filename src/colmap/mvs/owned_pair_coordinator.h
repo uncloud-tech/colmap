@@ -2,11 +2,12 @@
 
 #pragma once
 
-// Finite two-or-three-owner coordination for the opt-in owned driver.
+// Finite epochs and optional bounded FIFO rolling-three owned coordination.
 //
-// This header is a standard-library-only finite state machine that admits,
-// prepares, dispatches, schedules output for and retires two or three owned
-// jobs that share one process/primary CUDA context. It deliberately has NO
+// This standard-library-only state machine admits, prepares, dispatches,
+// schedules output for and retires owned jobs in one process/primary CUDA
+// context. Epochs retain two or three owners; rolling retains three full slots
+// and assigns immutable FIFO generation indices to their successive owners. It deliberately has NO
 // CUDA or COLMAP dependency (including no logging header) so that it can be
 // exercised by bounded standalone CPU tests. The coordinator owns no device
 // pointers and never allocates GPU memory; callers retain and retire their own
@@ -45,6 +46,7 @@ struct ByteCharge {
 };
 
 struct PairEvent {
+  // Rolling: immutable FIFO generation index, NEVER a reusable physical slot.
   size_t job;
   std::string event;
   uint64_t sequence;
@@ -100,9 +102,7 @@ class PairCoordinator {
 
   void RequireJob(const size_t job) const {
     if (job >= count_) {
-      throw std::invalid_argument(count_ == 2
-          ? "owned pair: job index must be 0 or 1"
-          : "owned pair: job index must be 0, 1 or 2");
+      throw std::invalid_argument("owned pair: invalid job/generation index");
     }
   }
 
@@ -144,6 +144,117 @@ class PairCoordinator {
                         timeout, std::move(sink), EarlyGeometryPermits::kOn,
                         solver_permits) {}
 
+  // Forecasts are final reviewed per-input bounds, including the caller's
+  // single headroom allowance. Full physical slots remain reserved until Finish.
+  PairCoordinator(ByteCharge capacity, ByteCharge process_charge,
+                  std::array<ByteCharge, 3> slots,
+                  std::vector<ByteCharge> forecasts,
+                  std::chrono::milliseconds timeout,
+                  std::function<void(const PairEvent&)> sink = {})
+      : PairCoordinator(PairDispatch::kPair, capacity, process_charge,
+                        std::vector<ByteCharge>(slots.begin(), slots.end()),
+                        timeout, std::move(sink), EarlyGeometryPermits::kOn,
+                        3, true) {
+    if (forecasts.size() < 3) {
+      throw std::invalid_argument("rolling needs >=3 jobs");
+    }
+    for (const auto& forecast : forecasts) {
+      if (!forecast.host || !forecast.device ||
+          std::none_of(slots.begin(), slots.end(), [&](ByteCharge slot) {
+            return Fits(forecast, slot);
+          })) {
+        throw std::invalid_argument("rolling forecast cannot fit any full slot");
+      }
+    }
+    rolling_ = true;
+    count_ = forecasts.size();
+    forecasts_ = std::move(forecasts);
+    slots_ = slots;
+    slot_owner_.fill(kNoJob);
+    job_slot_.assign(count_, kNoJob);
+    state_.assign(count_, JobState::kReserved);
+    ready_.assign(count_, false);
+    permit_.assign(count_, false);
+    solver_active_.assign(count_, false);
+    output_done_.assign(count_, false);
+    retired_.assign(count_, false);
+    proven_retired_.assign(count_, false);
+    joined_.assign(count_, false);
+  }
+
+  static bool Fits(ByteCharge forecast, ByteCharge slot) {
+    return forecast.host <= slot.host && forecast.device <= slot.device;
+  }
+
+  bool Rolling() const noexcept { return rolling_; }
+
+  size_t Slot(size_t job) const {
+    RequireJob(job);
+    std::lock_guard<std::mutex> lock(mutex_);
+    return job_slot_.at(job);
+  }
+
+  // Parent-only FIFO admission. Cancellation and slot assignment are atomic.
+  // No fitting empty slot means wait for an occupied fitting slot, not skip.
+  size_t AdmitNext() {
+    PairEvent event;
+    size_t job;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!rolling_) throw std::logic_error("not rolling");
+      if (cancelled_ || admitted_ == count_) return kNoJob;
+      size_t slot = kNoJob;
+      for (size_t s = 0; s < 3; ++s) {
+        if (slot_owner_[s] == kNoJob && Fits(forecasts_[admitted_], slots_[s])) {
+          slot = s;
+          break;
+        }
+      }
+      if (slot == kNoJob) return kNoJob;
+      job = admitted_++;
+      job_slot_[job] = slot;
+      slot_owner_[slot] = job;
+      event = MakeEventLocked(job, "admitted");
+    }
+    InvokeSink(event);
+    return job;
+  }
+
+  // Wait for a retiring generation, then parent must join its exact thread.
+  size_t AwaitRetired() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    const auto find = [&] {
+      for (size_t j = 0; j < admitted_; ++j)
+        if (retired_[j] && !joined_[j]) return j;
+      return kNoJob;
+    };
+    if (!cv_.wait_for(lock, timeout_, [&] { return find() != kNoJob; })) {
+      // A stuck owner cannot be detached or have its buffers fabricated dead.
+      std::terminate();
+    }
+    return find();
+  }
+
+  // Called only after join AND destruction of residual per-owner callbacks.
+  void Joined(size_t job) {
+    RequireJob(job);
+    PairEvent event;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!rolling_ || job >= admitted_ || !retired_[job] || joined_[job])
+        throw std::logic_error("invalid rolling join");
+      joined_[job] = true;
+      if (proven_retired_[job]) slot_owner_[job_slot_[job]] = kNoJob;
+      event = MakeEventLocked(job, "owner_joined");
+    }
+    InvokeSink(event);
+  }
+
+  size_t AdmittedCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return admitted_;
+  }
+
   size_t JobCount() const noexcept { return count_; }
 
  private:
@@ -152,14 +263,20 @@ class PairCoordinator {
                   std::chrono::milliseconds timeout,
                   std::function<void(const PairEvent&)> sink,
                   EarlyGeometryPermits early_geometry_permits,
-                  size_t solver_permits)
+                  size_t solver_permits, bool rolling = false)
       : dispatch_(dispatch),
         count_(job_charges.size()),
         solver_permits_(solver_permits),
         early_geometry_permits_(early_geometry_permits),
         timeout_(timeout),
         sink_(std::move(sink)) {
-    state_.fill(JobState::kReserved);
+    state_.assign(count_, JobState::kReserved);
+    ready_.resize(count_);
+    permit_.resize(count_);
+    solver_active_.resize(count_);
+    output_done_.resize(count_);
+    retired_.resize(count_);
+    proven_retired_.resize(count_);
     if (count_ != 2 && count_ != 3) {
       throw std::invalid_argument("owned pair: count must be 2 or 3");
     }
@@ -203,7 +320,9 @@ class PairCoordinator {
       throw std::invalid_argument("owned pair: device budget insufficient");
     }
     reserved_ = reserved;
-    for (size_t j = 0; j < count_; ++j) Emit(j, "admitted");
+    if (!rolling) {
+      for (size_t j = 0; j < count_; ++j) Emit(j, "admitted");
+    }
   }
 
  public:
@@ -218,7 +337,8 @@ class PairCoordinator {
     const Clock::time_point deadline = Clock::now() + timeout_;
     {
       std::unique_lock<std::mutex> lock(mutex_);
-      if (state_[job] != JobState::kReserved) {
+      if ((rolling_ && (job >= admitted_ || retired_[job])) ||
+          state_[job] != JobState::kReserved) {
         ThrowState(job, "BeginPreparation", state_[job]);
       }
       AwaitLocked(
@@ -242,6 +362,7 @@ class PairCoordinator {
     std::vector<PairEvent> pending;
     {
       std::unique_lock<std::mutex> lock(mutex_);
+      RequireLiveLocked(job);
       if (state_[job] != JobState::kPreparing) {
         ThrowState(job, "ReadyAndWait", state_[job]);
       }
@@ -253,12 +374,12 @@ class PairCoordinator {
       pending.push_back(MakeEventLocked(job, "ready"));
       const bool early = dispatch_ == PairDispatch::kPair &&
                          early_geometry_permits_ == EarlyGeometryPermits::kOn;
-      if (early && (count_ == 2 || job < 2 || solver_permits_ == 3 ||
+      if (early && (rolling_ || count_ == 2 || job < 2 || solver_permits_ == 3 ||
                     successful_initial_solver_)) {
         permit_[job] = true;
         pending.push_back(MakeEventLocked(job, "solver_release"));
       }
-      if (!both_ready_closed_ && All(ready_)) {
+      if (!rolling_ && !both_ready_closed_ && All(ready_)) {
         both_ready_closed_ = true;
         pending.push_back(MakeEventLocked(
             kNoJob, count_ == 2 ? "both_ready" : "all_ready"));
@@ -292,6 +413,7 @@ class PairCoordinator {
     std::vector<PairEvent> pending;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      RequireLiveLocked(job);
       if (state_[job] != JobState::kRunning) {
         ThrowState(job, "SolverDone", state_[job]);
       }
@@ -300,7 +422,7 @@ class PairCoordinator {
       cv_.notify_all();
       pending.push_back(MakeEventLocked(job, "solver_end"));
       if (job < 2) successful_initial_solver_ = true;
-      if (count_ == 3 && job < 2 && ready_[2] && !permit_[2] && !cancelled_) {
+      if (!rolling_ && count_ == 3 && job < 2 && ready_[2] && !permit_[2] && !cancelled_) {
         permit_[2] = true;
         pending.push_back(MakeEventLocked(2, "solver_release"));
         cv_.notify_all();
@@ -322,11 +444,12 @@ class PairCoordinator {
     PairEvent event;
     {
       std::unique_lock<std::mutex> lock(mutex_);
+      RequireLiveLocked(job);
       if (state_[job] != JobState::kComputeDone) {
         ThrowState(job, "BeginOutput", state_[job]);
       }
       AwaitLocked(lock, "output", job, [&]() {
-        return !output_in_use_ && (count_ == 2 || job == next_output_);
+        return !output_in_use_ && (rolling_ || count_ == 2 || job == next_output_);
       }, deadline);
       output_in_use_ = true;
       output_owner_ = job;
@@ -342,6 +465,7 @@ class PairCoordinator {
     PairEvent event;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      RequireLiveLocked(job);
       if (state_[job] != JobState::kOutputting) {
         ThrowState(job, "EndOutput", state_[job]);
       }
@@ -365,8 +489,13 @@ class PairCoordinator {
     RequireJob(job);
     const Clock::time_point deadline = Clock::now() + timeout_;
     std::unique_lock<std::mutex> lock(mutex_);
+    RequireLiveLocked(job);
     if (state_[job] != JobState::kOutputDone) {
       ThrowState(job, "AwaitOutputs", state_[job]);
+    }
+    if (rolling_) {
+      AwaitLocked(lock, "outputs", job, [] { return true; }, deadline);
+      return;
     }
     AwaitLocked(lock, "outputs", job,
                 [&]() { return All(output_done_); }, deadline);
@@ -374,11 +503,13 @@ class PairCoordinator {
 
   // Latches the first error, wakes every bounded waiter and releases no
   // credits. Never propagates an exception (noexcept) and never holds the
-  // mutex while invoking the sink.
+  // mutex while invoking the sink. Retired rolling-generation callbacks are
+  // stale and ignored; feed/parent failures use kNoJob instead.
   void Cancel(size_t job, std::exception_ptr error) noexcept {
     PairEvent event;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      if (rolling_ && job < count_ && retired_[job]) return;
       if (!first_error_) {
         first_error_ = error ? error
                              : std::make_exception_ptr(
@@ -474,6 +605,11 @@ class PairCoordinator {
     bool release = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      if (rolling_ && !cancelled_ && admitted_ != count_)
+        throw std::logic_error("rolling Finish before queue exhausted");
+      if (rolling_ && !std::all_of(joined_.begin(), joined_.begin() + admitted_,
+                                  [](bool value) { return value; }))
+        throw std::logic_error("rolling Finish before parent joins");
       if (!All(retired_)) {
         // Missing retirement proof must retain credits, but must not replace
         // the originating failure with a secondary protocol diagnostic.
@@ -522,6 +658,11 @@ class PairCoordinator {
   }
 
  private:
+  void RequireLiveLocked(size_t job) const {
+    if (rolling_ && (job >= admitted_ || retired_[job]))
+      throw std::logic_error("stale or unadmitted rolling generation");
+  }
+
   template <typename Predicate>
   void AwaitLocked(std::unique_lock<std::mutex>& lock,
                    const char* what,
@@ -619,13 +760,20 @@ class PairCoordinator {
     cv_.notify_all();
   }
 
-  bool All(const std::array<bool, 3>& values) const {
-    return std::all_of(values.begin(), values.begin() + count_,
+  bool All(const std::vector<bool>& values) const {
+    return std::all_of(values.begin(), values.begin() + (rolling_ ? admitted_ : count_),
                        [](bool value) { return value; });
   }
 
   PairDispatch dispatch_;
-  const size_t count_;
+  size_t count_;
+  bool rolling_ = false;
+  size_t admitted_ = 0;
+  std::array<ByteCharge, 3> slots_{};
+  std::array<size_t, 3> slot_owner_{};
+  std::vector<ByteCharge> forecasts_;
+  std::vector<size_t> job_slot_;
+  std::vector<bool> joined_;
   const size_t solver_permits_;
   bool successful_initial_solver_ = false;
   EarlyGeometryPermits early_geometry_permits_;
@@ -636,19 +784,19 @@ class PairCoordinator {
   uint64_t next_sequence_ = 1;
   bool cancelled_ = false;
   std::exception_ptr first_error_;
-  std::array<JobState, 3> state_;
+  std::vector<JobState> state_;
   bool prep_in_use_ = false;
   size_t next_prep_ = 0;
   size_t next_output_ = 0;
-  std::array<bool, 3> ready_{};
+  std::vector<bool> ready_{};
   bool both_ready_closed_ = false;
-  std::array<bool, 3> permit_{};
-  std::array<bool, 3> solver_active_{};
+  std::vector<bool> permit_{};
+  std::vector<bool> solver_active_{};
   bool output_in_use_ = false;
   size_t output_owner_ = kNoJob;
-  std::array<bool, 3> output_done_{};
-  std::array<bool, 3> retired_{};
-  std::array<bool, 3> proven_retired_{};
+  std::vector<bool> output_done_{};
+  std::vector<bool> retired_{};
+  std::vector<bool> proven_retired_{};
   bool credits_released_ = false;
   ByteCharge reserved_;
 };

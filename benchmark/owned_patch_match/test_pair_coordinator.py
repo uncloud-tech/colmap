@@ -889,10 +889,10 @@ class PairCoordinatorTest(unittest.TestCase):
 
     def test_mutant_missing_both_ready_gate(self):
         def mutation(source):
-            old = 'if (!both_ready_closed_ && All(ready_)) {'
+            old = 'if (!rolling_ && !both_ready_closed_ && All(ready_)) {'
             self.assertEqual(source.count(old), 1,
                              'both-ready gate anchor not unique')
-            return source.replace(old, 'if (!both_ready_closed_) {  // mutant')
+            return source.replace(old, 'if (!rolling_ && !both_ready_closed_) {  // mutant')
 
         result = self.run_program(mutation)
         self.assertTrue(result is None or result.returncode != 0,

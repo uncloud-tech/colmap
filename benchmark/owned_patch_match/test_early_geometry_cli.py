@@ -242,6 +242,24 @@ int main() {
   for(size_t invalid : {0,1,2,4,5,7}) { count = invalid; assert(Reject(args)); }
   count = 3;
   args.insert(args.end(), {"--host_lookahead", "0"}); assert(Reject(args));
+  auto rolling = base;
+  rolling.insert(rolling.end(), {"--static_three_solver_permits", "3",
+      "--job_c_project_path", "c.ini", "--job_c_host_charge_bytes", "100",
+      "--job_c_device_charge_bytes", "100", "--owned_feed_mode", "rolling",
+      "--job_forecast_list_path", "forecasts.txt"});
+  count = 6;
+  assert(Invoke(rolling) == 3);
+  auto invalid = rolling; invalid[2] = "serial"; assert(Reject(invalid));
+  geometry = false; assert(Reject(rolling)); geometry = true;
+  invalid = rolling; invalid[invalid.size()-3] = "auto"; assert(Reject(invalid));
+  invalid[invalid.size()-3] = "epochs"; assert(Reject(invalid)); // No epoch forecasts.
+  invalid = rolling; invalid.resize(invalid.size()-2); assert(Reject(invalid));
+  invalid = rolling; invalid[base.size()+1] = "2"; assert(Reject(invalid));
+  for (auto flag : {"--host_lookahead", "--geometry_early_permits"}) {
+    invalid = rolling; invalid.insert(invalid.end(), {flag, "0"}); assert(Reject(invalid));
+  }
+  invalid = base; invalid.insert(invalid.end(), {"--owned_feed_mode", "epochs"});
+  count = 2; assert(Invoke(invalid) == 0); // Explicit default does not select feed.
   std::cout << "early geometry CLI checks passed\n";
 }
 '''
