@@ -386,7 +386,7 @@ TEST_F(OwnedPairTest, UnfilteredStillRejectsGeometryAndConsistencyGraphs) {
   Reject(ListArgs({0, 1, 2, 3}));
 }
 
-TEST_F(OwnedPairTest, GeometryRequiresExactlyTwoSamePhaseJobsWithoutLookahead) {
+TEST_F(OwnedPairTest, GeometryRequiresSamePhaseJobsWithoutLookahead) {
   SetPatchMatchOption(0, "geom_consistency", "true");
   Reject(ListArgs({0, 1}));
   SetPatchMatchOption(1, "geom_consistency", "true");
@@ -410,6 +410,12 @@ TEST_F(OwnedPairTest, GeometryRequiresExactlyTwoSamePhaseJobsWithoutLookahead) {
                           "--host_lookahead_charge_bytes", "100"});
   Reject(args);  // Even the no-next-epoch fallback must not permit geometry.
   for (size_t j : {2, 3}) SetPatchMatchOption(j, "geom_consistency", "true");
+  {
+    EventCapture capture;
+    EXPECT_EQ(Invoke(ListArgs({0, 1, 2, 3}), Complete), EXIT_SUCCESS);
+  }
+  Reject(ListArgs({0, 1, 2}));
+  SetPatchMatchOption(3, "geom_consistency", "false");
   Reject(ListArgs({0, 1, 2, 3}));
   SetPatchMatchOption(0, "geom_consistency", "false");
   Reject(ListArgs({0, 1}));  // Opposite mixed-phase direction.
@@ -550,10 +556,25 @@ TEST_F(OwnedPairTest, InvalidFilterDoesNotSilentlyUseDefault) {
 }
 
 TEST_F(OwnedPairTest, TwoEpochsJoinReleaseAndFinishBeforeNextAdmission) {
-  for (const std::string dispatch : {"serial", "pair"}) {
+  for (const auto& mode : {
+           std::make_tuple(false, false, "serial"),
+           std::make_tuple(false, false, "pair"),
+           std::make_tuple(true, false, "serial"),
+           std::make_tuple(true, false, "pair"),
+           std::make_tuple(true, true, "serial"),
+           std::make_tuple(true, true, "pair")}) {
+    const bool geometry = std::get<0>(mode);
+    const bool early = std::get<1>(mode);
+    const std::string dispatch = std::get<2>(mode);
     SCOPED_TRACE(dispatch);
+    SCOPED_TRACE(geometry);
+    SCOPED_TRACE(early);
+    for (size_t j = 0; j < 4; ++j) {
+      SetPatchMatchOption(j, "geom_consistency", geometry ? "true" : "false");
+    }
     auto args = ListArgs({0, 1, 2, 3});
     args[2] = dispatch;
+    args.insert(args.end(), {"--geometry_early_permits", early ? "1" : "0"});
     std::atomic<size_t> destroyed{0};
     std::mutex mutex;
     std::array<std::vector<std::string>, 2> seen;
@@ -616,19 +637,22 @@ TEST_F(OwnedPairTest, TwoEpochsJoinReleaseAndFinishBeforeNextAdmission) {
 }
 
 TEST_F(OwnedPairTest, CallbackFailuresAbortLaterEpochsAndDestroyOwnerResources) {
+  for (size_t j = 0; j < 4; ++j) SetPatchMatchOption(j, "geom_consistency", "true");
   // Thread-factory injection is intentionally not added to RunPairs. These
   // faults cover controller construction, owner work, output and cleanup via
   // its supported callback seam, not OS thread-construction failure.
   for (const std::string phase : {"construction", "owner", "output", "cleanup"}) {
     SCOPED_TRACE(phase);
+    auto args = ListArgs({0, 1, 2, 3});
+    args.insert(args.end(), {"--geometry_early_permits", "1"});
     std::atomic<size_t> calls{0}, destroyed{0};
     struct Resource {
       std::atomic<size_t>& destroyed;
       ~Resource() { ++destroyed; }
     };
     EventCapture capture;
-    EXPECT_THROW(Invoke(ListArgs({0, 1, 2, 3}), [&](auto& job, auto& coordinator,
-                                                size_t slot, const auto& hooks) {
+    EXPECT_THROW(Invoke(args, [&](auto& job, auto& coordinator,
+                                 size_t slot, const auto& hooks) {
       ++calls;
       Resource resource{destroyed};
       EXPECT_NE(job.reference_name, "reference 2.jpg");

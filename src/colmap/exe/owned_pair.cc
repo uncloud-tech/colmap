@@ -348,9 +348,6 @@ std::vector<std::unique_ptr<JobOptions>> LoadJobs(
         jobs.front()->patch_match_stereo->geom_consistency) {
       throw std::invalid_argument("mixed photometric/geometric phases");
     }
-    if (job.patch_match_stereo->geom_consistency && jobs.size() != 2) {
-      throw std::invalid_argument("geometry requires exactly TWO jobs");
-    }
     if (!references.insert(job.reference_name).second ||
         pair::ParseBytes(job.patch_match_stereo->gpu_index) !=
             pair::ParseBytes(jobs.front()->patch_match_stereo->gpu_index)) {
@@ -515,7 +512,7 @@ int RunPairs(int argc, char** argv, RunJob run_job,
                  "Optional: --host_lookahead 0|1 (default 0) "
                  "--host_lookahead_charge_bytes <separate host reservation>\n"
                  "  --geometry_early_permits 0|1 (experimental, default 0; "
-                 "geometry-only, exactly TWO jobs, lookahead OFF; "
+                 "geometry-only, two owners per closed epoch, lookahead OFF; "
                  "SERIAL unchanged)\n";
     return EXIT_SUCCESS;
   }
@@ -570,10 +567,9 @@ int RunPairs(int argc, char** argv, RunJob run_job,
   BaseOptionManager globals(false);
   auto jobs = LoadJobs(JobProjectPaths(args), settings);
   if (early_permits_requested &&
-      (!jobs.front()->patch_match_stereo->geom_consistency ||
-       jobs.size() != 2 || lookahead_requested)) {
+      (!jobs.front()->patch_match_stereo->geom_consistency || lookahead_requested)) {
     throw std::invalid_argument(
-        "early geometry permits require exactly TWO geometry jobs and lookahead OFF");
+        "early geometry permits require geometry jobs and lookahead OFF");
   }
   if (lookahead_requested && jobs.front()->patch_match_stereo->geom_consistency) {
     throw std::invalid_argument("geometry host lookahead is unsupported");
