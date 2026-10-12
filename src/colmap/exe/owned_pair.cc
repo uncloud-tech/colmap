@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
-// Finite two-owner epochs or one experimental static triple. Never a queue.
+// Finite two-owner epochs or experimental closed static triples. Never a queue.
 #include "colmap/controllers/option_manager.h"
 #include "colmap/mvs/owned_host_lookahead.h"
 #include "colmap/mvs/owned_pair_events.h"
@@ -323,9 +323,9 @@ std::vector<fs::path> JobProjectPaths(
     paths.push_back(entry.is_absolute() ? entry : path.parent_path() / entry);
   }
   if (!stream.eof() || paths.empty() || (args.count("static_three_solver_permits")
-      ? paths.size() != 3 : paths.size() % 2 != 0)) {
+      ? paths.size() % 3 != 0 : paths.size() % 2 != 0)) {
     throw std::invalid_argument(args.count("static_three_solver_permits")
-        ? "static three list requires exactly three jobs"
+        ? "static three list requires a positive multiple of three jobs"
         : "job project list requires an even count >= 2");
   }
   return paths;
@@ -535,8 +535,8 @@ int RunPairs(int argc, char** argv, RunJob run_job,
                  "  --geometry_early_permits 0|1 (experimental, default 0; "
                  "geometry-only, two owners per closed epoch, lookahead OFF; "
                  "SERIAL unchanged)\n"
-                 "  --static_three_solver_permits 2|3 (one geometry-only triple; pair dispatch; no lookahead)\n"
-                 "  --job_c_project_path <INI> (or exactly-three list)\n"
+                 "  --static_three_solver_permits 2|3 (closed geometry-only triples; pair dispatch; no lookahead)\n"
+                 "  --job_c_project_path <INI> (or positive multiple-of-three list)\n"
                  "  --job_c_host_charge_bytes <bytes> --job_c_device_charge_bytes <bytes>\n";
     return EXIT_SUCCESS;
   }
@@ -611,9 +611,10 @@ int RunPairs(int argc, char** argv, RunJob run_job,
   BaseOptionManager globals(false);
   auto jobs = LoadJobs(JobProjectPaths(args), settings);
   if (static_three_permits &&
-      (jobs.size() != 3 || !jobs.front()->patch_match_stereo->geom_consistency ||
+      (jobs.empty() || jobs.size() % 3 != 0 ||
+       !jobs.front()->patch_match_stereo->geom_consistency ||
        settings.affinity < 3)) {
-    throw std::invalid_argument("static three requires exactly three geometry jobs and three CPU equivalents");
+    throw std::invalid_argument("static three requires complete geometry triples and three CPU equivalents");
   }
   if (early_permits_requested &&
       (!jobs.front()->patch_match_stereo->geom_consistency || lookahead_requested)) {
@@ -647,7 +648,12 @@ int RunPairs(int argc, char** argv, RunJob run_job,
         run_job(job, coordinator, slot, hooks);
       }
     };
-    RunPairEpoch(*jobs[0], *jobs[1], settings, execute, {}, {}, {}, jobs[2].get());
+    for (size_t first = 0; first < jobs.size(); first += 3) {
+      // Each call joins and retires all owners, checks Finish credits, and
+      // destroys the coordinator before the next independent admission.
+      RunPairEpoch(*jobs[first], *jobs[first + 1], settings, execute,
+                   {}, {}, {}, jobs[first + 2].get());
+    }
     return EXIT_SUCCESS;
   }
   // The full additional transient charge is held even after CPU preparation

@@ -285,6 +285,106 @@ TEST_F(OwnedPairTest, StaticThreeRealParserOwnerAndEventContract) {
   }
 }
 
+TEST_F(OwnedPairTest, StaticThreeTwoEpochsCloseBeforeSuccessorAdmission) {
+  for (size_t j = 0; j < 6; ++j) {
+    if (j >= 4) WriteJob(j);
+    SetPatchMatchOption(j, "geom_consistency", "true");
+  }
+  for (const auto* permits : {"2", "3"}) {
+    auto args = ListArgs({0, 1, 2, 3, 4, 5});
+    args.insert(args.end(), {"--static_three_solver_permits", permits,
+                            "--job_c_host_charge_bytes", "524288",
+                            "--job_c_device_charge_bytes", "128"});
+    EventCapture capture;
+    std::atomic<size_t> calls{0};
+    EXPECT_EQ(Invoke(args, [&](auto& job, auto& coordinator, size_t slot,
+                              const auto& hooks) {
+      const size_t ordinal = calls.fetch_add(1);
+      EXPECT_EQ(job.workspace, Workspace(slot + (ordinal >= 3 ? 3 : 0)));
+      Complete(job, coordinator, slot, hooks);
+    }), EXIT_SUCCESS);
+    EXPECT_EQ(calls.load(), 6);
+    const auto records = Records(capture.Read());
+    std::string batch;
+    size_t retired = 0, joined = 0, released = 0, finished = 0, epochs = 0;
+    for (const auto& record : records) {
+      const auto& event = record.at("event");
+      if (event == "validated") {
+        if (epochs) {
+          EXPECT_EQ(retired, 3);
+          EXPECT_EQ(joined, 1);
+          EXPECT_EQ(released, 1);
+          EXPECT_EQ(finished, 1);
+        }
+        EXPECT_NE(batch, record.at("batch"));
+        batch = record.at("batch");
+        retired = joined = released = finished = 0;
+        ++epochs;
+      }
+      EXPECT_EQ(record.at("batch"), batch);
+      if (event == "retired") ++retired;
+      if (event == "owners_joined") ++joined;
+      if (event == "ledger_release") {
+        EXPECT_EQ(retired, 3);
+        EXPECT_EQ(joined, 1);
+        EXPECT_EQ(record.at("reserved_host"), "0");
+        EXPECT_EQ(record.at("reserved_device"), "0");
+        ++released;
+      }
+      if (event == "batch_finished") {
+        EXPECT_EQ(released, 1);
+        ++finished;
+      }
+    }
+    EXPECT_EQ(epochs, 2);
+    EXPECT_EQ(finished, 1);
+  }
+}
+
+TEST_F(OwnedPairTest, StaticThreeFailureClosesAndStopsSuccessor) {
+  for (size_t j = 0; j < 6; ++j) {
+    if (j >= 4) WriteJob(j);
+    SetPatchMatchOption(j, "geom_consistency", "true");
+  }
+  for (size_t failing : {0, 2, 3, 5}) {
+    auto args = ListArgs({0, 1, 2, 3, 4, 5});
+    args.insert(args.end(), {"--static_three_solver_permits", "3",
+                            "--job_c_host_charge_bytes", "524288",
+                            "--job_c_device_charge_bytes", "128"});
+    EventCapture capture;
+    std::atomic<size_t> calls{0};
+    EXPECT_THROW(Invoke(args, [&](auto& job, auto& coordinator, size_t slot,
+                                 const auto& hooks) {
+      ++calls;
+      if (job.workspace == Workspace(failing)) {
+        throw std::runtime_error("injected triple failure");
+      }
+      Complete(job, coordinator, slot, hooks);
+    }), std::runtime_error);
+    const size_t epochs = failing < 3 ? 1 : 2;
+    EXPECT_EQ(calls.load(), epochs * 3);
+    size_t admitted = 0, retired = 0, joined = 0, released = 0, failed = 0;
+    for (const auto& record : Records(capture.Read())) {
+      const auto& event = record.at("event");
+      if (event == "admitted") ++admitted;
+      if (event == "retired") ++retired;
+      if (event == "owners_joined") ++joined;
+      if (event == "ledger_release") {
+        EXPECT_EQ(retired, joined * 3);
+        EXPECT_EQ(record.at("reserved_host"), "0");
+        EXPECT_EQ(record.at("reserved_device"), "0");
+        ++released;
+      }
+      if (event == "batch_failed") ++failed;
+    }
+    EXPECT_EQ(admitted, epochs * 3);
+    EXPECT_EQ(retired, epochs * 3);
+    EXPECT_EQ(joined, epochs);
+    EXPECT_EQ(released, epochs);
+    EXPECT_EQ(failed, 1);
+  }
+}
+
 TEST_F(OwnedPairTest, StaticThreeRejectsUnsupportedModesBeforeOwners) {
   auto triple = [&](std::vector<size_t> slots) {
     auto args = ListArgs(slots);

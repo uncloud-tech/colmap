@@ -31,8 +31,8 @@ namespace fs = std::filesystem;
 namespace pair = colmap::mvs::owned;
 ''' + settings + r'''
 struct Options { bool geom_consistency = true; std::string gpu_index = "0"; int num_threads = 1; };
-struct Globals { bool operator==(const Globals&) const { return true; } };
-struct Spec { Options options; fs::path workspace; std::string reference; std::array<fs::path,2> dirs; };
+struct Globals { int seed = 0; bool operator==(const Globals& other) const { return seed == other.seed; } };
+struct Spec { Options options; fs::path workspace; std::string reference; std::array<fs::path,2> dirs; Globals globals; };
 std::vector<Spec> specs;
 struct JobOptions {
   Globals globals;
@@ -41,12 +41,13 @@ struct JobOptions {
   bool Read(const std::string& path, bool) {
     const auto& s = specs.at(std::stoul(fs::path(path).stem().string()));
     *patch_match_stereo = s.options; workspace = s.workspace;
-    reference_name = s.reference; output_dirs = s.dirs; return true;
+    reference_name = s.reference; output_dirs = s.dirs; globals = s.globals; return true;
   }
 };
 // Native INI/decode is not part of this bounded CPU build. All list loading,
 // cross-job phase/device/alias and per-pair IO guards below are real source.
-void ValidateJob(JobOptions&, pair::ByteCharge) {}
+std::vector<pair::ByteCharge> validated_charges;
+void ValidateJob(JobOptions&, pair::ByteCharge charge) { validated_charges.push_back(charge); }
 ''' + loader + r'''
 template<class F> bool Reject(F f) {
   try { f(); } catch (const std::exception&) { return true; } return false;
@@ -57,9 +58,9 @@ int main(int argc, char** argv) {
   const auto list = root / "jobs.txt";
   const std::map<std::string,std::string> args{{"job_project_list_path",list.string()}};
   auto write = [&](size_t count) { std::ofstream out(list); for(size_t j=0;j<count;++j) out << j << ".ini\n"; };
-  for(size_t j=0;j<4;++j) {
+  for(size_t j=0;j<6;++j) {
     const auto workspace = root / std::to_string(j); fs::create_directories(workspace);
-    specs.push_back({{},workspace,std::to_string(j),{workspace/"depth",workspace/"normal"}});
+    specs.push_back({{},workspace,std::to_string(j),{workspace/"depth",workspace/"normal"},{}});
   }
   auto load = [&] { return LoadJobs(JobProjectPaths(args),settings); };
   write(4); assert(load().size()==4);
@@ -79,7 +80,22 @@ int main(int argc, char** argv) {
   triple_args.emplace("static_three_solver_permits", "2");
   auto triple = [&] { return LoadJobs(JobProjectPaths(triple_args), settings); };
   write(3); assert(triple().size() == 3);
-  for (size_t count : {0,1,2,4,6}) { write(count); assert(Reject(triple)); }
+  for (size_t count : {0,1,2,4,5}) { write(count); assert(Reject(triple)); }
+  settings.charges = {{{13,10},{13,10},{12,9}}};
+  write(6); validated_charges.clear(); assert(triple().size() == 6);
+  assert(validated_charges.size() == 6);
+  for(size_t j=0;j<6;++j) {
+    assert(validated_charges[j].host == settings.charges[j%3].host);
+    assert(validated_charges[j].device == settings.charges[j%3].device);
+  }
+  const auto last = specs[5];
+  specs[5].globals.seed = 1; assert(Reject(triple)); specs[5] = last;
+  specs[5].options.geom_consistency = true; assert(Reject(triple)); specs[5] = last;
+  specs[5].options.gpu_index = "1"; assert(Reject(triple)); specs[5] = last;
+  specs[5].options.num_threads = 2; assert(Reject(triple)); specs[5] = last;
+  specs[5].workspace = specs[0].workspace; assert(Reject(triple)); specs[5] = last;
+  specs[5].dirs[0] = specs[0].dirs[0]; assert(Reject(triple)); specs[5] = last;
+  specs[5].reference = specs[0].reference; assert(Reject(triple)); specs[5] = last;
   write(3);
   specs[2].options.num_threads = 2; assert(Reject(triple)); specs[2].options.num_threads = 1;
   const auto c = specs[2];
@@ -203,7 +219,9 @@ int main() {
   args[args.size()-7] = "2";
   geometry = false; assert(Reject(args)); geometry = true;
   args[2] = "serial"; assert(Reject(args)); args[2] = "pair";
-  count = 6; assert(Reject(args)); count = 3;
+  count = 6; assert(Invoke(args) == 2);
+  for(size_t invalid : {0,1,2,4,5,7}) { count = invalid; assert(Reject(args)); }
+  count = 3;
   args.insert(args.end(), {"--host_lookahead", "0"}); assert(Reject(args));
   std::cout << "early geometry CLI checks passed\n";
 }

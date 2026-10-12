@@ -139,6 +139,8 @@ class StaticThreeTest(unittest.TestCase):
         settings = settings[:settings.index('\n};') + 3]
         epoch = driver[driver.index('template <class RunJob>\nvoid RunPairEpoch('):
                        driver.index('using PreparedHostJob =')]
+        loop = driver[driver.index('  if (static_three_permits) {\n    auto execute'):
+                      driver.index('  // The full additional transient charge')]
         source = r'''
 #include "colmap/mvs/owned_pair_events.h"
 #include "colmap/mvs/owned_pair_run.h"
@@ -149,7 +151,7 @@ class StaticThreeTest(unittest.TestCase):
 namespace pair = colmap::mvs::owned;
 namespace fs = std::filesystem;
 namespace mvs {
-struct Options { int num_threads = 1; };
+struct Options { int num_threads = 1; int reference = 17; };
 struct Problem {};
 struct PatchMatchController {
  struct OwnedPairHooks {
@@ -164,19 +166,46 @@ struct JobOptions { Globals globals; fs::path workspace;
  std::unique_ptr<mvs::Options> patch_match_stereo=std::make_unique<mvs::Options>(); };
 template<class T> std::string Value(const T& value){std::ostringstream s;s<<value;return s.str();}
 void CheckInputs(const mvs::Options&,const mvs::Problem&,pair::ByteCharge,const fs::path&) {}
-void Metadata(pair::PairEvents& e,size_t j,const mvs::Options&,const mvs::Problem&){e.Identity(j,17+j,0);}
+void Metadata(pair::PairEvents& e,size_t j,const mvs::Options& o,const mvs::Problem&){e.Identity(j,o.reference,0);}
 ''' + settings + epoch + r'''
-int main(){
+using PreparedHostJob = int;
+template<class RunJob>
+int RunStatic(std::vector<std::unique_ptr<JobOptions>>& jobs,
+              const PairSettings& settings, RunJob run_job) {
+ const auto static_three_permits = settings.static_three_solver_permits;
+''' + loop + r'''
+ return EXIT_FAILURE;
+}
+int main(int argc,char** argv){
+ assert(argc==2); const int fail=std::stoi(argv[1]);
  for(size_t permits:{2,3}){
-  JobOptions a,b,c;
+  std::vector<std::unique_ptr<JobOptions>> jobs;
+  for(size_t j=0;j<6;++j){
+   jobs.push_back(std::make_unique<JobOptions>());
+   jobs.back()->workspace=std::to_string(j);
+   jobs.back()->patch_match_stereo->reference=17+j;
+  }
+  std::atomic<int> alive{0}; std::atomic<size_t> calls{0};
   PairSettings settings{"pair",{38,30},{2,2},{{{13,10},{13,10},{10,8}}},3,1,false,permits};
-  auto run=[](JobOptions& job,pair::PairCoordinator& coord,size_t j,const auto& hooks){
+  auto run=[&](JobOptions& job,pair::PairCoordinator& coord,size_t j,const auto& hooks){
+   const int index=std::stoi(job.workspace.string());
+   assert(j==size_t(index)%3); ++calls;
+   struct Resource { std::atomic<int>& alive;
+    explicit Resource(std::atomic<int>& a):alive(a){++alive;}
+    ~Resource(){--alive;}
+   } resource(alive);
    coord.BeginPreparation(j);hooks.metadata(j,*job.patch_match_stereo,mvs::Problem{});
+   if(index==fail)throw std::runtime_error("injected epoch failure");
    coord.ReadyAndWait(j);coord.SolverDone(j);coord.BeginOutput(j);
    for(auto phase:{"depth_begin","depth_end","normal_begin","normal_end"})hooks.output_phase(j,phase);
    coord.EndOutput(j);coord.AwaitOutputs(j);
   };
-  RunPairEpoch(a,b,settings,run,{},{},{},&c);
+  bool failed=false;
+  try {assert(RunStatic(jobs,settings,run)==EXIT_SUCCESS);}
+  catch(const std::runtime_error& e){failed=true;assert(std::string(e.what())=="injected epoch failure");}
+  assert(failed==(fail>=0));assert(alive==0);
+  if(fail<0)assert(calls==6);
+  else if(fail<3)assert(calls==3); // No successor owner may be launched.
  }
 }
 '''
@@ -190,18 +219,54 @@ int main(){
         (temp / 'compile.log').write_text(compiled.stdout + compiled.stderr)
         print(f'STATIC_THREE_EPOCH_ARTIFACT {temp} compile_exit={compiled.returncode}')
         self.assertEqual(compiled.returncode, 0, compiled.stderr)
-        result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=15)
-        (temp / 'run.log').write_text(result.stdout + result.stderr)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        records = [dict(field.split('=', 1) for field in line.split()[1:])
-                   for line in result.stdout.splitlines() if line.startswith('OWNED_PAIR_EVENT ')]
-        validated = [r for r in records if r['event'] == 'validated']
-        self.assertEqual([r['static_three_solver_permits'] for r in validated], ['2', '3'])
-        for record in validated:
-            self.assertEqual(record['job_count'], '3')
-            self.assertEqual((record['hc'], record['dc'], record['io_c']), ('10', '8', '1'))
-        self.assertEqual(sum(r['event'] == 'batch_finished' for r in records), 2)
-        self.assertEqual(sum(r['event'] == 'normal_end' for r in records), 6)
+        for failure in (-1, 0, 2, 3, 5):
+            result = subprocess.run([str(binary), str(failure)], capture_output=True,
+                                    text=True, timeout=15)
+            (temp / f'run-{failure}.log').write_text(result.stdout + result.stderr)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            records = [dict(field.split('=', 1) for field in line.split()[1:])
+                       for line in result.stdout.splitlines()
+                       if line.startswith('OWNED_PAIR_EVENT ')]
+            validated = [r for r in records if r['event'] == 'validated']
+            expected = ['2', '2', '3', '3'] if failure < 0 or failure >= 3 else ['2', '3']
+            self.assertEqual([r['static_three_solver_permits'] for r in validated], expected)
+            for record in validated:
+                self.assertEqual(record['job_count'], '3')
+                self.assertEqual((record['hc'], record['dc'], record['io_c']), ('10', '8', '1'))
+            batches = list(dict.fromkeys(r['batch'] for r in records))
+            for ordinal, batch in enumerate(batches):
+                epoch = [r for r in records if r['batch'] == batch]
+                events = [r['event'] for r in epoch]
+                self.assertEqual(sum(e == 'retired' for e in events), 3)
+                self.assertEqual(sum(e == 'owners_joined' for e in events), 1)
+                self.assertEqual(sum(e == 'ledger_release' for e in events), 1)
+                release = next(r for r in epoch if r['event'] == 'ledger_release')
+                self.assertEqual((release['reserved_host'], release['reserved_device']), ('0', '0'))
+                self.assertLess(max(i for i, e in enumerate(events) if e == 'retired'),
+                                events.index('owners_joined'))
+                self.assertLess(events.index('owners_joined'), events.index('ledger_release'))
+                for job in ('A', 'B', 'C'):
+                    own = [r['event'] for r in epoch if r['job'] == job]
+                    self.assertLess(own.index('cleanup_complete'), own.index('retired'))
+                if 'batch_finished' in events:
+                    first = 17 + 3 * (ordinal % 2) if len(batches) == 4 else 17
+                    self.assertEqual({r['job']: int(r['reference']) for r in epoch if r['event'] == 'ready'},
+                                     {'A': first, 'B': first + 1, 'C': first + 2})
+                    self.assertLess(events.index('ledger_release'), events.index('batch_finished'))
+                    self.assertEqual(events[-1], 'batch_finished')
+                    self.assertEqual(sum(e == 'normal_end' for e in events), 3)
+                    # Coordinator timestamps/sequences are authoritative:
+                    # observer writes from different owners can interleave.
+                    outputs = [int(r['coord_seq']) for r in epoch if r['event'] == 'output_end']
+                    retirements = [int(r['coord_seq']) for r in epoch if r['event'] == 'retired']
+                    self.assertLess(max(outputs), min(retirements))
+                else:
+                    self.assertEqual(events[-1], 'batch_failed')
+            # Stream order proves closure/Finish before the next epoch's admit.
+            for previous, following in zip(batches, batches[1:]):
+                prev = [i for i, r in enumerate(records) if r['batch'] == previous]
+                nxt = [i for i, r in enumerate(records) if r['batch'] == following]
+                self.assertLess(max(prev), min(nxt))
 
     def test_bounded_coordinator_runner_and_events(self):
         temp = Path(tempfile.mkdtemp(prefix='static-three-cpu-'))
