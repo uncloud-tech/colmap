@@ -415,6 +415,34 @@ TEST_F(OwnedPairTest, GeometryRequiresExactlyTwoSamePhaseJobsWithoutLookahead) {
   Reject(ListArgs({0, 1}));  // Opposite mixed-phase direction.
 }
 
+TEST_F(OwnedPairTest, EarlyGeometryPermitsAdmissionAndMetadata) {
+  auto args = ListArgs({0, 1});
+  args.insert(args.end(), {"--geometry_early_permits", "invalid"});
+  Reject(args);
+  args.back() = "1";
+  Reject(args);  // Photometric jobs cannot enable geometry permits.
+  for (size_t j : {0, 1}) SetPatchMatchOption(j, "geom_consistency", "true");
+  {
+    EventCapture capture;
+    EXPECT_EQ(Invoke(args, Complete), EXIT_SUCCESS);
+    bool validated = false;
+    for (const auto& record : Records(capture.Read())) {
+      if (record.at("event") == "validated") {
+        validated = true;
+        EXPECT_EQ(record.at("geometry_early_permits"), "1");
+      }
+    }
+    EXPECT_TRUE(validated);
+  }
+  args.insert(args.end(), {"--host_lookahead", "1",
+                           "--host_lookahead_charge_bytes", "1"});
+  Reject(args);
+  auto photo = ListArgs({2, 3});
+  photo.insert(photo.end(), {"--geometry_early_permits", "0"});
+  EventCapture capture;
+  EXPECT_EQ(Invoke(photo, Complete), EXIT_SUCCESS);
+}
+
 TEST_F(OwnedPairTest, GeometryBadFlagsAndExistingOutputRejectBeforeDispatch) {
   for (size_t j : {0, 1}) SetPatchMatchOption(j, "geom_consistency", "true");
   for (const auto& option : std::vector<std::pair<std::string, std::string>>{

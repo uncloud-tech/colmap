@@ -21,6 +21,7 @@ HEADER = ROOT / 'src/colmap/mvs/owned_pair_coordinator.h'
 
 PROGRAM = r'''
 #include "colmap/mvs/owned_pair_coordinator.h"
+#include "colmap/mvs/owned_pair_run.h"
 
 #include <array>
 #include <atomic>
@@ -40,7 +41,7 @@ PROGRAM = r'''
 using namespace colmap::mvs::owned;
 using namespace std::chrono_literals;
 
-static int failures = 0;
+static std::atomic<int> failures{0};
 
 static void OnTerminate() {
   std::fprintf(stderr, "terminate: uncaught exception in a worker\n");
@@ -613,8 +614,185 @@ static void ScenarioSinkReentrancy() {
   CHECK(c.ReservedBytes().host == 0);
 }
 
+
+static void ScenarioEarlyOrdering(PairDispatch dispatch,
+                                  EarlyGeometryPermits early) {
+  EventLog log;
+  Latch b_preparing, allow_b, a_solving;
+  PairCoordinator c(dispatch, CAP, PROC, JOBS, 8000ms,
+                    [&](const PairEvent& e) { log.Push(e); }, early);
+  std::thread a([&] {
+    c.BeginPreparation(0);
+    c.ReadyAndWait(0);
+    a_solving.Set();
+    c.SolverDone(0);
+    c.BeginOutput(0);
+    c.EndOutput(0);
+    c.AwaitOutputs(0);
+    c.Retire(0);
+  });
+  std::thread b([&] {
+    c.BeginPreparation(1);
+    b_preparing.Set();
+    REQUIRE(allow_b.Wait(4000ms));
+    c.ReadyAndWait(1);
+    c.SolverDone(1);
+    c.BeginOutput(1);
+    c.EndOutput(1);
+    c.AwaitOutputs(1);
+    c.Retire(1);
+  });
+  REQUIRE(b_preparing.Wait(4000ms));
+  const bool starts_early = dispatch == PairDispatch::kPair &&
+                            early == EarlyGeometryPermits::kOn;
+  if (starts_early) {
+    REQUIRE(a_solving.Wait(4000ms));
+    CHECK(!log.Seen(1, "ready"));
+    CHECK(!log.Seen(0, "retired"));
+    CHECK(c.ReservedBytes().host == 410);
+  }
+  allow_b.Set();
+  a.join(); b.join();
+  CHECK(log.Count("solver_release") == 2);
+  CHECK(log.Count("solver_start") == 2);
+  CHECK(log.Count("output_end") == 2);
+  CHECK(log.Count("retired") == 2);
+  CHECK(log.Sequence(0, "prep_end") < log.Sequence(1, "prep_start"));
+  if (starts_early) {
+    CHECK(log.Sequence(0, "solver_start") < log.Sequence(1, "ready"));
+  } else {
+    CHECK(log.Sequence(1, "ready") < log.Sequence(0, "solver_start"));
+  }
+  if (dispatch == PairDispatch::kSerial) {
+    CHECK(log.Sequence(0, "solver_end") < log.Sequence(1, "solver_start"));
+  }
+  CHECK(Throws([&] { c.Retire(0); }));
+  c.Finish(); c.Finish();
+  CHECK(log.Count("ledger_release") == 1);
+}
+
+static void ScenarioEarlyOutputLease() {
+  EventLog log;
+  Latch a_outputting, b_computed, allow_a_end;
+  PairCoordinator c(PairDispatch::kPair, CAP, PROC, JOBS, 8000ms,
+                    [&](const PairEvent& e) { log.Push(e); },
+                    EarlyGeometryPermits::kOn);
+  std::thread a([&] {
+    c.BeginPreparation(0);
+    c.ReadyAndWait(0);
+    c.SolverDone(0);
+    CHECK(Throws([&] { c.SolverDone(0); }));
+    c.BeginOutput(0);
+    a_outputting.Set();
+    REQUIRE(allow_a_end.Wait(4000ms));
+    c.EndOutput(0);
+    CHECK(Throws([&] { c.EndOutput(0); }));
+    c.AwaitOutputs(0);
+    c.Retire(0);
+  });
+  std::thread b([&] {
+    c.BeginPreparation(1);
+    c.ReadyAndWait(1);
+    REQUIRE(a_outputting.Wait(4000ms));
+    c.SolverDone(1);
+    b_computed.Set();
+    c.BeginOutput(1);
+    c.EndOutput(1);
+    c.AwaitOutputs(1);
+    c.Retire(1);
+  });
+  REQUIRE(b_computed.Wait(4000ms));
+  CHECK(!log.Seen(1, "output_start"));
+  CHECK(c.ReservedBytes().host == 410);
+  allow_a_end.Set();
+  a.join(); b.join();
+  CHECK(log.Sequence(0, "output_end") < log.Sequence(1, "output_start"));
+  c.Finish();
+  CHECK(log.Count("ledger_release") == 1);
+}
+
+// Failure occurs while the peer's solver is held by a deterministic latch.
+// Resource cleanup must see that peer's successful completion, not merely
+// cancellation. Exercise the real join/retirement wrapper as production does.
+static void ScenarioEarlyFailure(const std::string& phase) {
+  EventLog log;
+  Latch peer_solving, failure_drained, allow_peer;
+  std::atomic<bool> peer_complete{false};
+  std::array<std::atomic<int>, 2> cleanup_count{};
+  PairCoordinator c(PairDispatch::kPair, CAP, PROC, JOBS, 8000ms,
+                    [&](const PairEvent& e) { log.Push(e); },
+                    EarlyGeometryPermits::kOn);
+  const size_t failed = phase == "preparation" ? 1 : 0;
+  const size_t peer = 1 - failed;
+  auto error = std::make_exception_ptr(std::runtime_error(phase));
+  std::thread runner([&] {
+    bool caught = false;
+    try {
+      RunPairOwners(c, [&](size_t job) {
+        try {
+          c.BeginPreparation(job);
+          if (job == failed && phase == "preparation") {
+            REQUIRE(peer_solving.Wait(4000ms));
+            std::rethrow_exception(error);
+          }
+          c.ReadyAndWait(job);
+          if (job == peer) {
+            peer_solving.Set();
+            REQUIRE(allow_peer.Wait(4000ms));
+            peer_complete.store(true);
+            c.SolverDone(job);
+          } else {
+            REQUIRE(peer_solving.Wait(4000ms));
+            if (phase == "output") {
+              c.SolverDone(job);
+              c.BeginOutput(job);
+            }
+            std::rethrow_exception(error);
+          }
+          c.BeginOutput(job);
+          c.EndOutput(job);
+          c.AwaitOutputs(job);
+        } catch (...) {
+          c.CancelAndAwaitCleanup(job, std::current_exception(), [&] {
+            if (job == failed) failure_drained.Set();
+          });
+          throw;
+        }
+      }, [](size_t, const char*) {}, PairThreadFactory{}, [&](size_t job) {
+        CHECK(peer_complete.load());
+        ++cleanup_count[job];
+        CHECK(c.ReservedBytes().host == 410);
+      });
+    } catch (const std::runtime_error& e) {
+      caught = std::string(e.what()) == phase;
+    }
+    CHECK(caught);
+  });
+  REQUIRE(failure_drained.Wait(4000ms));
+  CHECK(!peer_complete.load());
+  CHECK(log.Count("retired") == 0);
+  CHECK(log.Count("ledger_release") == 0);
+  CHECK(c.ReservedBytes().host == 410);
+  // Explicit external cancellation must not replace the original exception.
+  c.Cancel(peer, std::make_exception_ptr(std::runtime_error("external cancel")));
+  allow_peer.Set();
+  runner.join();
+  CHECK(cleanup_count[0] == 1 && cleanup_count[1] == 1);
+  CHECK(log.Count("retired") == 2);
+  CHECK(log.Count("ledger_release") == 1);
+  CHECK(c.ReservedBytes().host == 0);
+}
+
 int main() {
   std::set_terminate(OnTerminate);
+  ScenarioEarlyOrdering(PairDispatch::kPair, EarlyGeometryPermits::kOn);
+  ScenarioEarlyOrdering(PairDispatch::kPair, EarlyGeometryPermits::kOff);
+  ScenarioEarlyOrdering(PairDispatch::kSerial, EarlyGeometryPermits::kOn);
+  ScenarioEarlyOrdering(PairDispatch::kSerial, EarlyGeometryPermits::kOff);
+  ScenarioEarlyOutputLease();
+  ScenarioEarlyFailure("preparation");
+  ScenarioEarlyFailure("solver");
+  ScenarioEarlyFailure("output");
   ScenarioAdmissionAndLedger();
   ScenarioStateMisuse();
   ScenarioSerialDispatch();
@@ -631,7 +809,7 @@ int main() {
   ScenarioSinkThrow();
   ScenarioSinkReentrancy();
   if (failures != 0) {
-    std::fprintf(stderr, "%d pair coordinator check(s) failed\n", failures);
+    std::fprintf(stderr, "%d pair coordinator check(s) failed\n", failures.load());
     return 1;
   }
   std::printf("all pair coordinator checks passed\n");
@@ -657,7 +835,7 @@ class PairCoordinatorTest(unittest.TestCase):
         program.write_text(PROGRAM)
         binary = temp / 'program'
         command = ['g++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-O1',
-                   '-pthread', '-I', str(temp), str(program), '-o', str(binary)]
+                   '-pthread', '-I', str(temp), '-I', str(ROOT / 'src'), str(program), '-o', str(binary)]
         compiled = subprocess.run(command, capture_output=True, text=True,
                                   timeout=60)
         (temp / 'compile.log').write_text(compiled.stdout + compiled.stderr)
@@ -677,6 +855,36 @@ class PairCoordinatorTest(unittest.TestCase):
         result = self.run_program()
         self.assertIsNotNone(result, 'real header program hung / timed out')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_mutant_missing_early_permit(self):
+        def mutation(source):
+            old = 'early_geometry_permits_ == EarlyGeometryPermits::kOn;'
+            self.assertEqual(source.count(old), 1)
+            return source.replace(old, 'early_geometry_permits_ == EarlyGeometryPermits::kOff;')
+
+        result = self.run_program(mutation)
+        self.assertTrue(result is None or result.returncode != 0,
+                        'missing early permit was not detected')
+
+    def test_mutant_duplicate_early_release(self):
+        def mutation(source):
+            old = '        pending.push_back(MakeEventLocked(job, "solver_release"));'
+            self.assertEqual(source.count(old), 1)
+            return source.replace(old, old + '\n' + old)
+
+        result = self.run_program(mutation)
+        self.assertTrue(result is None or result.returncode != 0,
+                        'duplicate early solver release was not detected')
+
+    def test_mutant_bypassed_peer_cleanup_fence(self):
+        def mutation(source):
+            old = 'return !solver_active_[0] && !solver_active_[1];'
+            self.assertEqual(source.count(old), 1)
+            return source.replace(old, 'return true;')
+
+        result = self.run_program(mutation)
+        self.assertTrue(result is None or result.returncode != 0,
+                        'bypassed peer cleanup fence was not detected')
 
     def test_mutant_missing_both_ready_gate(self):
         def mutation(source):

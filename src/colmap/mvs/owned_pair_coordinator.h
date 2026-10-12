@@ -36,6 +36,7 @@ namespace mvs {
 namespace owned {
 
 enum class PairDispatch { kSerial, kPair };
+enum class EarlyGeometryPermits { kOff, kOn };
 
 struct ByteCharge {
   uint64_t host = 0;
@@ -118,13 +119,20 @@ class PairCoordinator {
                   ByteCharge process_charge,
                   std::array<ByteCharge, 2> job_charges,
                   std::chrono::milliseconds timeout,
-                  std::function<void(const PairEvent&)> sink = {})
+                  std::function<void(const PairEvent&)> sink = {},
+                  EarlyGeometryPermits early_geometry_permits =
+                      EarlyGeometryPermits::kOff)
       : dispatch_(dispatch),
+        early_geometry_permits_(early_geometry_permits),
         timeout_(timeout),
         sink_(std::move(sink)),
         state_{JobState::kReserved, JobState::kReserved} {
     if (dispatch_ != PairDispatch::kSerial && dispatch_ != PairDispatch::kPair) {
       throw std::invalid_argument("owned pair: unsupported dispatch");
+    }
+    if (early_geometry_permits_ != EarlyGeometryPermits::kOff &&
+        early_geometry_permits_ != EarlyGeometryPermits::kOn) {
+      throw std::invalid_argument("owned pair: unsupported early geometry permits");
     }
     if (timeout_.count() <= 0) {
       throw std::invalid_argument("owned pair: timeout must be positive");
@@ -184,10 +192,11 @@ class PairCoordinator {
     Emit(job, "prep_start");
   }
 
-  // Releases the preparation lease, marks the job Ready, then waits for the
-  // one-shot both-ready barrier and this job's solver dispatch permit. Pair
-  // releases both permits when both are ready; serial releases A's permit and
-  // leaves B's to SolverDone(0).
+  // Releases the preparation lease and marks the job Ready. Experimental
+  // geometry Pair/ON grants this job's permit immediately; the caller must
+  // enforce geometry-only admission. OFF and SERIAL retain the both-ready
+  // barrier; serial leaves B's permit to SolverDone(0). No lifetime fence or
+  // reservation is released by an early solver permit.
   void ReadyAndWait(size_t job) {
     RequireJob(job);
     const Clock::time_point deadline = Clock::now() + timeout_;
@@ -205,15 +214,21 @@ class PairCoordinator {
       state_[job] = JobState::kReady;
       ready_[job] = true;
       pending.push_back(MakeEventLocked(job, "ready"));
+      const bool early = dispatch_ == PairDispatch::kPair &&
+                         early_geometry_permits_ == EarlyGeometryPermits::kOn;
+      if (early) {
+        permit_[job] = true;
+        pending.push_back(MakeEventLocked(job, "solver_release"));
+      }
       if (!both_ready_closed_ && ready_[0] && ready_[1]) {
         both_ready_closed_ = true;
         pending.push_back(MakeEventLocked(kNoJob, "both_ready"));
-        if (dispatch_ == PairDispatch::kPair) {
+        if (!early && dispatch_ == PairDispatch::kPair) {
           permit_[0] = true;
           permit_[1] = true;
           pending.push_back(MakeEventLocked(0, "solver_release"));
           pending.push_back(MakeEventLocked(1, "solver_release"));
-        } else {
+        } else if (dispatch_ == PairDispatch::kSerial) {
           permit_[0] = true;
           pending.push_back(MakeEventLocked(0, "solver_release"));
         }
@@ -555,6 +570,7 @@ class PairCoordinator {
   }
 
   PairDispatch dispatch_;
+  EarlyGeometryPermits early_geometry_permits_;
   std::chrono::milliseconds timeout_;
   std::function<void(const PairEvent&)> sink_;
   mutable std::mutex mutex_;

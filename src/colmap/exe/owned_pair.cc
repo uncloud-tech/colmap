@@ -295,6 +295,7 @@ struct PairSettings {
   std::array<pair::ByteCharge, 2> charges;
   uint64_t affinity;
   uint64_t io_cap;
+  bool geometry_early_permits = false;
 };
 
 std::vector<fs::path> JobProjectPaths(
@@ -397,7 +398,7 @@ void RunPairEpoch(JobOptions& a,
   pair::PairEvents events(settings.dispatch);
   try {
     events.Emit(pair::PairEvents::kBatch,"validated",
-      "driver_executable=colmap_owned_pair io_threads_limit="+Value(io_cap)+" affinity="+Value(affinity)+
+      "driver_executable=colmap_owned_pair geometry_early_permits="+Value(settings.geometry_early_permits)+" io_threads_limit="+Value(io_cap)+" affinity="+Value(affinity)+
       " io_a="+Value(jobs[0]->patch_match_stereo->num_threads)+" io_b="+Value(jobs[1]->patch_match_stereo->num_threads)+
       " host_budget="+Value(capacity.host)+" device_budget="+Value(capacity.device)+
       " hp="+Value(process.host)+" ha="+Value(charges[0].host)+" hb="+Value(charges[1].host)+
@@ -415,7 +416,8 @@ void RunPairEpoch(JobOptions& a,
           if (e.event == "solver_release" && e.job == 0 && solver_released) {
             solver_released();
           }
-        });
+        }, settings.geometry_early_permits ? pair::EarlyGeometryPermits::kOn
+                                          : pair::EarlyGeometryPermits::kOff);
     } catch (...) {
       events.Emit(pair::PairEvents::kBatch,"admission_denied","reserved_host=0 reserved_device=0");
       throw;
@@ -511,12 +513,18 @@ int RunPairs(int argc, char** argv, RunJob run_job,
                  "OR --job_project_list_path <list: one INI path per line, "
                  "relative to list directory or absolute>\n"
                  "Optional: --host_lookahead 0|1 (default 0) "
-                 "--host_lookahead_charge_bytes <separate host reservation>\n";
+                 "--host_lookahead_charge_bytes <separate host reservation>\n"
+                 "  --geometry_early_permits 0|1 (experimental, default 0; "
+                 "geometry-only, exactly TWO jobs, lookahead OFF; "
+                 "SERIAL unchanged)\n";
     return EXIT_SUCCESS;
   }
   bool list_mode = false;
   for (int i = 1; i < argc; i += 2) {
     list_mode = list_mode || std::string(argv[i]) == "--job_project_list_path";
+    if (std::string(argv[i]) == "--geometry_early_permits") {
+      keys.insert("geometry_early_permits");
+    }
     if (std::string(argv[i]) == "--host_lookahead") keys.insert("host_lookahead");
     if (std::string(argv[i]) == "--host_lookahead_charge_bytes") {
       keys.insert("host_lookahead_charge_bytes");
@@ -533,6 +541,13 @@ int RunPairs(int argc, char** argv, RunJob run_job,
   if (args.at("dispatch") != "serial" && args.at("dispatch") != "pair") {
     throw std::invalid_argument("invalid dispatch");
   }
+  if (args.count("geometry_early_permits") &&
+      args.at("geometry_early_permits") != "0" &&
+      args.at("geometry_early_permits") != "1") {
+    throw std::invalid_argument("geometry_early_permits must be 0 or 1");
+  }
+  const bool early_permits_requested = args.count("geometry_early_permits") &&
+                                      args.at("geometry_early_permits") == "1";
   const bool lookahead_requested = args.count("host_lookahead") &&
                                    args.at("host_lookahead") == "1";
   if (args.count("host_lookahead") && args.at("host_lookahead") != "0" &&
@@ -551,9 +566,15 @@ int RunPairs(int argc, char** argv, RunJob run_job,
       {bytes("process_host_charge_bytes"), bytes("process_device_charge_bytes")},
       {{{bytes("job_a_host_charge_bytes"), bytes("job_a_device_charge_bytes")},
         {bytes("job_b_host_charge_bytes"), bytes("job_b_device_charge_bytes")}}},
-      AffinityCount(), bytes("io_threads_limit")};
+      AffinityCount(), bytes("io_threads_limit"), early_permits_requested};
   BaseOptionManager globals(false);
   auto jobs = LoadJobs(JobProjectPaths(args), settings);
+  if (early_permits_requested &&
+      (!jobs.front()->patch_match_stereo->geom_consistency ||
+       jobs.size() != 2 || lookahead_requested)) {
+    throw std::invalid_argument(
+        "early geometry permits require exactly TWO geometry jobs and lookahead OFF");
+  }
   if (lookahead_requested && jobs.front()->patch_match_stereo->geom_consistency) {
     throw std::invalid_argument("geometry host lookahead is unsupported");
   }
