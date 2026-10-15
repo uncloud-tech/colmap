@@ -411,7 +411,14 @@ bool Bitmap::Read(const std::filesystem::path& path,
 
   data_.resize(width_ * height_ * channels_);
   // Note that OIIO supports reading a subset of channels.
-  input->read_image(0, 0, 0, channels_, OIIO::TypeDesc::UINT8, data_.data());
+  if (!input->read_image(
+          0, 0, 0, channels_, OIIO::TypeDesc::UINT8, data_.data())) {
+    // Always retrieve the error to clear OIIO's pending error state.
+    const std::string error = input->geterror();
+    VLOG(3) << "Failed to read bitmap: " << error;
+    input->close();
+    return false;
+  }
   input->close();
 
   auto meta_data = std::make_unique<OIIOMetaData>();
