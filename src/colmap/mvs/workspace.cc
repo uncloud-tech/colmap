@@ -3,6 +3,7 @@
 #include "colmap/mvs/workspace.h"
 
 #include "colmap/util/file.h"
+#include "colmap/util/logging.h"
 #include "colmap/util/threading.h"
 
 #include <fstream>
@@ -44,7 +45,8 @@ void Workspace::Load(const std::vector<std::string>& image_names) {
 
     // Read and rescale bitmap
     auto bitmap = std::make_unique<Bitmap>();
-    bitmap->Read(GetBitmapPath(image_idx), options_.image_as_rgb);
+    THROW_CHECK(bitmap->Read(GetBitmapPath(image_idx), options_.image_as_rgb))
+        << "Failed to read bitmap for image " << image_idx;
     if (bitmap->Width() != static_cast<int>(width) ||
         bitmap->Height() != static_cast<int>(height)) {
       bitmap->Rescale(static_cast<int>(width), static_cast<int>(height));
@@ -156,12 +158,16 @@ const Bitmap& CachedWorkspace::GetBitmap(const int image_idx) {
   }
   std::lock_guard<std::mutex> lock(cached_image->mutex);
   if (!cached_image->bitmap) {
-    cached_image->bitmap = std::make_unique<Bitmap>();
-    cached_image->bitmap->Read(GetBitmapPath(image_idx), options_.image_as_rgb);
+    // Publish only a successfully decoded/rescaled bitmap. A failed read must
+    // neither enter the resizer with empty pixels nor poison a later retry.
+    auto bitmap = std::make_unique<Bitmap>();
+    THROW_CHECK(bitmap->Read(GetBitmapPath(image_idx), options_.image_as_rgb))
+        << "Failed to read bitmap for image " << image_idx;
     if (options_.max_image_size > 0) {
-      cached_image->bitmap->Rescale(model_.images.at(image_idx).GetWidth(),
-                                    model_.images.at(image_idx).GetHeight());
+      bitmap->Rescale(model_.images.at(image_idx).GetWidth(),
+                      model_.images.at(image_idx).GetHeight());
     }
+    cached_image->bitmap = std::move(bitmap);
     cached_image->num_bytes += cached_image->bitmap->NumBytes();
     std::lock_guard<std::mutex> cache_lock(cache_mutex_);
     // Handle the case where another thread has already evicted the image.
