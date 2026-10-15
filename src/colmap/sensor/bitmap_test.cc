@@ -5,6 +5,7 @@
 #include "colmap/util/testing.h"
 
 #include <fstream>
+#include <iterator>
 #include <tuple>
 
 #include <OpenImageIO/imagebufalgo.h>
@@ -1237,6 +1238,67 @@ TEST(Bitmap, ReadNonImageFile) {
   const std::string pending_error = OIIO::geterror();
   EXPECT_TRUE(pending_error.empty())
       << "OIIO error was not cleared: " << pending_error;
+}
+
+TEST(Bitmap, ReadPixelDecodeFailure) {
+  const auto test_dir = CreateTestDir();
+  const auto read_bytes = [](const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(file),
+                       std::istreambuf_iterator<char>());
+  };
+
+  for (const bool as_rgb : {false, true}) {
+    SCOPED_TRACE(as_rgb);
+    const auto valid_path = test_dir / (as_rgb ? "rgb.png" : "grey.png");
+    const auto corrupt_path =
+        test_dir / (as_rgb ? "truncated_rgb.png" : "truncated_grey.png");
+    Bitmap expected(2, 3, as_rgb);
+    expected.Fill(BitmapColor<uint8_t>(17, 31, 47));
+    ASSERT_TRUE(expected.Write(valid_path));
+    const std::string valid_bytes = read_bytes(valid_path);
+
+    // Keep the PNG header and IDAT chunk header, but omit the compressed
+    // pixels. libpng can read the image specification without decoding IDAT.
+    const size_t idat = valid_bytes.find("IDAT");
+    ASSERT_NE(idat, std::string::npos);
+    const std::string corrupt_bytes = valid_bytes.substr(0, idat + 4);
+    {
+      std::ofstream file(corrupt_path, std::ios::binary);
+      file.write(corrupt_bytes.data(), corrupt_bytes.size());
+      file.close();
+      ASSERT_TRUE(file.good());
+    }
+
+    // Prove this fixture fails during pixel decoding, not during open/header
+    // parsing. This precondition must hold for the installed OIIO version.
+    auto input = OIIO::ImageInput::open(corrupt_path.string());
+    ASSERT_NE(input, nullptr) << OIIO::geterror();
+    ASSERT_EQ(input->spec().width, 2);
+    ASSERT_EQ(input->spec().height, 3);
+    ASSERT_EQ(input->spec().nchannels, as_rgb ? 3 : 1);
+    std::vector<uint8_t> pixels(2 * 3 * input->spec().nchannels);
+    ASSERT_FALSE(input->read_image(0,
+                                   0,
+                                   0,
+                                   input->spec().nchannels,
+                                   OIIO::TypeDesc::UINT8,
+                                   pixels.data()));
+    input->geterror();
+    input->close();
+
+    Bitmap bitmap;
+    ASSERT_TRUE(bitmap.Read(valid_path, as_rgb));
+    EXPECT_EQ(bitmap.RowMajorData(), expected.RowMajorData());
+    EXPECT_FALSE(bitmap.Read(corrupt_path, as_rgb));
+    ASSERT_TRUE(bitmap.Read(valid_path, as_rgb));
+    EXPECT_EQ(bitmap.Width(), 2);
+    EXPECT_EQ(bitmap.Height(), 3);
+    EXPECT_EQ(bitmap.Channels(), as_rgb ? 3 : 1);
+    EXPECT_EQ(bitmap.RowMajorData(), expected.RowMajorData());
+    EXPECT_EQ(read_bytes(valid_path), valid_bytes);
+    EXPECT_EQ(read_bytes(corrupt_path), corrupt_bytes);
+  }
 }
 
 TEST(Bitmap, ReadNonExistentFile) {
