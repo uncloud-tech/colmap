@@ -7,7 +7,9 @@
 #include "colmap/util/file.h"
 #include "colmap/util/testing.h"
 
+#include <exception>
 #include <filesystem>
+#include <fstream>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -100,6 +102,56 @@ TEST_P(ParameterizedWorkspaceTests, MaxImageSize) {
   EXPECT_EQ(workspace->GetDepthMap(0).GetHeight(), 2);
   EXPECT_EQ(workspace->GetNormalMap(0).GetWidth(), 4);
   EXPECT_EQ(workspace->GetNormalMap(0).GetHeight(), 2);
+}
+
+TEST_P(ParameterizedWorkspaceTests, BitmapReadFailureBeforeRescaleAndRetry) {
+  Workspace::Options options = GetOptions();
+  options.max_image_size = 4;
+  options.num_threads = 1;
+  auto workspace = GetParam()(options);
+  const auto image_path = workspace->GetBitmapPath(0);
+
+  Bitmap original;
+  ASSERT_TRUE(original.Read(image_path));
+  ASSERT_EQ(original.Width(), 10);
+  ASSERT_EQ(original.Height(), 5);
+  ASSERT_THAT(original.RowMajorData(), testing::Each(uint8_t{0}));
+
+  {
+    // Keep the file present so Workspace::Load does not skip the failed read.
+    // An invalid header fails ImageInput::open, not pixel payload decoding.
+    std::ofstream corrupt(image_path, std::ios::binary | std::ios::trunc);
+    ASSERT_TRUE(corrupt.is_open());
+    corrupt << "not an image";
+    corrupt.close();
+    ASSERT_TRUE(corrupt.good());
+  }
+  ASSERT_TRUE(workspace->HasBitmap(0));
+  EXPECT_THROW(
+      {
+        // Load reads eagerly for Workspace and is a no-op for CachedWorkspace.
+        workspace->Load({image_name_});
+        workspace->GetBitmap(0);
+      },
+      std::exception);
+
+  ASSERT_TRUE(original.Write(image_path));
+  // Retry on the same workspace without clearing its cache or rebuilding it.
+  ASSERT_NO_THROW(workspace->Load({image_name_}));
+  const Bitmap* bitmap = nullptr;
+  ASSERT_NO_THROW(bitmap = &workspace->GetBitmap(0));
+  ASSERT_FALSE(bitmap->IsEmpty());
+  EXPECT_EQ(bitmap->Width(), 4);
+  EXPECT_EQ(bitmap->Height(), 2);
+  ASSERT_EQ(bitmap->RowMajorData().size(), 4 * 2 * 3);
+  EXPECT_THAT(bitmap->RowMajorData(), testing::Each(uint8_t{0}));
+
+  // Rescaling the workspace bitmap must not resize the repaired input file.
+  Bitmap input;
+  ASSERT_TRUE(input.Read(image_path));
+  EXPECT_EQ(input.Width(), 10);
+  EXPECT_EQ(input.Height(), 5);
+  EXPECT_EQ(input.RowMajorData(), original.RowMajorData());
 }
 
 TEST_P(ParameterizedWorkspaceTests, Load) {
