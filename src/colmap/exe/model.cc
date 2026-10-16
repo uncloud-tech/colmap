@@ -18,6 +18,7 @@
 #include "colmap/util/misc.h"
 #include "colmap/util/threading.h"
 
+#include <exception>
 #include <fstream>
 #include <iostream>
 
@@ -414,7 +415,16 @@ int RunModelAnalyzer(int argc, char** argv) {
   }
 
   Reconstruction reconstruction;
-  reconstruction.Read(path);
+  if (output_format == "JSON") {
+    try {
+      reconstruction.Read(path);
+    } catch (const std::exception& error) {
+      LOG(ERROR) << "Failed to read model: " << error.what();
+      return EXIT_FAILURE;
+    }
+  } else {
+    reconstruction.Read(path);
+  }
 
   if (output_format == "JSON") {
     // Numeric conversion is independent of stdout's locale/format flags.

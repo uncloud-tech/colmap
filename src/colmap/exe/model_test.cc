@@ -8,6 +8,7 @@
 #include "colmap/util/testing.h"
 
 #include <cstdlib>
+#include <exception>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -133,14 +134,18 @@ TEST(ModelAnalyzer, RejectsUnsupportedFormatAndJsonVerboseBeforeReading) {
   EXPECT_FALSE(std::filesystem::exists(path));
 }
 
-TEST(ModelAnalyzer, FailedModelReadThrowsWithoutPartialJson) {
+TEST(ModelAnalyzer, FailedModelReadReturnsFailureOnlyForJson) {
   const auto root = CreateTestDir();
   const auto empty_directory = root / "empty";
   const auto corrupt = root / "corrupt";
+  const auto partial = root / "partial";
   const auto file_path = root / "not-a-directory";
   CreateDirIfNotExists(empty_directory);
   CreateDirIfNotExists(corrupt);
   Reconstruction().WriteText(corrupt);
+  CreateDirIfNotExists(partial);
+  Reconstruction().WriteText(partial);
+  std::filesystem::remove(partial / "points3D.txt");
   {
     std::ofstream stream(corrupt / "cameras.txt");
     stream << "not a camera\n";
@@ -148,11 +153,22 @@ TEST(ModelAnalyzer, FailedModelReadThrowsWithoutPartialJson) {
   { std::ofstream stream(file_path); }
   const auto before = Snapshot(root);
   for (const auto& path :
-       {root / "missing", empty_directory, file_path, corrupt}) {
+       {root / "missing", empty_directory, file_path, corrupt, partial}) {
+    SCOPED_TRACE(path.string());
     CaptureStdout capture;
-    EXPECT_ANY_THROW(
-        Analyze({"--path", path.string(), "--output_format", "JSON"}));
+    EXPECT_EQ(Analyze({"--path", path.string(), "--output_format", "JSON"}),
+              EXIT_FAILURE);
     EXPECT_TRUE(capture.Text().empty());
+
+    // The default and explicit TEXT paths retain their reader exceptions,
+    // including verbose mode, rather than adopting the JSON error contract.
+    const std::vector<std::vector<std::string>> text_options = {
+        {}, {"--output_format", "TEXT"}, {"--verbose", "1"}};
+    for (auto args : text_options) {
+      args.insert(args.end(), {"--path", path.string()});
+      EXPECT_THROW(Analyze(args), std::exception);
+      EXPECT_TRUE(capture.Text().empty());
+    }
   }
   EXPECT_EQ(Snapshot(root), before);
 }
