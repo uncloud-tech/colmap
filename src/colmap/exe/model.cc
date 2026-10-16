@@ -19,6 +19,7 @@
 #include "colmap/util/threading.h"
 
 #include <fstream>
+#include <iostream>
 
 namespace colmap {
 namespace {
@@ -393,16 +394,47 @@ int RunModelAligner(int argc, char** argv) {
 int RunModelAnalyzer(int argc, char** argv) {
   std::filesystem::path path;
   bool verbose = false;
+  std::string output_format = "TEXT";
 
   OptionManager options;
   options.AddRequiredOption("path", &path);
   options.AddDefaultOption("verbose", &verbose);
+  options.AddDefaultOption("output_format", &output_format);
   if (!options.Parse(argc, argv)) {
+    return EXIT_FAILURE;
+  }
+
+  if (output_format != "TEXT" && output_format != "JSON") {
+    LOG(ERROR) << "Unsupported output_format; expected TEXT or JSON";
+    return EXIT_FAILURE;
+  }
+  if (output_format == "JSON" && verbose) {
+    LOG(ERROR) << "JSON output does not support verbose mode";
     return EXIT_FAILURE;
   }
 
   Reconstruction reconstruction;
   reconstruction.Read(path);
+
+  if (output_format == "JSON") {
+    // Numeric conversion is independent of stdout's locale/format flags.
+    // Read the complete model before emitting any part of the document.
+    const std::string json =
+        "{\"schema_version\":1,\"num_rigs\":" +
+        std::to_string(reconstruction.NumRigs()) +
+        ",\"num_cameras\":" + std::to_string(reconstruction.NumCameras()) +
+        ",\"num_frames\":" + std::to_string(reconstruction.NumFrames()) +
+        ",\"num_registered_frames\":" +
+        std::to_string(reconstruction.NumRegFrames()) +
+        ",\"num_images\":" + std::to_string(reconstruction.NumImages()) +
+        ",\"num_registered_images\":" +
+        std::to_string(reconstruction.NumRegImages()) +
+        ",\"num_points3D\":" + std::to_string(reconstruction.NumPoints3D()) +
+        ",\"num_observations\":" +
+        std::to_string(reconstruction.ComputeNumObservations()) + "}\n";
+    std::cout << json;
+    return EXIT_SUCCESS;
+  }
 
   LOG(INFO) << StringPrintf("Rigs: %d", reconstruction.NumRigs());
   LOG(INFO) << StringPrintf("Cameras: %d", reconstruction.NumCameras());
