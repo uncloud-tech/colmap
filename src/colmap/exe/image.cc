@@ -5,6 +5,7 @@
 #include "colmap/controllers/incremental_pipeline.h"
 #include "colmap/controllers/option_manager.h"
 #include "colmap/controllers/undistorters.h"
+#include "colmap/image/undistortion.h"
 #include "colmap/scene/reconstruction.h"
 #include "colmap/sfm/incremental_mapper.h"
 #include "colmap/sfm/observation_manager.h"
@@ -14,11 +15,170 @@
 #include "colmap/util/string.h"
 #include "colmap/util/timer.h"
 
+#include <algorithm>
+#include <cmath>
 #include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <locale>
 #include <sstream>
+#include <stdexcept>
 
 namespace colmap {
 namespace {
+
+// This predicts UndistortCamera's model geometry only. In particular it does
+// not inspect decoded dimensions, copy-through paths, or existing outputs.
+int PreviewUndistortionTargets(const std::filesystem::path& input_path,
+                               const std::string& output_type,
+                               const std::filesystem::path& image_list_path,
+                               const UndistortCameraOptions& options) {
+  try {
+    if (output_type != "COLMAP") {
+      throw std::invalid_argument("dry_run supports only COLMAP output_type");
+    }
+    if (!image_list_path.empty()) {
+      throw std::invalid_argument(
+          "dry_run does not support image_list_path subsets");
+    }
+    for (const double value : {options.blank_pixels,
+                               options.min_scale,
+                               options.max_scale,
+                               options.roi_min_x,
+                               options.roi_min_y,
+                               options.roi_max_x,
+                               options.roi_max_y}) {
+      if (!std::isfinite(value)) {
+        throw std::invalid_argument("Non-finite undistortion option");
+      }
+    }
+    // Avoid the native reader's fatal-throw diagnostic for absent models.
+    const bool binary = ExistsFile(input_path / "cameras.bin") &&
+                        ExistsFile(input_path / "images.bin") &&
+                        ExistsFile(input_path / "points3D.bin");
+    const bool text = ExistsFile(input_path / "cameras.txt") &&
+                      ExistsFile(input_path / "images.txt") &&
+                      ExistsFile(input_path / "points3D.txt");
+    if (!binary && !text) {
+      throw std::invalid_argument(
+          "No readable native reconstruction at input_path");
+    }
+    Reconstruction reconstruction;
+    reconstruction.Read(input_path);
+    auto image_ids = reconstruction.RegImageIds();
+    if (image_ids.empty()) {
+      throw std::invalid_argument("No registered images to preview");
+    }
+    std::sort(image_ids.begin(), image_ids.end());
+
+    const auto validate_camera = [](const Camera& camera) {
+      if (!camera.VerifyParams() || !camera.IsPerspective() ||
+          camera.width == 0 || camera.height == 0 ||
+          !std::all_of(camera.params.begin(),
+                       camera.params.end(),
+                       [](double value) { return std::isfinite(value); }) ||
+          camera.FocalLengthX() <= 0 || camera.FocalLengthY() <= 0) {
+        throw std::invalid_argument("Invalid or unsupported camera geometry");
+      }
+    };
+    std::ostringstream json;
+    json.imbue(std::locale::classic());
+    json << std::setprecision(std::numeric_limits<double>::max_digits10);
+    const auto quoted = [](const std::string& value) {
+      // Preserve UTF-8 bytes, escaping only JSON syntax and control bytes.
+      static constexpr char kHexDigits[] = "0123456789abcdef";
+      std::string result;
+      result.push_back('"');
+      for (const char c : value) {
+        switch (c) {
+          case '"':
+            result += "\\\"";
+            break;
+          case '\\':
+            result += "\\\\";
+            break;
+          case '\b':
+            result += "\\b";
+            break;
+          case '\f':
+            result += "\\f";
+            break;
+          case '\n':
+            result += "\\n";
+            break;
+          case '\r':
+            result += "\\r";
+            break;
+          case '\t':
+            result += "\\t";
+            break;
+          default: {
+            const auto uc = static_cast<unsigned char>(c);
+            if (uc < 0x20) {
+              result += "\\u00";
+              result.push_back(kHexDigits[(uc >> 4) & 0xF]);
+              result.push_back(kHexDigits[uc & 0xF]);
+            } else {
+              result.push_back(c);
+            }
+          }
+        }
+      }
+      result.push_back('"');
+      return result;
+    };
+    json
+        << "{\"schema_version\":1,\"kind\":\"undistortion_target_preview\","
+           "\"source_basis\":\"native_camera_geometry\","
+           "\"prediction_scope\":\"UndistortCamera_model_geometry_not_decoded_"
+           "or_copy_through_output\","
+           "\"serialization_order\":"
+           "\"image_id_ascending_not_execution_or_source_order\","
+           "\"decoded_images_verified\":false,\"target_output_verified\":false,"
+           "\"physical_fit\":null,\"execution_authorized\":false,\"options\":{"
+        << "\"blank_pixels\":" << options.blank_pixels
+        << ",\"min_scale\":" << options.min_scale
+        << ",\"max_scale\":" << options.max_scale
+        << ",\"max_image_size\":" << options.max_image_size
+        << ",\"roi_min_x\":" << options.roi_min_x
+        << ",\"roi_min_y\":" << options.roi_min_y
+        << ",\"roi_max_x\":" << options.roi_max_x
+        << ",\"roi_max_y\":" << options.roi_max_y << "},\"images\":[";
+    bool first = true;
+    for (const image_t image_id : image_ids) {
+      const auto& image = reconstruction.Image(image_id);
+      const auto& camera = reconstruction.Camera(image.CameraId());
+      validate_camera(camera);
+      // The public native geometry routine is the sole projection authority.
+      const Camera target = UndistortCamera(options, camera);
+      validate_camera(target);
+      if (!first) json << ',';
+      first = false;
+      json << "{\"image_id\":" << image_id
+           << ",\"name\":" << quoted(image.Name())
+           << ",\"camera_id\":" << image.CameraId()
+           << ",\"model_width\":" << camera.width
+           << ",\"model_height\":" << camera.height
+           << ",\"target_width\":" << target.width
+           << ",\"target_height\":" << target.height
+           << ",\"target_camera_model\":" << quoted(target.ModelName())
+           << ",\"target_camera_params\":[";
+      for (size_t i = 0; i < target.params.size(); ++i) {
+        if (i != 0) json << ',';
+        json << target.params[i];
+      }
+      json << "]}";
+    }
+    json << "]}\n";
+    // No partial success document if reading or projecting any row failed.
+    std::cout << json.str();
+    return EXIT_SUCCESS;
+  } catch (const std::exception& error) {
+    LOG(ERROR) << "Undistortion dry_run failed: " << error.what();
+    return EXIT_FAILURE;
+  }
+}
 
 // Read stereo image pair names from a text file. The text file is expected to
 // have one image pair per line, e.g.:
@@ -311,6 +471,7 @@ int RunImageUndistorter(int argc, char** argv) {
   std::string output_type = "COLMAP";
   std::filesystem::path image_list_path;
   std::string copy_policy = "copy";
+  bool dry_run = false;
 
   COLMAPUndistorter::Options undistorter_options;
   UndistortCameraOptions undistort_camera_options;
@@ -319,6 +480,8 @@ int RunImageUndistorter(int argc, char** argv) {
 
   OptionManager options;
   options.AddImageOptions();
+  options.AddDefaultOption(
+      "dry_run", &dry_run, "Preview model target geometry only, without image I/O");
   options.AddRequiredOption("input_path", &input_path);
   options.AddRequiredOption("output_path", &output_path);
   options.AddDefaultOption(
@@ -342,6 +505,11 @@ int RunImageUndistorter(int argc, char** argv) {
   options.AddDefaultOption("num_threads", &num_threads);
   if (!options.Parse(argc, argv)) {
     return EXIT_FAILURE;
+  }
+
+  if (dry_run) {
+    return PreviewUndistortionTargets(
+        input_path, output_type, image_list_path, undistort_camera_options);
   }
 
   CreateDirIfNotExists(output_path);
