@@ -11,6 +11,8 @@
 #include "colmap/util/testing.h"
 #include "colmap/util/threading.h"
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -98,6 +100,145 @@ std::vector<std::string> CreateFusionWorkspace(
 
   return image_names;
 }
+
+#if defined(__unix__) || defined(__APPLE__)
+// Reuse the workspace writer, but replace random camera geometry and dense
+// maps with a worked example: three two-view components and one singleton.
+// Sparse tracks are retained solely to establish the two-image overlap.
+std::string CreateCardinalityFusionWorkspace(
+    const std::filesystem::path& temp_dir) {
+  const auto names = CreateFusionWorkspace(temp_dir);
+  Reconstruction reconstruction;
+  reconstruction.Read(temp_dir / "sparse");
+  for (const auto& [frame_id, frame] : reconstruction.Frames()) {
+    reconstruction.Frame(frame_id).SetRigFromWorld(Rigid3d());
+  }
+  for (const auto& [camera_id, camera] : reconstruction.Cameras()) {
+    auto& pinhole = reconstruction.Camera(camera_id);
+    pinhole.model_id = CameraModelId::kPinhole;
+    pinhole.params = {8.0, 8.0, 0.5, 0.5};
+  }
+  reconstruction.Write(temp_dir / "sparse");
+
+  for (const auto& name : names) {
+    Mat<float> depth(kWidth, kHeight, 1);
+    depth.Fill(0.0f);
+    depth.Set(0, 0, 0, -1.0f);
+    Mat<float> normal(kWidth, kHeight, 3);
+    normal.Fill(0.0f);
+    Bitmap bitmap(kWidth, kHeight, true);
+    bitmap.Fill(BitmapColor<uint8_t>(0));
+    for (size_t component = 0; component < 4; ++component) {
+      if (component == 3 && name != names.front()) {
+        continue;
+      }
+      const size_t row = 1 + 10 * component;
+      const size_t col = component == 3 ? 3 : 2;
+      depth.Set(row, col, 0, 4.0f);
+      normal.Set(row, col, 2, 1.0f);
+      EXPECT_TRUE(
+          bitmap.SetPixel(col, row, BitmapColor<uint8_t>(row, col, 40)));
+    }
+    depth.Write(temp_dir / "stereo" / "depth_maps" / (name + ".geometric.bin"));
+    normal.Write(temp_dir / "stereo" / "normal_maps" /
+                 (name + ".geometric.bin"));
+    EXPECT_TRUE(bitmap.Write(temp_dir / "images" / name));
+  }
+  return names.front();
+}
+
+TEST(StereoFusion, MappedCardinalityVisibilityAndMerge) {
+  const auto dir = CreateTestDir();
+  const auto singleton_name = CreateCardinalityFusionWorkspace(dir);
+  Model model;
+  model.Read(dir, "COLMAP");
+  ASSERT_EQ(model.images.size(), 2);
+  ASSERT_EQ(model.GetMaxOverlappingImages(1, 0),
+            (std::vector<std::vector<int>>{{1}, {0}}));
+  const int singleton_idx = model.GetImageIdx(singleton_name);
+
+  // P counts the seven positive-depth input pixels, not all allocated raster
+  // slots. Run/GetFusedPoints expose no visited-mask or task-capacity
+  // telemetry. The known components let us infer consumption in the serial case
+  // only.
+  constexpr size_t kPositivePixels = 7;
+  for (const int num_threads : {1, 4}) {
+    // Parallel masks are load/store, not an exclusive claim. Do not promote the
+    // serial unique-consumption bound to a general multithreaded guarantee.
+    for (const int min_pixels : {1, 2, 3}) {
+      if (num_threads != 1 && min_pixels != 1) {
+        continue;
+      }
+      SCOPED_TRACE(::testing::Message() << "threads=" << num_threads
+                                        << " min_pixels=" << min_pixels);
+      StereoFusionOptions options;
+      options.use_mmap = true;
+      options.num_threads = num_threads;
+      options.min_num_pixels = min_pixels;
+      options.max_num_pixels = 10;
+      options.max_traversal_depth = 10;
+      StereoFusion fusion(options, dir, "COLMAP", "", "geometric");
+      fusion.Run();
+      const auto& points = fusion.GetFusedPoints();
+      const auto& visibility = fusion.GetFusedPointsVisibility();
+      ASSERT_EQ(points.size(), visibility.size());
+      std::array<size_t, 4> component_counts{};
+      size_t total_visibility = 0;
+      for (size_t i = 0; i < points.size(); ++i) {
+        const auto& point = points[i];
+        ASSERT_TRUE(point.r == 1 || point.r == 11 || point.r == 21 ||
+                    point.r == 31);
+        const size_t component = (point.r - 1) / 10;
+        ++component_counts[component];
+        const int col = component == 3 ? 3 : 2;
+        // K's half-pixel correction gives x=col*depth/8, y=row*depth/8.
+        // Distinct colors/positions catch point/visibility merge misalignment.
+        EXPECT_FLOAT_EQ(point.x, 0.5f * col);
+        EXPECT_FLOAT_EQ(point.y, 0.5f * point.r);
+        EXPECT_FLOAT_EQ(point.z, 4.0f);
+        EXPECT_FLOAT_EQ(point.nx, 0.0f);
+        EXPECT_FLOAT_EQ(point.ny, 0.0f);
+        EXPECT_FLOAT_EQ(point.nz, 1.0f);
+        EXPECT_EQ(point.g, col);
+        EXPECT_EQ(point.b, 40);
+        auto indices = visibility[i];
+        ASSERT_FALSE(indices.empty());
+        std::sort(indices.begin(), indices.end());
+        EXPECT_EQ(std::adjacent_find(indices.begin(), indices.end()),
+                  indices.end());
+        for (const int idx : indices) {
+          EXPECT_GE(idx, 0);
+          EXPECT_LT(idx, static_cast<int>(model.images.size()));
+        }
+        if (component == 3) {
+          EXPECT_EQ(indices, std::vector<int>({singleton_idx}));
+        } else if (num_threads == 1) {
+          EXPECT_EQ(indices, std::vector<int>({0, 1}));
+        }
+        total_visibility += indices.size();
+      }
+      if (num_threads == 1) {
+        // A rejected component still consumes its pixels; revisiting a cycle
+        // must not turn either pair into a spurious three-pixel component.
+        const size_t pairs = min_pixels <= 2 ? 1 : 0;
+        const size_t singleton = min_pixels == 1 ? 1 : 0;
+        EXPECT_EQ(component_counts,
+                  (std::array<size_t, 4>{pairs, pairs, pairs, singleton}));
+        EXPECT_EQ(total_visibility, 6 * pairs + singleton);
+        EXPECT_LE(total_visibility, kPositivePixels);  // V <= P
+        EXPECT_LE(points.size(), kPositivePixels / min_pixels);
+      } else {
+        // Several ten-row tasks feed the final merge. Only output pairing,
+        // valid image indices, and coverage are claimed, not ordering or a
+        // bound on parallel consumption/output capacity.
+        for (const size_t count : component_counts) {
+          EXPECT_GT(count, 0);
+        }
+      }
+    }
+  }
+}
+#endif
 
 // Fit one complete image entry (RGB + depth + normal), but not two. The
 // initialization touches both depths and fusion then loads normals/colors,
