@@ -103,6 +103,21 @@ class PatchMatchCuda {
   std::unique_ptr<CudaArrayLayeredTexture<uint8_t>> src_images_texture_;
   std::unique_ptr<CudaArrayLayeredTexture<float>> src_depth_maps_texture_;
 
+  // Immutable bank handles are borrowed; private ordinal storage is unchanged.
+  cudaTextureObject_t borrowed_src_images_ = 0;
+  cudaTextureObject_t borrowed_src_depth_ = 0;
+  std::unique_ptr<GpuMat<int>> source_layers_;
+  cudaTextureObject_t SourceImagesTexture() const {
+    return problem_.resident_bank ? borrowed_src_images_ : src_images_texture_->GetObj();
+  }
+  cudaTextureObject_t SourceDepthTexture() const {
+    return problem_.resident_bank ? borrowed_src_depth_ :
+        (src_depth_maps_texture_ ? src_depth_maps_texture_->GetObj() : 0);
+  }
+  const int* SourceLayers() const {
+    return source_layers_ ? source_layers_->GetPtr() : nullptr;
+  }
+
   // Relative poses from rotated versions of reference image to source images
   // corresponding to _rotationInHalfPi:
   //

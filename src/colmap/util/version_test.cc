@@ -32,5 +32,13 @@ TEST(GetBuildInfo, Nominal) {
   EXPECT_THAT(build_info, testing::HasSubstr("Commit"));
 }
 
+// The accessor promises an empty string for metadata-free build
+// configurations (cmake/GenerateVersionDefinitions.cmake compiles the
+// literal "Unknown" sentinel there), never the sentinel itself; consumers
+// may treat an empty revision uniformly as unavailable identity.
+TEST(GetCommitRevision, NeverReportsUnknownMetadataSentinel) {
+  EXPECT_NE(GetCommitRevision(), "Unknown");
+}
+
 }  // namespace
 }  // namespace colmap

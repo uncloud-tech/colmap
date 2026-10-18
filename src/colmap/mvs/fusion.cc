@@ -3,6 +3,7 @@
 #include "colmap/mvs/fusion.h"
 
 #include "colmap/math/math.h"
+#include "colmap/mvs/fusion_dependencies.h"
 #include "colmap/util/eigen_alignment.h"
 #include "colmap/util/endian.h"
 #include "colmap/util/file.h"
@@ -12,6 +13,7 @@
 #include "colmap/util/timer.h"
 
 #include <fstream>
+#include <iterator>
 
 #include <Eigen/Geometry>
 
@@ -60,6 +62,7 @@ void StereoFusionOptions::Print() const {
   PrintOption(max_normal_error);
   PrintOption(check_num_images);
   PrintOption(use_cache);
+  PrintOption(use_mmap);
   PrintOption(cache_size);
   const auto& bbox_min = bounding_box.first.transpose().eval();
   const auto& bbox_max = bounding_box.second.transpose().eval();
@@ -69,6 +72,10 @@ void StereoFusionOptions::Print() const {
 }
 
 bool StereoFusionOptions::Check() const {
+  if (use_mmap) {
+    CHECK_OPTION_EQ(max_image_size, -1);
+    CHECK_OPTION_EQ(use_cache, false);
+  }
   CHECK_OPTION_IN(min_num_pixels, 0, max_num_pixels);
   CHECK_OPTION_GT(max_traversal_depth, 0);
   CHECK_OPTION_GE(max_reproj_error, 0);
@@ -119,6 +126,11 @@ void StereoFusion::Run() {
 
   auto workspace_format_lower_case = workspace_format_;
   StringToLower(&workspace_format_lower_case);
+  if (options_.use_mmap) {
+    THROW_CHECK_EQ(workspace_format_lower_case, "colmap");
+    THROW_CHECK_EQ(sizeof(std::atomic<uint8_t>), sizeof(uint8_t));
+    THROW_CHECK(std::atomic<uint8_t>{}.is_lock_free());
+  }
   if (workspace_format_lower_case == "pmvs") {
     workspace_options.stereo_folder =
         StringPrintf("stereo-%s", pmvs_option_name_.c_str());
@@ -139,8 +151,22 @@ void StereoFusion::Run() {
     workspace_ = std::make_unique<CachedWorkspace>(workspace_options);
   } else {
     workspace_ = std::make_unique<Workspace>(workspace_options);
-    workspace_->Load(image_names);
     num_threads = GetEffectiveNumThreads(options_.num_threads);
+  }
+
+  if (options_.require_complete_inputs) {
+    const auto& model = workspace_->GetModel();
+    for (const auto& image_name : image_names) {
+      const int idx = model.GetImageIdx(image_name);
+      FusionInputsAvailable(image_name,
+                            workspace_->GetBitmapPath(idx),
+                            workspace_->GetDepthMapPath(idx),
+                            workspace_->GetNormalMapPath(idx),
+                            true);
+    }
+  }
+  if (!options_.use_cache && !options_.use_mmap) {
+    workspace_->Load(image_names);
   }
 
   if (CheckIfStopped()) {
@@ -160,11 +186,28 @@ void StereoFusion::Run() {
     overlapping_images_ = model.GetMaxOverlappingImagesFromPMVS();
   }
 
+  if (options_.use_mmap) {
+    task_fused_points_.clear();
+    task_fused_points_visibility_.clear();
+  }
   task_fused_points_.resize(num_threads);
   task_fused_points_visibility_.resize(num_threads);
 
   used_images_.resize(model.images.size(), false);
   fused_images_.resize(model.images.size(), false);
+  if (options_.use_mmap) {
+    used_images_.assign(model.images.size(), false);
+    fused_images_.assign(model.images.size(), false);
+    depth_map_sizes_.clear();
+    mapped_depth_maps_.clear();
+    mapped_normal_maps_.clear();
+    decoded_bitmaps_.clear();
+    atomic_pixel_masks_.clear();
+    mapped_depth_maps_.resize(model.images.size());
+    mapped_normal_maps_.resize(model.images.size());
+    decoded_bitmaps_.resize(model.images.size());
+    atomic_pixel_masks_.resize(model.images.size());
+  }
   fused_pixel_masks_.resize(model.images.size());
   depth_map_sizes_.resize(model.images.size());
   bitmap_scales_.resize(model.images.size());
@@ -175,9 +218,11 @@ void StereoFusion::Run() {
   for (const auto& image_name : image_names) {
     const int image_idx = model.GetImageIdx(image_name);
 
-    if (!workspace_->HasBitmap(image_idx) ||
-        !workspace_->HasDepthMap(image_idx) ||
-        !workspace_->HasNormalMap(image_idx)) {
+    if (!FusionInputsAvailable(image_name,
+                               workspace_->GetBitmapPath(image_idx),
+                               workspace_->GetDepthMapPath(image_idx),
+                               workspace_->GetNormalMapPath(image_idx),
+                               options_.require_complete_inputs)) {
       LOG(WARNING) << StringPrintf(
           "Ignoring image %s, because input does not exist.",
           image_name.c_str());
@@ -185,18 +230,42 @@ void StereoFusion::Run() {
     }
 
     const auto& image = model.images.at(image_idx);
-    const auto& depth_map = workspace_->GetDepthMap(image_idx);
+    size_t width;
+    size_t height;
+    if (options_.use_mmap) {
+      if (CheckIfStopped()) {
+        VerifyMappedInputs();
+        return;
+      }
+      if (used_images_.at(image_idx)) {
+        continue;
+      }
+      width = image.GetWidth();
+      height = image.GetHeight();
+      mapped_depth_maps_[image_idx] = std::make_unique<FusionMappedMat>(
+          workspace_->GetDepthMapPath(image_idx), width, height, 1);
+      mapped_normal_maps_[image_idx] = std::make_unique<FusionMappedMat>(
+          workspace_->GetNormalMapPath(image_idx), width, height, 3);
+      auto bitmap = std::make_unique<Bitmap>();
+      THROW_CHECK(bitmap->Read(workspace_->GetBitmapPath(image_idx), true));
+      THROW_CHECK_EQ(bitmap->Width(), width);
+      THROW_CHECK_EQ(bitmap->Height(), height);
+      decoded_bitmaps_[image_idx] = std::move(bitmap);
+    } else {
+      const auto& depth_map = workspace_->GetDepthMap(image_idx);
+      width = depth_map.GetWidth();
+      height = depth_map.GetHeight();
+    }
 
     used_images_.at(image_idx) = true;
 
-    InitFusedPixelMask(image_idx, depth_map.GetWidth(), depth_map.GetHeight());
+    InitFusedPixelMask(image_idx, width, height);
 
-    depth_map_sizes_.at(image_idx) =
-        std::make_pair(depth_map.GetWidth(), depth_map.GetHeight());
+    depth_map_sizes_.at(image_idx) = std::make_pair(width, height);
 
-    bitmap_scales_.at(image_idx) = std::make_pair(
-        static_cast<float>(depth_map.GetWidth()) / image.GetWidth(),
-        static_cast<float>(depth_map.GetHeight()) / image.GetHeight());
+    bitmap_scales_.at(image_idx) =
+        std::make_pair(static_cast<float>(width) / image.GetWidth(),
+                       static_cast<float>(height) / image.GetHeight());
 
     Eigen::Matrix<float, 3, 3, Eigen::RowMajor> K =
         Eigen::Map<const Eigen::Matrix<float, 3, 3, Eigen::RowMajor>>(
@@ -218,6 +287,7 @@ void StereoFusion::Run() {
             .transpose();
   }
 
+  VerifyMappedInputs();
   LOG(INFO) << StringPrintf("Starting fusion with %d threads", num_threads);
   ThreadPool thread_pool(num_threads);
 
@@ -230,13 +300,17 @@ void StereoFusion::Run() {
                                     const int width,
                                     const int image_idx,
                                     const Mat<char>& fused_pixel_mask) {
+    const int mapped_thread_id =
+        options_.use_mmap ? thread_pool.GetThreadIndex() : -1;
     const int row_end = std::min(height, row_start + kRowStride);
     for (int row = row_start; row < row_end; ++row) {
       for (int col = 0; col < width; ++col) {
-        if (fused_pixel_mask.Get(row, col) > 0) {
+        if (options_.use_mmap ? IsPixelFused(image_idx, row, col)
+                              : fused_pixel_mask.Get(row, col) > 0) {
           continue;
         }
-        const int thread_id = thread_pool.GetThreadIndex();
+        const int thread_id =
+            options_.use_mmap ? mapped_thread_id : thread_pool.GetThreadIndex();
         Fuse(thread_id, image_idx, row, col);
       }
     }
@@ -251,6 +325,7 @@ void StereoFusion::Run() {
       break;
     }
 
+    VerifyMappedInputs();
     Timer timer;
     timer.Start();
 
@@ -262,17 +337,28 @@ void StereoFusion::Run() {
 
     const int width = depth_map_sizes_.at(image_idx).first;
     const int height = depth_map_sizes_.at(image_idx).second;
-    const auto& fused_pixel_mask = fused_pixel_masks_.at(image_idx);
 
-    for (int row_start = 0; row_start < height; row_start += kRowStride) {
-      thread_pool.AddTask(ProcessImageRows,
-                          row_start,
-                          height,
-                          width,
-                          image_idx,
-                          fused_pixel_mask);
+    try {
+      for (int row_start = 0; row_start < height; row_start += kRowStride) {
+        thread_pool.AddTask(ProcessImageRows,
+                            row_start,
+                            height,
+                            width,
+                            image_idx,
+                            fused_pixel_masks_.at(image_idx));
+      }
+      thread_pool.Wait();
+    } catch (...) {
+      // Wait drains every submitted task and its exception checker before the
+      // pool destructor calls Stop. Owners remain alive throughout unwinding.
+      const auto error = std::current_exception();
+      try {
+        thread_pool.Wait();
+      } catch (...) {
+      }
+      std::rethrow_exception(error);
     }
-    thread_pool.Wait();
+    VerifyMappedInputs();
 
     num_fused_images += 1;
     fused_images_.at(image_idx) = true;
@@ -285,6 +371,7 @@ void StereoFusion::Run() {
         " in %.3fs (%d points)", timer.ElapsedSeconds(), total_fused_points);
   }
 
+  VerifyMappedInputs();
   fused_points_.reserve(total_fused_points);
   fused_points_visibility_.reserve(total_fused_points);
   for (size_t thread_id = 0; thread_id < task_fused_points_.size();
@@ -294,6 +381,16 @@ void StereoFusion::Run() {
                          task_fused_points_[thread_id].end());
     task_fused_points_[thread_id].clear();
 
+    if (options_.use_mmap) {
+      auto& visibility = task_fused_points_visibility_[thread_id];
+      fused_points_visibility_.insert(
+          fused_points_visibility_.end(),
+          std::make_move_iterator(visibility.begin()),
+          std::make_move_iterator(visibility.end()));
+      std::vector<std::vector<int>>().swap(visibility);
+      std::vector<PlyPoint>().swap(task_fused_points_[thread_id]);
+      continue;
+    }
     fused_points_visibility_.insert(
         fused_points_visibility_.end(),
         task_fused_points_visibility_[thread_id].begin(),
@@ -338,6 +435,39 @@ void StereoFusion::InitFusedPixelMask(int image_idx,
   } else {
     fused_pixel_mask.Fill(0);
   }
+  if (options_.use_mmap) {
+    auto mask = std::make_unique<std::atomic<uint8_t>[]>(width * height);
+    for (size_t row = 0; row < height; ++row) {
+      for (size_t col = 0; col < width; ++col) {
+        mask[row * width + col].store(fused_pixel_mask.Get(row, col),
+                                      std::memory_order_relaxed);
+      }
+    }
+    atomic_pixel_masks_.at(image_idx) = std::move(mask);
+    fused_pixel_mask = Mat<char>();
+  }
+}
+
+bool StereoFusion::IsPixelFused(int image_idx, int row, int col) const {
+  if (!options_.use_mmap) {
+    return fused_pixel_masks_.at(image_idx).Get(row, col) > 0;
+  }
+  const size_t width = depth_map_sizes_.at(image_idx).first;
+  return atomic_pixel_masks_.at(image_idx)[row * width + col].load(
+             std::memory_order_relaxed) > 0;
+}
+
+void StereoFusion::VerifyMappedInputs() const {
+  for (const auto& map : mapped_depth_maps_) {
+    if (map) {
+      map->VerifyUnchanged();
+    }
+  }
+  for (const auto& map : mapped_normal_maps_) {
+    if (map) {
+      map->VerifyUnchanged();
+    }
+  }
 }
 
 void StereoFusion::Fuse(const int thread_id,
@@ -373,13 +503,13 @@ void StereoFusion::Fuse(const int thread_id,
     fusion_queue.pop_back();
 
     // Check if pixel already fused.
-    auto& fused_pixel_mask = fused_pixel_masks_.at(image_idx);
-    if (fused_pixel_mask.Get(row, col) > 0) {
+    if (IsPixelFused(image_idx, row, col)) {
       continue;
     }
 
-    const auto& depth_map = workspace_->GetDepthMap(image_idx);
-    const float depth = depth_map.Get(row, col);
+    const float depth = options_.use_mmap
+                            ? mapped_depth_maps_[image_idx]->Get(row, col)
+                            : workspace_->GetDepthMap(image_idx).Get(row, col);
 
     // Pixels with negative depth are filtered.
     if (depth <= 0.0f) {
@@ -409,11 +539,16 @@ void StereoFusion::Fuse(const int thread_id,
     }
 
     // Determine normal direction in global reference frame.
-    const auto& normal_map = workspace_->GetNormalMap(image_idx);
+    const NormalMap* normal_map =
+        options_.use_mmap ? nullptr : &workspace_->GetNormalMap(image_idx);
+    const auto GetNormal = [&](int channel) {
+      return options_.use_mmap
+                 ? mapped_normal_maps_[image_idx]->Get(row, col, channel)
+                 : normal_map->Get(row, col, channel);
+    };
     const Eigen::Vector3f normal =
-        inv_R_.at(image_idx) * Eigen::Vector3f(normal_map.Get(row, col, 0),
-                                               normal_map.Get(row, col, 1),
-                                               normal_map.Get(row, col, 2));
+        inv_R_.at(image_idx) *
+        Eigen::Vector3f(GetNormal(0), GetNormal(1), GetNormal(2));
 
     // Check for consistent normal direction with reference normal.
     if (traversal_depth > 0) {
@@ -431,13 +566,20 @@ void StereoFusion::Fuse(const int thread_id,
     // Read the color of the pixel.
     const auto& bitmap_scale = bitmap_scales_.at(image_idx);
     const auto color =
-        workspace_->GetBitmap(image_idx)
+        (options_.use_mmap ? *decoded_bitmaps_[image_idx]
+                           : workspace_->GetBitmap(image_idx))
             .InterpolateNearestNeighbor(col / bitmap_scale.first,
                                         row / bitmap_scale.second)
             .value_or(BitmapColor<uint8_t>(0));
 
     // Set the current pixel as visited.
-    fused_pixel_mask.Set(row, col, 1);
+    if (options_.use_mmap) {
+      const size_t width = depth_map_sizes_[image_idx].first;
+      atomic_pixel_masks_[image_idx][row * width + col].store(
+          1, std::memory_order_relaxed);
+    } else {
+      fused_pixel_masks_[image_idx].Set(row, col, 1);
+    }
 
     // Pixels out of bounds are filtered
     if (xyz(0) < options_.bounding_box.first(0) ||

@@ -5,6 +5,8 @@
 #include "colmap/exe/gui.h"
 #include "colmap/exe/image.h"
 #include "colmap/exe/model.h"
+#include "colmap/exe/photo_directory_summary.h"
+#include "colmap/exe/optimized_dense_plan.h"
 #if defined(COLMAP_MVS_ENABLED)
 #include "colmap/exe/mvs.h"
 #endif
@@ -84,6 +86,7 @@ int main(int argc, char** argv) {
 
   std::vector<Command> commands;
   commands.emplace_back("gui", &colmap::RunGraphicalUserInterface);
+  commands.emplace_back("optimized_dense_plan", &colmap::RunOptimizedDensePlan);
   // The automatic reconstructor installs its handler after parsing the mapper
   // type, since only incremental mapping supports resumable shutdown.
   commands.emplace_back("automatic_reconstructor",
@@ -154,6 +157,8 @@ int main(int argc, char** argv) {
                         &colmap::RunPatchMatchStereo,
                         kSupportsGracefulShutdown);
 #endif
+  commands.emplace_back("photo_directory_summary",
+                        &colmap::RunPhotoDirectorySummary);
   commands.emplace_back("point_filtering", &colmap::RunPointFiltering);
   commands.emplace_back("point_triangulator",
                         &colmap::RunPointTriangulator,

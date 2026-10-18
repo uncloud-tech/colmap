@@ -28,6 +28,25 @@ DepthMap::DepthMap(const Mat<float>& mat,
   data_ = mat.GetData();
 }
 
+namespace {
+
+// Validates the map before any ownership transfer, then hands the buffer of
+// the already-downloaded host map over to the Mat move constructor, avoiding
+// a second full-size allocation and copy.
+Mat<float> CheckedDepthOutputMat(Mat<float>&& mat) {
+  THROW_CHECK_EQ(mat.GetDepth(), 1);
+  return std::move(mat);
+}
+
+}  // namespace
+
+DepthMap::DepthMap(Mat<float>&& mat,
+                   const float depth_min,
+                   const float depth_max)
+    : Mat<float>(CheckedDepthOutputMat(std::move(mat))),
+      depth_min_(depth_min),
+      depth_max_(depth_max) {}
+
 void DepthMap::Rescale(const float factor) {
   if (width_ * height_ == 0) {
     return;

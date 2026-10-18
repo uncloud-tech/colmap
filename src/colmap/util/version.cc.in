@@ -5,6 +5,8 @@
 #include "colmap/util/logging.h"
 #include "colmap/util/string.h"
 
+#include <string_view>
+
 namespace colmap {
 namespace {
 
@@ -35,6 +37,17 @@ int GetDatabaseVersionNumber() {
 
 std::string GetVersionInfo() {
   return StringPrintf("COLMAP %s", COLMAP_VERSION);
+}
+
+std::string GetCommitRevision() {
+  // Metadata-free build configurations compile the literal sentinel
+  // "Unknown" (cmake/GenerateVersionDefinitions.cmake), not the empty string
+  // promised by this accessor; normalize the sentinel so consumers can treat
+  // an unavailable commit identity uniformly as empty.
+  if (std::string_view(COLMAP_COMMIT_ID) == "Unknown") {
+    return {};
+  }
+  return COLMAP_COMMIT_ID;
 }
 
 std::string GetBuildInfo() {

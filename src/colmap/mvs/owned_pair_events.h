@@ -39,16 +39,18 @@ class PairEvents {
     throw std::runtime_error("owned pair events require Linux qualification");
 #endif
   }
-  explicit PairEvents(std::string dispatch, size_t count = 2, bool rolling = false)
+  explicit PairEvents(std::string dispatch, size_t count = 2, bool rolling = false,
+                      size_t max_concurrent_solvers = 3)
       : count_(count),
         dispatch_(std::move(dispatch)),
         rolling_(rolling),
+        max_concurrent_solvers_(max_concurrent_solvers),
         owner_(count, 0),
         reference_(count, -1),
         device_(count, -1),
         solver_done_(count, false),
         slot_(count, kBatch) {
-    if ((!rolling && count != 2 && count != 3) || (rolling && count < 3)) {
+    if ((!rolling && count != 2 && count != 3) || (rolling && (!count || !max_concurrent_solvers))) {
       throw std::invalid_argument("bad event count");
     }
 #if defined(__linux__)
@@ -64,7 +66,7 @@ class PairEvents {
   void BindSlot(size_t job, size_t slot) {
     RequireJob(job);
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!rolling_ || slot >= 3 || slot_[job] != kBatch)
+    if (!rolling_ || slot >= max_concurrent_solvers_ || slot_[job] != kBatch)
       throw std::logic_error("invalid generation slot binding");
     slot_[job] = slot;
   }
@@ -198,6 +200,7 @@ class PairEvents {
   uint64_t ready_ns_ = 0;
   uint64_t solver_end_ns_ = 0;
   const bool rolling_;
+  const size_t max_concurrent_solvers_;
   std::vector<uint64_t> owner_;
   std::vector<int> reference_;
   std::vector<int> device_;

@@ -1,0 +1,53 @@
+{
+  "purpose": "Genuinely synthetic resident v1 protocol and gate examples. No captured data, stat results, physical measurements, registered fingerprints or execution qualification.",
+  "contract_schema": "SerializeOwnedBankContract / ParseOwnedBankContract: fixed option and input order, IEEE hexadecimal calibration, length-prefixed hexadecimal strings, no end token.",
+  "wire_schema": "ParseResidentForecast / ParseResidentCohortForecast: exact embedded canonical contract bytes and SHA-256; cohort ledger is the admission unit, preflight_max is a per-side MAX, not a SUM.",
+  "images": [
+    {"index": 0, "name": "synthetic_0.ppm", "width": 4, "height": 3, "inputs": [2, 0, 3, 1]},
+    {"index": 1, "name": "synthetic_1.ppm", "width": 5, "height": 2, "inputs": [3, 1, 2]},
+    {"index": 2, "name": "synthetic_2.ppm", "width": 3, "height": 2, "inputs": [1, 2, 0]},
+    {"index": 3, "name": "synthetic_3.ppm", "width": 7, "height": 1, "inputs": [3, 0]}
+  ],
+  "two_contract": "Problems 1 and 2, in that order; four.contract contains problems 0,1,2,3. Shared image records stay identical across problems and contracts.",
+  "analytic_calibration": "K=[2,0,W/2;0,2,H/2;0,0,1], R=identity, T=[image_index,0,0]. All options are invented, including effective depth 1..8, radius 1, samples 2, iterations 1 and automatic gpu_index -1. No actual device is selected by these metadata-only tests.",
+  "invented_file_identities": "Relative synthetic/input paths only; device 0, inode 100+10*index+channels+(kind==normal), mtime (1,0), ctime (2,0). Image size 32+3*area, map size ASCII W&H&C& header length plus 4*C*area. Files need not exist; parser/binding tests never stat them.",
+  "margin": "M(x)=ceil(103*x/100), applied once to each raw term.",
+  "private_charges": {
+    "formula": "A=W*H, S=input_count-1. Host=M(36*A). Device=M((148+26*S)*A + 8*max(W,H)*S + 692*S + 32): two rotation parities, workspace, rebinding, source records and calibration allowance.",
+    "raw_host": [432, 360, 216, 252],
+    "raw_device": [4916, 3496, 2664, 1998],
+    "host": [445, 371, 223, 260],
+    "device": [5064, 3601, 2744, 2058]
+  },
+  "synthetic_bank_inventory": {
+    "caveat": "An invented caller metadata inventory, NOT sizeof(native structs), a native estimator result or a physical bound. Native estimator recomputation remains resident_forecast_native_test.cc's separate surface. These parser/gate tests deliberately use HandMinimaFor, not estimator certification.",
+    "formula": "J=problems, L=distinct inputs, I=total input records. Metadata=2048+128*J+64*L+16*I. Bounded host raw=5*sum(distinct areas)+metadata+66*max(distinct areas), where 66=4*(RGB+gray)+depth4+normal12+staging34. Device raw=5*maxW*maxH*L+256*L+4096. Both margined once.",
+    "full_four": {"host_raw": 3975, "device_raw": 5540, "host": 4095, "device": 5707},
+    "full_two": {"host_raw": 3623, "device_raw": 5540, "host": 3732, "device": 5707},
+    "allowance": "37 host raw bytes: M(3975+37)=4133, device stays 5707. Raw 3976 or device raw 5541 is one byte beyond the accepted minimum boundary.",
+    "metadata_declaration": "Invented inventory 64+3*16+25=137, M(137)=142. caller_supplied_native_actual is a required schema label under test, not an assertion of an actual measurement. Other complete examples explicitly declare zero unclassified metadata."
+  },
+  "normal_and_process": "Owner=12*max(reference areas), future=2*owner, transient=owner, queue charge=M(future+transient). Process once=2147483648 host and device: the product's canonical 2 GiB floor, not a measurement. Fingerprints a*64, b*64 (metadata) and c*64 (allowance) are synthetic. Rolling reserve is the largest private member on each side (active_jobs=1).",
+  "full_four_exact_caps": {"host": 2147488633, "device": 2147494419},
+  "cohort_accounting": "Global snapshot/plan basis=192 invented host bytes. Host ledger=queue+bank+normal+process+rolling. Device ledger=bank+process+rolling. Summary sums bank/normal/private/queue, charges process once, and takes per-side ledger maxima.",
+  "two_plus_two": {
+    "members": [[0, 1], [2, 3]],
+    "queue": [320, 288],
+    "bank_host": [3749, 3716],
+    "bank_device": [5707, 5707],
+    "normal": [445, 260],
+    "ledger_host": [2147488607, 2147488172],
+    "ledger_device": [2147494419, 2147492099],
+    "summary": {"queue": 608, "bank_host": 7465, "bank_device": 11414, "normal": 705, "private_host": 705, "private_device": 7808},
+    "one_sided_review": "Host bank 3749 -> reviewed 4000 (delta 251): ledger/preflight host 2147488858, summary bank host 7716. Device is unchanged. Reviewed host 3700 is below estimate and refuses."
+  },
+  "singletons": {
+    "queue": [256, 240, 224, 208],
+    "bank_host": [3567, 3287, 3449, 3320],
+    "bank_device": [5707, 5227, 5242, 4963],
+    "ledger_host": [2147488361, 2147487917, 2147487767, 2147487696],
+    "ledger_device": [2147494419, 2147492476, 2147491634, 2147490669],
+    "summary": {"queue": 928, "bank_host": 13623, "bank_device": 21139, "normal": 1299, "private_host": 1299, "private_device": 13467}
+  },
+  "caps": "CLI-only. Exact maxima and one byte less are tested independently. Loose 40/32 GiB caps remain arbitrary admission examples, never hardware measurements."
+}

@@ -2,20 +2,65 @@
 
 set(FOLDER_NAME "mvs")
 
+# Compiled allocation-closure fingerprint: generated at build time from
+# the frozen explicit ordered closure by scripts/resident/generate_
+# resident_allocation_fingerprint.py. The generated header is excluded
+# from the closure (no self-reference); the build fails closed on missing
+# closure entries and never invents a digest.
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+set(RESIDENT_ALLOCATION_GENERATOR
+    "${PROJECT_SOURCE_DIR}/scripts/resident/generate_resident_allocation_fingerprint.py")
+# Emitted under <build>/colmap/mvs/generated/ with the include root at the
+# build dir, so consumers include
+# "colmap/mvs/generated/resident_allocation_fingerprint.h".
+set(RESIDENT_ALLOCATION_HEADER
+    "${CMAKE_CURRENT_BINARY_DIR}/colmap/mvs/generated/resident_allocation_fingerprint.h")
+set(RESIDENT_ALLOCATION_DEPFILE
+    "${CMAKE_CURRENT_BINARY_DIR}/resident_allocation_fingerprint.d")
+add_custom_command(
+    OUTPUT "${RESIDENT_ALLOCATION_HEADER}"
+    COMMAND ${Python3_EXECUTABLE} "${RESIDENT_ALLOCATION_GENERATOR}"
+            --repo-root "${PROJECT_SOURCE_DIR}"
+            --output "${RESIDENT_ALLOCATION_HEADER}"
+            --depfile "${RESIDENT_ALLOCATION_DEPFILE}"
+    DEPENDS "${RESIDENT_ALLOCATION_GENERATOR}"
+    DEPFILE "${RESIDENT_ALLOCATION_DEPFILE}"
+    COMMENT "Generating the compiled resident allocation fingerprint"
+    VERBATIM)
+add_custom_target(resident_allocation_fingerprint
+    DEPENDS "${RESIDENT_ALLOCATION_HEADER}")
+
 COLMAP_ADD_LIBRARY(
     NAME colmap_mvs
     SRCS
+        owned_prng_seed.h
         advancing_front_meshing.h advancing_front_meshing.cc
         consistency_graph.h consistency_graph.cc
         delaunay_meshing.h delaunay_meshing.cc
         depth_map.h depth_map.cc
         fusion.h fusion.cc
+        fusion_dependencies.h
+        fusion_mapped_mat.h fusion_mapped_mat.cc
         image.h image.cc
         mat.h mat.cc
         mesh_simplification.h mesh_simplification.cc
         model.h model.cc
         poisson_meshing.h poisson_meshing.cc
         normal_map.h normal_map.cc
+        owned_input_bank.h owned_input_bank.cc
+        owned_cohort.h
+        optimized_photo_options.h
+        optimized_photo_paths.h
+        owned_resident_minima.h
+        resident_forecast.h resident_forecast.cc resident_forecast_minima.cc
+        resident_wire_lexical.h
+        resident_cohort_wire.h resident_cohort_wire.cc
+        resident_cohort_wire_minima.cc
+        resident_cohort_runner.h
+        resident_cohorts.h
+        resident_runner.h
+        native_run_deadline.h
+        resident_contract.h resident_contract.cc
         patch_match_options.h patch_match_options.cc
         patch_match_execution.h
         texture_mapping.h texture_mapping.cc
@@ -28,6 +73,7 @@ COLMAP_ADD_LIBRARY(
         colmap_sensor
         colmap_image
         colmap_poisson_recon
+        OpenImageIO::OpenImageIO
         Eigen3::Eigen
 )
 if(CGAL_ENABLED)
@@ -36,6 +82,16 @@ endif()
 if(OPENMP_FOUND)
     target_link_libraries(colmap_mvs PRIVATE OpenMP::OpenMP_CXX)
 endif()
+# Target commands AFTER the library target exists (Sol 3cdc fix 1).
+target_include_directories(colmap_mvs PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>")
+add_dependencies(colmap_mvs resident_allocation_fingerprint)
+
+COLMAP_ADD_TEST(
+    NAME owned_prng_seed_test
+    SRCS owned_prng_seed_test.cc
+    LINK_LIBS colmap_mvs
+)
 
 COLMAP_ADD_TEST(
     NAME consistency_graph_test
@@ -48,10 +104,20 @@ COLMAP_ADD_TEST(
     LINK_LIBS colmap_mvs
 )
 COLMAP_ADD_TEST(
+    NAME fusion_mapped_mat_test
+    SRCS fusion_mapped_mat_test.cc
+    LINK_LIBS colmap_mvs
+)
+COLMAP_ADD_TEST(
     NAME fusion_test
     SRCS fusion_test.cc
     LINK_LIBS colmap_mvs
 )
+if(TESTS_ENABLED AND TARGET colmap_main)
+    add_dependencies(colmap_mvs_fusion_test colmap_main)
+    set_tests_properties(mvs/fusion_test PROPERTIES
+        ENVIRONMENT "COLMAP_BINARY=$<TARGET_FILE:colmap_main>")
+endif()
 COLMAP_ADD_TEST(
     NAME image_test
     SRCS image_test.cc
@@ -102,6 +168,82 @@ COLMAP_ADD_TEST(
     SRCS workspace_test.cc
     LINK_LIBS colmap_mvs
 )
+COLMAP_ADD_TEST(
+    NAME resident_contract_test
+    SRCS resident_contract_test.cc
+    LINK_LIBS colmap_mvs
+)
+COLMAP_ADD_TEST(
+    NAME resident_contract_capture_test
+    SRCS resident_contract_capture_test.cc
+    LINK_LIBS colmap_mvs
+)
+
+# Native resident-forecast wire/gate tests. The pure parser + gate slice is
+# self-contained (no estimator); minima tests require the linked bank
+# estimator (never stubbed). The focused stdlib-only parser/gate binary is
+# the local dev-box slice; the estimator recompute runs at the real build.
+COLMAP_ADD_TEST(
+    NAME resident_forecast_test
+    SRCS resident_forecast_test.cc
+    LINK_LIBS colmap_mvs
+)
+COLMAP_ADD_TEST(
+    NAME resident_forecast_native_test
+    SRCS resident_forecast_native_test.cc
+    LINK_LIBS colmap_mvs
+)
+COLMAP_ADD_TEST(
+    NAME resident_runner_lifecycle_test
+    SRCS resident_runner_lifecycle_test.cc
+    LINK_LIBS colmap_mvs
+)
+# CPU structural/arithmetic cohort boundary tests (typed validated plan; no
+# payloads, no CUDA, no wire). The real planner + boundary validator run with
+# a standalone test estimator; native execution surfaces stay dev1 coverage.
+COLMAP_ADD_TEST(
+    NAME resident_cohorts_test
+    SRCS resident_cohorts_test.cc
+    LINK_LIBS colmap_mvs
+)
+# Native per-cohort minima/charge gate tests (estimator-dependent; the
+# gate itself is compiled into colmap_mvs and never stubbed).
+COLMAP_ADD_TEST(
+    NAME resident_cohort_wire_minima_test
+    SRCS resident_cohort_wire_minima_test.cc
+    LINK_LIBS colmap_mvs
+)
+# CPU output-path-discipline + cohort runner lifecycle tests (real
+# coordinator/pipeline/observer interfaces; no CUDA, no payloads).
+COLMAP_ADD_TEST(
+    NAME resident_cohort_runner_lifecycle_test
+    SRCS resident_cohort_runner_lifecycle_test.cc
+    LINK_LIBS colmap_mvs
+)
+# Native resident-cohort-forecast v1 wire parser/gate tests. Cross-language
+# fixtures: the canonical Python emitter bytes (photogram 9fb4957 spec) are
+# committed verbatim under testdata/resident_cohort with their shas
+# asserted; the contract binding reuses the shared contract fixtures.
+COLMAP_ADD_TEST(
+    NAME resident_cohort_wire_test
+    SRCS resident_cohort_wire_test.cc
+    LINK_LIBS colmap_mvs
+)
+if(TESTS_ENABLED)
+    target_include_directories(colmap_mvs_resident_cohort_wire_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(colmap_mvs_resident_cohort_wire_test PRIVATE
+        RESIDENT_COHORT_TESTDATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/testdata/resident_cohort"
+        RESIDENT_COHORT_CONTRACT_TESTDATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/testdata/resident_forecast")
+endif()
+if(TESTS_ENABLED)
+    target_include_directories(colmap_mvs_resident_forecast_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(colmap_mvs_resident_forecast_test PRIVATE
+        RESIDENT_FORECAST_TESTDATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/testdata/resident_forecast")
+    target_include_directories(colmap_mvs_resident_forecast_native_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR})
+endif()
 
 if(CUDA_ENABLED)
     COLMAP_ADD_LIBRARY(
@@ -112,10 +254,14 @@ if(CUDA_ENABLED)
             patch_match.h patch_match.cc
             patch_match_cuda.h patch_match_cuda.cu
             patch_match_cuda_owned.h patch_match_cuda_owned.cu
+            owned_prng.h owned_prng_seed.h
             patch_match_calibration.h
+            owned_input_bank.cu
             owned_cuda_execution.h
             owned_rotation_storage.h
             owned_tile.h
+            owned_source_cache.h
+            owned_texture_row_batch.h
             owned_pair_coordinator.h
             owned_pair_validation.h
             owned_pair_input.h
@@ -124,6 +270,7 @@ if(CUDA_ENABLED)
             owned_pair_events.h
             owned_pair_run.h
             owned_host_lookahead.h
+            owned_normal_lookahead.h
         PUBLIC_LINK_LIBS
             colmap_mvs
             colmap_util_cuda
@@ -137,8 +284,25 @@ if(CUDA_ENABLED)
         LINK_LIBS colmap_mvs_cuda
     )
     COLMAP_ADD_TEST(
+        NAME owned_normal_lookahead_test
+        SRCS owned_normal_lookahead_test.cc
+        LINK_LIBS colmap_mvs_cuda
+    )
+    COLMAP_ADD_TEST(
         NAME owned_host_snapshot_test
         SRCS owned_host_snapshot_test.cc
+        LINK_LIBS colmap_mvs_cuda
+    )
+
+    COLMAP_ADD_TEST(
+        NAME owned_input_bank_test
+        SRCS owned_input_bank_test.cc
+        LINK_LIBS colmap_mvs_cuda
+    )
+
+    COLMAP_ADD_TEST(
+        NAME owned_input_bank_cuda_test
+        SRCS owned_input_bank_test.cu
         LINK_LIBS colmap_mvs_cuda
     )
 
@@ -273,8 +437,29 @@ if(CUDA_ENABLED)
     endif()
 
     COLMAP_ADD_TEST(
+        NAME owned_distinct_source_cache_test
+        SRCS owned_distinct_source_cache_test.cc
+        LINK_LIBS colmap_mvs_cuda
+    )
+    COLMAP_ADD_TEST(
+        NAME owned_distinct_source_cache_trace_test
+        SRCS owned_distinct_source_cache_trace_test.cu
+        LINK_LIBS colmap_mvs_cuda
+    )
+    if(TESTS_ENABLED)
+        get_target_property(_owned_cache_test_archs colmap_mvs_cuda CUDA_ARCHITECTURES)
+        set_target_properties(colmap_mvs_owned_distinct_source_cache_trace_test
+            PROPERTIES CUDA_ARCHITECTURES "${_owned_cache_test_archs}")
+    endif()
+
+    COLMAP_ADD_TEST(
         NAME gpu_mat_test
         SRCS gpu_mat_test.cu
+        LINK_LIBS colmap_mvs_cuda
+    )
+    COLMAP_ADD_TEST(
+        NAME owned_prng_test
+        SRCS owned_prng_test.cu
         LINK_LIBS colmap_mvs_cuda
     )
 endif()
@@ -314,4 +499,33 @@ if(HIP_ENABLED)
         LINK_LIBS colmap_mvs_cuda
     )
     set_source_files_properties(gpu_mat_test.cu PROPERTIES LANGUAGE HIP)
+endif()
+
+# Dependency-free optimized-dispatch contract executables also run without a
+# configured COLMAP tree using the commands in doc/optimized_dispatch.md.
+if(TESTS_ENABLED)
+    find_package(Threads REQUIRED)
+    foreach(contract_test optimized_dispatch_test optimized_photo_forecast_test
+            optimized_photo_options_test optimized_photo_paths_test
+            fusion_dependencies_test)
+        add_executable(colmap_mvs_${contract_test} ${contract_test}.cc)
+        target_include_directories(colmap_mvs_${contract_test} PRIVATE "${PROJECT_SOURCE_DIR}/src")
+        target_link_libraries(colmap_mvs_${contract_test} PRIVATE Threads::Threads)
+        if(MSVC)
+            target_compile_options(colmap_mvs_${contract_test} PRIVATE /UNDEBUG)
+        else()
+            target_compile_options(colmap_mvs_${contract_test} PRIVATE -UNDEBUG)
+        endif()
+        add_test(NAME "mvs/${contract_test}" COMMAND colmap_mvs_${contract_test})
+    endforeach()
+endif()
+
+# Uses real coordinator and owner threads; POSIX subprocess death diagnostics.
+if(TESTS_ENABLED AND UNIX)
+    add_executable(colmap_mvs_native_run_deadline_test native_run_deadline_test.cc)
+    target_include_directories(colmap_mvs_native_run_deadline_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_link_libraries(colmap_mvs_native_run_deadline_test PRIVATE Threads::Threads)
+    target_compile_options(colmap_mvs_native_run_deadline_test PRIVATE -UNDEBUG)
+    add_test(NAME "mvs/native_run_deadline_test" COMMAND colmap_mvs_native_run_deadline_test)
+    set_tests_properties(mvs/native_run_deadline_test PROPERTIES TIMEOUT 15)
 endif()

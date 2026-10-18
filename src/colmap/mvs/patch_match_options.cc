@@ -21,11 +21,14 @@ void PatchMatchOptions::Print() const {
   PrintOption(gpu_index);
   PrintOption(depth_min);
   PrintOption(depth_max);
+  PrintOption(random_seed);
   PrintOption(window_radius);
   PrintOption(window_step);
   PrintOption(sigma_spatial);
   PrintOption(sigma_color);
   PrintOption(num_samples);
+  PrintOption(owned_distinct_source_cache);
+  PrintOption(owned_tex_lookahead);
   PrintOption(ncc_sigma);
   PrintOption(min_triangulation_angle);
   PrintOption(incident_angle_sigma);
@@ -44,6 +47,7 @@ void PatchMatchOptions::Print() const {
 }
 
 bool PatchMatchOptions::Check() const {
+  CHECK_OPTION_GE(random_seed, -1);
   if (depth_min != -1.0f || depth_max != -1.0f) {
     CHECK_OPTION_IN(depth_min, 0.0f, depth_max);
   }

@@ -6,7 +6,9 @@
 #include "colmap/mvs/image.h"
 #include "colmap/mvs/normal_map.h"
 #include "colmap/mvs/patch_match_options.h"
+#include "colmap/mvs/owned_input_bank.h"
 #include "colmap/mvs/patch_match_execution.h"
+#include "colmap/mvs/resident_contract.h"
 #ifndef __CUDACC__
 #include "colmap/util/base_controller.h"
 #include "colmap/util/threading.h"
@@ -23,8 +25,13 @@ namespace mvs {
 class ConsistencyGraph;
 class PatchMatchCuda;
 class Workspace;
+struct OwnedBankContract;
+struct OwnedBankContractProblem;
 namespace owned {
 class PairCoordinator;
+class HostInputBank;
+class ResidentInputBank;
+struct BankJob;
 }
 #if !defined(COLMAP_HIP_ENABLED)
 namespace owned {
@@ -52,6 +59,12 @@ class PatchMatch {
 
     // Input normal maps for the geometric consistency term.
     std::vector<NormalMap>* normal_maps = nullptr;
+
+    // Invocation-owned immutable GPU inputs; metadata stays per-engine.
+    const owned::ResidentInputBank* resident_bank = nullptr;
+    int resident_ref_layer = -1;
+    std::vector<int> resident_src_layers;
+    const NormalMap* resident_ref_normal = nullptr;
 
     // Print the configuration to stdout.
     void Print() const;
@@ -163,6 +176,60 @@ class PatchMatchController : public BaseController {
                        size_t job,
                        const OwnedPairHooks& hooks);
 
+  // Planned fresh-controller PHOTO / GEO graph before PHOTO maps exist.
+  // This is NOT a bank contract or admission: actual GEO inputs/order must be
+  // revalidated through ResolveOwnedBankContract after the PHOTO barrier.
+  // No solver, device/context queries, payload decode, or workspace writes.
+  struct DensePlanGraph {
+    std::vector<Image> images;
+    std::vector<std::string> names;
+    std::vector<owned::BankJob> photo;
+    std::vector<owned::BankJob> geo;
+  };
+  DensePlanGraph ResolveDensePlanGraph();
+
+  // Resolve native effective order once, without decoding or touching CUDA.
+  owned::BankJob ResolveOwnedBankJob();
+  // Shared per-problem metadata helper: resolves EVERY configured problem's
+  // effective invocation snapshot once, preserving the existing
+  // FlatHashSet-produced insertion/iteration/source order without sorting or
+  // canonical reorder. CPU-only metadata path on a stock-dispatch controller:
+  // no payload decode, no CUDA, no workspace writes. Rejects duplicate
+  // references/output aliases.
+  std::vector<owned::BankJob> ResolveOwnedBankJobs();
+  // Enriched contract capture for the CLI metadata export/verify modes.
+  OwnedBankContract ResolveOwnedBankContract();
+  // The single authoritative invocation snapshot for the resident runner:
+  // ONE ResolveOwnedBankJobsImpl traversal produces the enriched contract
+  // AND the resolved jobs together, so both the wire binding bytes and the
+  // ledger minima derive from the same once-per-invocation resolution in
+  // native problem order. Callers must serialize the contract once and
+  // never re-resolve for a second "snapshot".
+  struct OwnedBankResolved {
+    OwnedBankContract contract;
+    std::vector<owned::BankJob> jobs;
+  };
+  OwnedBankResolved ResolveOwnedBankContractWithJobs();
+  void RunResidentOwnedPairJob(const owned::HostInputBank& host,
+                               const owned::ResidentInputBank& resident,
+                               owned::PairCoordinator& coordinator,
+                               size_t job,
+                               const OwnedPairHooks& hooks);
+
+  // Compact owner generation may select a different immutable full-bank job.
+  // `owned_ref_normal` is required for bounded-normal banks (the owned map is
+  // handed off by the bounded lookahead and stays alive in the owner's frame
+  // until upload and owner retirement) and must be null for eager banks,
+  // which retain the validated reference normal internally. Problem pointers
+  // refer to that caller-owned storage; no dangling pointer or early free.
+  void RunResidentOwnedPairJob(const owned::HostInputBank& host,
+                               const owned::ResidentInputBank& resident,
+                               owned::PairCoordinator& coordinator,
+                               size_t job,
+                               size_t bank_job_index,
+                               const OwnedPairHooks& hooks,
+                               const NormalMap* owned_ref_normal = nullptr);
+
   // CPU-only preparation. No coordinator, events, or CUDA calls; all workspace
   // and decode owners are released before returning the owned engine.
   std::unique_ptr<OwnedPreparedJob> PrepareOwnedPairJob(
@@ -179,6 +246,19 @@ class PatchMatchController : public BaseController {
                                    owned::PairCoordinator& coordinator,
                                    size_t job,
                                    const OwnedPairHooks& hooks);
+  // Shared invocation setup guards and single-traversal resolution loop.
+  // Execution-specific guards live in the public entry points. When
+  // `contract` is non-null, the enriched per-problem contract records are
+  // captured during the same, once-per-invocation traversal. When
+  // `expected_problems` is non-null, the exact configured problem count is
+  // enforced before any traversal (one-reference wrapper guard).
+  std::vector<owned::BankJob> ResolveOwnedBankJobsImpl(
+      OwnedBankContract* contract,
+      const size_t* expected_problems = nullptr);
+  owned::BankJob CaptureOwnedBankJobMetadata(
+      size_t problem_idx,
+      const std::vector<std::string>& image_names,
+      OwnedBankContractProblem* contract);
   void ReadWorkspace();
   void ReadProblems();
   void ReadGpuIndices();
@@ -197,6 +277,7 @@ class PatchMatchController : public BaseController {
   const std::filesystem::path config_path_;
 
   bool owned_pair_started_ = false;
+  bool owned_bank_resolved_ = false;
 
   std::unique_ptr<ThreadPool> thread_pool_;
   std::unique_ptr<ThreadPool> io_thread_pool_;

@@ -57,6 +57,10 @@ struct PatchMatchOptions {
   // Maximum image size in either dimension.
   int max_image_size = -1;
 
+  // Benchmark-only coordinate seed; -1 preserves historical initialization.
+  // >= 0 uses (seed, current row, current col), not a reconstruction guarantee.
+  int random_seed = -1;
+
   // Half window size to compute NCC photo-consistency cost.
   int window_radius = 5;
 
@@ -69,6 +73,22 @@ struct PatchMatchOptions {
 
   // Number of random samples to draw in Monte Carlo sampling.
   int num_samples = 15;
+
+  // Experimental owned CUDA sweep only. Uses a row-local distinct-source cache
+  // for 16- or 32-thread tiles and <=15 samples; otherwise runs the original
+  // loop.
+  bool owned_distinct_source_cache = false;
+
+  // Experimental owned CUDA sweep only. Issues the texture request for the
+  // next texel of the current NCC window row one sample earlier so it carries
+  // a full bilateral-weight and moment accumulation of independent work. The
+  // schedule is intended to preserve arithmetic exactly (identical source
+  // expressions for recurrences, texture arguments and order of accumulation)
+  // but native codegen and bit-exactness are not established by this flag
+  // alone and must pass the governing decision's exactness checks. Only
+  // active together with the owned distinct-source cache lane (16- or 32-thread
+  // tiles, <=15 samples); otherwise the original loop runs unchanged.
+  bool owned_tex_lookahead = false;
 
   // Number of coordinate descent iterations. Each iteration consists
   // of four sweeps from left to right, top to bottom, and vice versa.

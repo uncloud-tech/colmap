@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "colmap/mvs/patch_match.h"
+#include "colmap/mvs/owned_input_bank.h"
 #include "colmap/mvs/owned_pair_coordinator.h"
 #include "colmap/mvs/owned_pair_input.h"
 #include "colmap/mvs/owned_pair_output.h"
+#include "colmap/mvs/optimized_photo_paths.h"
+#include "colmap/mvs/resident_contract.h"
 
 #include "colmap/math/math.h"
 #include "colmap/mvs/consistency_graph.h"
@@ -18,8 +21,10 @@
 #include "colmap/util/misc.h"
 #include "colmap/util/threading.h"
 
+#include <algorithm>
 #include <numeric>
 #include <set>
+#include <stdexcept>
 
 #define PrintOption(option) LOG(INFO) << #option ": " << option << std::endl
 
@@ -27,6 +32,28 @@ namespace colmap {
 namespace mvs {
 
 namespace {
+// Shared by real input preparation, complete-bank capture, and the planned
+// graph. Insertion and single iteration MUST NOT be sorted or repeated.
+FlatHashSet<int> ResolveNativeUsedImages(const std::vector<int>& sources,
+                                         int reference,
+                                         PatchMatchOptions* options) {
+  FlatHashSet<int> used(sources.begin(), sources.end());
+  used.insert(reference);
+  options->filter_min_num_consistent = std::min(
+      static_cast<int>(used.size()) - 1, options->filter_min_num_consistent);
+  return used;
+}
+std::vector<Image> SnapshotImages(const PatchMatch::Problem& problem) {
+  if (!problem.images) return {};
+  if (!problem.resident_bank) return *problem.images;
+  std::vector<Image> images;
+  images.reserve(problem.images->size());
+  for (const auto& image : *problem.images) {
+    images.emplace_back(image.GetPath(), image.GetWidth(), image.GetHeight(),
+                        image.GetK(), image.GetR(), image.GetT());
+  }
+  return images;
+}
 PatchMatchExecution ValidateExecution(const PatchMatchOptions& options,
                                      const PatchMatchExecution execution) {
 #if defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
@@ -50,25 +77,27 @@ PatchMatch::PatchMatch(const PatchMatchOptions& options,
     : options_(options),
       execution_(ValidateExecution(options, execution)),
       owned_images_(execution_ == PatchMatchExecution::kOwnedCuda && problem.images
-                        ? *problem.images : std::vector<Image>{}),
+                        ? SnapshotImages(problem) : std::vector<Image>{}),
       owned_depth_maps_(execution_ == PatchMatchExecution::kOwnedCuda &&
-                                options_.geom_consistency && problem.depth_maps
+                                options_.geom_consistency && !problem.resident_bank &&
+                                problem.depth_maps
                             ? *problem.depth_maps
                             : std::vector<DepthMap>{}),
       owned_normal_maps_(execution_ == PatchMatchExecution::kOwnedCuda &&
-                                 options_.geom_consistency && problem.normal_maps
+                                 options_.geom_consistency && !problem.resident_bank &&
+                                 problem.normal_maps
                              ? *problem.normal_maps
                              : std::vector<NormalMap>{}),
       problem_([&] {
         Problem result = problem;
         if (execution_ == PatchMatchExecution::kOwnedCuda) {
           result.images = &owned_images_;
-          result.depth_maps = options_.geom_consistency && problem.depth_maps
-                                  ? &owned_depth_maps_
-                                  : nullptr;
-          result.normal_maps = options_.geom_consistency && problem.normal_maps
-                                   ? &owned_normal_maps_
-                                   : nullptr;
+          result.depth_maps = options_.geom_consistency &&
+                                      !problem.resident_bank && problem.depth_maps
+                                  ? &owned_depth_maps_ : nullptr;
+          result.normal_maps = options_.geom_consistency &&
+                                       !problem.resident_bank && problem.normal_maps
+                                   ? &owned_normal_maps_ : nullptr;
         }
         return result;
       }()) {}
@@ -96,7 +125,7 @@ void PatchMatch::Check() const {
   THROW_CHECK_GE(gpu_indices[0], -1);
 
   THROW_CHECK_NOTNULL(problem_.images);
-  if (options_.geom_consistency) {
+  if (options_.geom_consistency && !problem_.resident_bank) {
     THROW_CHECK_NOTNULL(problem_.depth_maps);
     THROW_CHECK_NOTNULL(problem_.normal_maps);
     THROW_CHECK_EQ(problem_.depth_maps->size(), problem_.images->size());
@@ -118,11 +147,37 @@ void PatchMatch::Check() const {
     THROW_CHECK_LT(image_idx, problem_.images->size()) << image_idx;
 
     const Image& image = problem_.images->at(image_idx);
-    THROW_CHECK_GT(image.GetBitmap().Width(), 0) << image_idx;
-    THROW_CHECK_GT(image.GetBitmap().Height(), 0) << image_idx;
-    THROW_CHECK(image.GetBitmap().IsGrey()) << image_idx;
-    THROW_CHECK_EQ(image.GetWidth(), image.GetBitmap().Width()) << image_idx;
-    THROW_CHECK_EQ(image.GetHeight(), image.GetBitmap().Height()) << image_idx;
+    if (problem_.resident_bank) {
+#if defined(COLMAP_HIP_ENABLED)
+      THROW_CHECK(false) << "Resident input banks require the owned CUDA backend";
+#else
+      THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
+      THROW_CHECK(options_.geom_consistency);
+      THROW_CHECK_EQ(gpu_indices[0], problem_.resident_bank->DeviceIndex());
+      THROW_CHECK_EQ(problem_.resident_src_layers.size(),
+                     problem_.src_image_idxs.size());
+      int layer = problem_.resident_ref_layer;
+      if (image_idx != problem_.ref_image_idx) {
+        const auto it = std::find(problem_.src_image_idxs.begin(),
+                                  problem_.src_image_idxs.end(), image_idx);
+        layer = problem_.resident_src_layers.at(
+            std::distance(problem_.src_image_idxs.begin(), it));
+      }
+      THROW_CHECK_GE(layer, 0);
+      THROW_CHECK_LT(layer, problem_.resident_bank->NumLayers());
+      THROW_CHECK_GT(image.GetWidth(), 0);
+      THROW_CHECK_GT(image.GetHeight(), 0);
+      THROW_CHECK_EQ(image.GetWidth(), problem_.resident_bank->LayerWidth(layer));
+      THROW_CHECK_EQ(image.GetHeight(), problem_.resident_bank->LayerHeight(layer));
+      THROW_CHECK(image.GetBitmap().IsEmpty());
+#endif
+    } else {
+      THROW_CHECK_GT(image.GetBitmap().Width(), 0) << image_idx;
+      THROW_CHECK_GT(image.GetBitmap().Height(), 0) << image_idx;
+      THROW_CHECK(image.GetBitmap().IsGrey()) << image_idx;
+      THROW_CHECK_EQ(image.GetWidth(), image.GetBitmap().Width()) << image_idx;
+      THROW_CHECK_EQ(image.GetHeight(), image.GetBitmap().Height()) << image_idx;
+    }
 
     // Make sure, the calibration matrix only contains fx, fy, cx, cy.
     THROW_CHECK_LT(std::abs(image.GetK()[1] - 0.0f), 1e-6f) << image_idx;
@@ -131,7 +186,7 @@ void PatchMatch::Check() const {
     THROW_CHECK_LT(std::abs(image.GetK()[7] - 0.0f), 1e-6f) << image_idx;
     THROW_CHECK_LT(std::abs(image.GetK()[8] - 1.0f), 1e-6f) << image_idx;
 
-    if (options_.geom_consistency) {
+    if (options_.geom_consistency && !problem_.resident_bank) {
       THROW_CHECK_LT(image_idx, problem_.depth_maps->size()) << image_idx;
       const DepthMap& depth_map = problem_.depth_maps->at(image_idx);
       THROW_CHECK_EQ(image.GetWidth(), depth_map.GetWidth()) << image_idx;
@@ -146,8 +201,13 @@ void PatchMatch::Check() const {
 
   if (options_.geom_consistency) {
     const Image& ref_image = problem_.images->at(problem_.ref_image_idx);
-    const NormalMap& ref_normal_map =
-        problem_.normal_maps->at(problem_.ref_image_idx);
+    if (problem_.resident_bank) {
+      THROW_CHECK_NOTNULL(problem_.resident_ref_normal);
+      THROW_CHECK_EQ(problem_.resident_ref_normal->GetDepth(), 3);
+    }
+    const NormalMap& ref_normal_map = problem_.resident_bank
+        ? *problem_.resident_ref_normal
+        : problem_.normal_maps->at(problem_.ref_image_idx);
     THROW_CHECK_EQ(ref_image.GetWidth(), ref_normal_map.GetWidth());
     THROW_CHECK_EQ(ref_image.GetHeight(), ref_normal_map.GetHeight());
   }
@@ -321,6 +381,399 @@ void PatchMatchController::Run() {
   thread_pool_->Wait();
 
   run_timer.PrintMinutes();
+}
+
+PatchMatchController::DensePlanGraph
+PatchMatchController::ResolveDensePlanGraph() {
+  THROW_CHECK(execution_ == PatchMatchExecution::kStock);
+  THROW_CHECK(!owned_bank_resolved_ && !owned_pair_started_);
+  THROW_CHECK(!workspace_ && !io_thread_pool_ && !thread_pool_);
+  THROW_CHECK_EQ(options_.max_image_size, -1);
+  THROW_CHECK(!options_.allow_missing_files);
+  THROW_CHECK(!options_.write_consistency_graph);
+  auto format = workspace_format_;
+  StringToLower(&format);
+  THROW_CHECK_EQ(format, "colmap");
+  const auto devices = CSVToVector<int>(options_.gpu_index);
+  THROW_CHECK_EQ(devices.size(), 1);
+  THROW_CHECK_GE(devices.front(), 0);
+  THROW_CHECK_GT(options_.num_threads, 0);
+  owned_bank_resolved_ = true;
+  const auto release = [this] {
+    workspace_.reset();
+    problems_.clear();
+    depth_ranges_.clear();
+  };
+  try {
+    ReadWorkspace();
+    ReadProblems();
+    THROW_CHECK(!problems_.empty());
+    DensePlanGraph graph;
+    const auto& model = workspace_->GetModel();
+    graph.images = model.images;
+    for (size_t i = 0; i < model.images.size(); ++i)
+      graph.names.push_back(model.GetImageName(i));
+    FlatHashSet<int> references;
+    for (const auto& problem : problems_) {
+      THROW_CHECK(references.insert(problem.ref_image_idx).second)
+          << "duplicate reference outputs";
+    }
+    const auto root = std::filesystem::canonical(workspace_path_);
+    FlatHashSet<std::string> outputs;
+    for (const auto& problem : problems_) {
+      // Both optimized phases start fresh controllers from the SAME cfg,
+      // unlike stock Run's PHOTO-mutated source vector in its second pass.
+      auto effective = options_;
+      const auto used = ResolveNativeUsedImages(
+          problem.src_image_idxs, problem.ref_image_idx, &effective);
+      if (effective.depth_min < 0 || effective.depth_max < 0) {
+        effective.depth_min = depth_ranges_.at(problem.ref_image_idx).first;
+        effective.depth_max = depth_ranges_.at(problem.ref_image_idx).second;
+      }
+      THROW_CHECK_GT(effective.depth_min, 0);
+      THROW_CHECK_GT(effective.depth_max, effective.depth_min);
+      if (effective.sigma_spatial <= 0)
+        effective.sigma_spatial = effective.window_radius;
+      THROW_CHECK(effective.Check());
+      for (const bool geo : {false, true}) {
+        owned::BankJob job;
+        job.options = effective;
+        job.options.geom_consistency = geo;
+        job.options.filter = geo ? options_.filter : false;
+        job.reference_image_idx = problem.ref_image_idx;
+        // Metadata snapshots only. No Bitmap / maps are populated.
+        job.images = graph.images;
+        for (int idx : used) {
+          THROW_CHECK(ExistsFile(workspace_->GetBitmapPath(idx)));
+          THROW_CHECK(references.count(idx))
+              << "PHOTO producer missing for GEO dependency " << idx;
+          if (idx != problem.ref_image_idx)
+            job.source_image_idxs.push_back(idx);
+        }
+        const auto photo_paths = ValidateOptimizedPhotoOutputs(
+            root, model.GetImageName(problem.ref_image_idx));
+        auto paths = photo_paths;
+        if (geo) {
+          for (size_t k = 0; k < paths.size(); ++k) {
+            const auto folder =
+                root / "stereo" / (k == 0 ? "depth_maps" : "normal_maps");
+            const auto path =
+                folder /
+                (model.GetImageName(problem.ref_image_idx) + ".geometric.bin");
+            paths[k] = std::filesystem::weakly_canonical(path);
+            THROW_CHECK(owned::PathContains(folder, paths[k]));
+            THROW_CHECK(!std::filesystem::exists(path) &&
+                        !std::filesystem::is_symlink(
+                            std::filesystem::symlink_status(path)));
+          }
+        }
+        for (const auto& path : paths)
+          THROW_CHECK(outputs.insert(path.string()).second)
+              << "aliased outputs";
+        job.depth_map_path = paths[0];
+        job.normal_map_path = paths[1];
+        (geo ? graph.geo : graph.photo).push_back(std::move(job));
+      }
+    }
+    release();
+    return graph;
+  } catch (...) {
+    release();
+    throw;
+  }
+}
+
+std::vector<owned::BankJob> PatchMatchController::ResolveOwnedBankJobs() {
+  // Metadata-only resolution is a stock-dispatch CPU path; the one-reference
+  // executor wrapper (kOwnedCuda) keeps ResolveOwnedBankJob's guards.
+  THROW_CHECK(execution_ == PatchMatchExecution::kStock)
+      << "Bank job metadata resolution is a stock-dispatch CPU path";
+  return ResolveOwnedBankJobsImpl(nullptr, nullptr);
+}
+
+PatchMatchController::OwnedBankResolved
+PatchMatchController::ResolveOwnedBankContractWithJobs() {
+  // Same guards as the contract capture: the snapshot binds options the
+  // owned execution path admits, resolved once (owned_bank_resolved_).
+  THROW_CHECK(execution_ == PatchMatchExecution::kStock)
+      << "Bank resolution with contract binding is a stock-dispatch CPU "
+         "metadata path";
+  ValidatePatchMatchExecution(PatchMatchExecution::kOwnedCuda,
+                              options_.window_radius,
+                              options_.window_step,
+                              options_.geom_consistency,
+                              /*owned_cuda_available=*/true,
+                              options_.filter,
+                              options_.write_consistency_graph,
+                              options_.allow_missing_files);
+  OwnedBankResolved resolved;
+  resolved.jobs = ResolveOwnedBankJobsImpl(&resolved.contract, nullptr);
+  THROW_CHECK_EQ(resolved.jobs.size(), resolved.contract.problems.size());
+  return resolved;
+}
+
+OwnedBankContract PatchMatchController::ResolveOwnedBankContract() {
+  THROW_CHECK(execution_ == PatchMatchExecution::kStock)
+      << "Contract resolution is a stock-dispatch CPU metadata mode";
+  // Reuse the exact owned-execution option admission as a CPU-only check so
+  // the contract cannot bind options the owned path would reject. No CUDA
+  // availability is queried here.
+  ValidatePatchMatchExecution(PatchMatchExecution::kOwnedCuda,
+                              options_.window_radius,
+                              options_.window_step,
+                              options_.geom_consistency,
+                              /*owned_cuda_available=*/true,
+                              options_.filter,
+                              options_.write_consistency_graph,
+                              options_.allow_missing_files);
+  OwnedBankContract contract;
+  const auto jobs = ResolveOwnedBankJobsImpl(&contract, nullptr);
+  THROW_CHECK_EQ(jobs.size(), contract.problems.size());
+  return contract;
+}
+
+std::vector<owned::BankJob> PatchMatchController::ResolveOwnedBankJobsImpl(
+    OwnedBankContract* contract,
+    const size_t* expected_problems) {
+  THROW_CHECK(options_.geom_consistency);
+  THROW_CHECK(!owned_pair_started_);
+  THROW_CHECK(!workspace_ && !io_thread_pool_ && !thread_pool_);
+  const auto devices = CSVToVector<int>(options_.gpu_index);
+  THROW_CHECK_EQ(devices.size(), 1);
+  THROW_CHECK_GE(devices.front(), 0);
+  THROW_CHECK_GT(options_.num_threads, 0);
+  // PMVS import writes workspace files; this metadata-only route must not.
+  auto format = workspace_format_;
+  StringToLower(&format);
+  THROW_CHECK_EQ(format, "colmap")
+      << "Resident input mode supports only COLMAP workspaces";
+  THROW_CHECK(!owned_bank_resolved_) << "Resident job resolves only once";
+  owned_bank_resolved_ = true;
+  const auto release = [this] {
+    problems_.clear();
+    workspace_.reset();
+    depth_ranges_.clear();
+    gpu_indices_.clear();
+  };
+  try {
+    ReadWorkspace();
+    ReadProblems();
+    if (expected_problems != nullptr) {
+      // Early exact-size guard, checked BEFORE any per-job traversal.
+      THROW_CHECK_EQ(problems_.size(), *expected_problems);
+    }
+    THROW_CHECK_GE(problems_.size(), 1);
+    const auto& model = workspace_->GetModel();
+    std::vector<std::string> image_names;
+    image_names.reserve(model.images.size());
+    for (size_t image_idx = 0; image_idx < model.images.size(); ++image_idx) {
+      image_names.push_back(model.GetImageName(image_idx));
+    }
+    if (contract != nullptr) {
+      *contract = MakeOwnedBankContract(
+          options_, workspace_->GetOptions().stereo_folder);
+      contract->problems.reserve(problems_.size());
+    }
+    // Native problem order is preserved; only actual duplicates are rejected:
+    // two problems sharing one reference name resolve to the same output
+    // paths, and output paths are derived deterministically, so duplicate
+    // references and output aliases are caught together below. Alias keys
+    // use resolved paths so `..`-bearing model names or symlinked output
+    // parents cannot mask collisions; depth versus normal outputs of every
+    // problem share one key space.
+    FlatHashSet<std::string> seen_outputs;
+    FlatHashSet<std::string> seen_reference_names;
+    const auto output_key = [](const std::filesystem::path& path) {
+      return std::filesystem::weakly_canonical(path).string();
+    };
+    std::vector<owned::BankJob> jobs;
+    jobs.reserve(problems_.size());
+    for (size_t problem_idx = 0; problem_idx < problems_.size();
+         ++problem_idx) {
+      OwnedBankContractProblem contract_problem;
+      auto job = CaptureOwnedBankJobMetadata(
+          problem_idx,
+          image_names,
+          contract == nullptr ? nullptr : &contract_problem);
+      THROW_CHECK(seen_reference_names.insert(
+                       image_names.at(job.reference_image_idx)).second)
+          << "Duplicate reference image in configured problems: "
+          << image_names.at(job.reference_image_idx);
+      THROW_CHECK(seen_outputs.insert(output_key(job.depth_map_path)).second)
+          << "Duplicate owned output path across problems: "
+          << job.depth_map_path;
+      THROW_CHECK(seen_outputs.insert(output_key(job.normal_map_path)).second)
+          << "Duplicate owned output path across problems: "
+          << job.normal_map_path;
+      jobs.push_back(std::move(job));
+      if (contract != nullptr) {
+        contract->problems.push_back(std::move(contract_problem));
+      }
+    }
+    if (contract != nullptr) {
+      // Repeated shared inputs must be captured consistently: a file used by
+      // several problems carries exactly one invocation identity. All
+      // retained identities are also collected for the invocation-wide
+      // fresh revalidation below.
+      FlatHashMap<std::string, owned::BankFileIdentity> identity_by_path;
+      std::vector<const owned::BankFileIdentity*> retained_identities;
+      for (const auto& problem_record : contract->problems) {
+        for (const auto& input : problem_record.inputs) {
+          const auto check = [&identity_by_path, &retained_identities](
+                                 const owned::BankFileIdentity& identity,
+                                 const char* kind) {
+            retained_identities.push_back(&identity);
+            const auto key = identity.path.string();
+            const auto inserted = identity_by_path.emplace(key, identity);
+            THROW_CHECK(inserted.second ||
+                        owned::SameIdentity(inserted.first->second, identity))
+                << "Inconsistent repeated " << kind
+                << " input identity across problems: " << key;
+          };
+          check(input.image_identity, "image");
+          check(input.depth_identity, "depth");
+          check(input.normal_identity, "normal");
+        }
+      }
+      // Invocation-wide fresh revalidation AFTER all jobs, stats and header
+      // reads completed: an earlier input changing while later inputs were
+      // being read cannot escape. FRESH filesystem checks against every
+      // retained identity; the stored-record comparisons above remain the
+      // cross-problem shared-path consistency contract.
+      for (const owned::BankFileIdentity* identity : retained_identities) {
+        owned::CheckFileIdentityUnchanged(*identity);
+      }
+    }
+    release();
+    return jobs;
+  } catch (...) {
+    release();
+    throw;
+  }
+}
+
+owned::BankJob PatchMatchController::ResolveOwnedBankJob() {
+  THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
+  const size_t one_problem = 1;
+  auto jobs = ResolveOwnedBankJobsImpl(nullptr, &one_problem);
+  THROW_CHECK_EQ(jobs.size(), 1);
+  return std::move(jobs.front());
+}
+
+owned::BankJob PatchMatchController::CaptureOwnedBankJobMetadata(
+    const size_t problem_idx,
+    const std::vector<std::string>& image_names,
+    OwnedBankContractProblem* contract) {
+  const auto& problem = problems_.at(problem_idx);
+  owned::BankJob result;
+  result.options = options_;
+  result.images = workspace_->GetModel().images;
+  result.reference_image_idx = problem.ref_image_idx;
+  if (result.options.depth_min < 0 || result.options.depth_max < 0) {
+    const auto range = depth_ranges_.at(problem.ref_image_idx);
+    result.options.depth_min = range.first;
+    result.options.depth_max = range.second;
+    THROW_CHECK_GT(range.first, 0);
+    THROW_CHECK_GT(range.second, 0);
+  }
+  if (result.options.sigma_spatial <= 0) {
+    result.options.sigma_spatial = result.options.window_radius;
+  }
+  const auto& stereo = workspace_->GetOptions().stereo_folder;
+  const auto file = StringPrintf("%s.geometric.bin",
+      workspace_->GetModel().GetImageName(problem.ref_image_idx).c_str());
+  result.depth_map_path = workspace_path_ / stereo / "depth_maps" / file;
+  result.normal_map_path = workspace_path_ / stereo / "normal_maps" / file;
+  THROW_CHECK(!ExistsFile(result.depth_map_path));
+  THROW_CHECK(!ExistsFile(result.normal_map_path));
+  // Identical insertion and single iteration to ProcessProblemInputs. Never
+  // rebuild this hash set from the resolved vector in the resident path.
+  const auto used_image_idxs = ResolveNativeUsedImages(
+      problem.src_image_idxs, problem.ref_image_idx, &result.options);
+  for (const int idx : used_image_idxs) {
+    const auto image = workspace_->GetBitmapPath(idx);
+    const auto depth = workspace_->GetDepthMapPath(idx);
+    const auto normal = workspace_->GetNormalMapPath(idx);
+    THROW_CHECK(ExistsFile(image) && ExistsFile(depth) && ExistsFile(normal))
+        << "Missing image or map dependency for image " << idx;
+    owned::BankInput input;
+    input.image_idx = idx;
+    input.image = result.images.at(idx);
+    input.depth_path = depth;
+    input.normal_path = normal;
+    input.max_image_size = options_.max_image_size;
+    result.inputs.push_back(std::move(input));
+    if (idx != problem.ref_image_idx) result.source_image_idxs.push_back(idx);
+  }
+  if (contract != nullptr) {
+    *contract = CaptureOwnedBankContractProblem(result, image_names);
+  }
+  return result;
+}
+
+void PatchMatchController::RunResidentOwnedPairJob(
+    const owned::HostInputBank& host,
+    const owned::ResidentInputBank& resident,
+    owned::PairCoordinator& coordinator,
+    const size_t job,
+    const OwnedPairHooks& hooks) {
+  RunResidentOwnedPairJob(host, resident, coordinator, job, job, hooks);
+}
+
+void PatchMatchController::RunResidentOwnedPairJob(
+    const owned::HostInputBank& host,
+    const owned::ResidentInputBank& resident,
+    owned::PairCoordinator& coordinator,
+    const size_t job,
+    const size_t bank_job_index,
+    const OwnedPairHooks& hooks,
+    const NormalMap* owned_ref_normal) {
+  THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
+  THROW_CHECK(options_.geom_consistency);
+  THROW_CHECK(!owned_pair_started_);
+  owned_pair_started_ = true;
+  try {
+    THROW_CHECK(!workspace_ && !io_thread_pool_ && !thread_pool_);
+    coordinator.BeginPreparation(job);
+    const auto& resolved = host.Job(bank_job_index);
+    THROW_CHECK(!ExistsFile(resolved.depth_map_path));
+    THROW_CHECK(!ExistsFile(resolved.normal_map_path));
+    // Mode-consistent reference normal ownership: eager banks borrow their
+    // validated retained normal; bounded banks require the caller-owned
+    // prepared normal, which outlives the GPU upload (kept until retire).
+    if (host.NormalsMode() == owned::BankNormals::kBounded) {
+      if (owned_ref_normal == nullptr) {
+        throw std::invalid_argument(
+            "bounded resident bank requires an owned prepared reference normal");
+      }
+    } else if (owned_ref_normal != nullptr) {
+      throw std::invalid_argument(
+          "eager resident bank retains its own reference normal");
+    }
+    auto images = resolved.images;
+    PatchMatch::Problem problem;
+    problem.images = &images;
+    problem.ref_image_idx = resolved.reference_image_idx;
+    problem.src_image_idxs = resolved.source_image_idxs;
+    problem.resident_bank = &resident;
+    problem.resident_ref_layer = host.ReferenceLayer(bank_job_index);
+    problem.resident_src_layers = host.SourceLayers(bank_job_index);
+    problem.resident_ref_normal =
+        host.NormalsMode() == owned::BankNormals::kBounded
+            ? owned_ref_normal
+            : &host.ReferenceNormal(bank_job_index);
+    if (hooks.check_inputs) hooks.check_inputs(job, resolved.options, problem);
+    OwnedPreparedJob prepared;
+    prepared.depth_map_path = resolved.depth_map_path;
+    prepared.normal_map_path = resolved.normal_map_path;
+    prepared.patch_match = std::make_unique<PatchMatch>(
+        resolved.options, problem, execution_);
+    prepared.patch_match->Check();
+    ExecutePreparedOwnedPairJob(prepared, coordinator, job, hooks);
+  } catch (...) {
+    coordinator.Cancel(job, std::current_exception());
+    throw;
+  }
 }
 
 std::unique_ptr<PatchMatchController::OwnedPreparedJob>
@@ -718,13 +1171,8 @@ void PatchMatchController::ProcessProblemInputs(
 
   {
     // Collect all used images in current problem.
-    FlatHashSet<int> used_image_idxs(problem.src_image_idxs.begin(),
-                                     problem.src_image_idxs.end());
-    used_image_idxs.insert(problem.ref_image_idx);
-
-    patch_match_options.filter_min_num_consistent =
-        std::min(static_cast<int>(used_image_idxs.size()) - 1,
-                 patch_match_options.filter_min_num_consistent);
+    const auto used_image_idxs = ResolveNativeUsedImages(
+        problem.src_image_idxs, problem.ref_image_idx, &patch_match_options);
 
     // Only access workspace from one thread at a time and only spawn resample
     // threads from one master thread at a time.

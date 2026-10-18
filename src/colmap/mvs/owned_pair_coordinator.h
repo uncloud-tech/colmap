@@ -2,12 +2,13 @@
 
 #pragma once
 
-// Finite epochs and optional bounded FIFO rolling-three owned coordination.
+// Finite epochs and bounded FIFO static-slot or dynamic-credit coordination.
 //
 // This standard-library-only state machine admits, prepares, dispatches,
 // schedules output for and retires owned jobs in one process/primary CUDA
-// context. Epochs retain two or three owners; rolling retains three full slots
-// and assigns immutable FIFO generation indices to their successive owners. It deliberately has NO
+// context. Epochs retain two or three owners; rolling retains fixed slots or
+// full per-job credits until parent join, using immutable FIFO generations.
+// It deliberately has NO
 // CUDA or COLMAP dependency (including no logging header) so that it can be
 // exercised by bounded standalone CPU tests. The coordinator owns no device
 // pointers and never allocates GPU memory; callers retain and retire their own
@@ -15,8 +16,11 @@
 //
 // Failure model: the first recorded exception is preserved, every bounded
 // waiter is notified, and no success or credit is fabricated. Resource credits
-// are returned only after ALL active jobs prove retirement; cancellation alone
+// are returned only after retirement and parent join (dynamic), or Finish
+// (legacy); cancellation alone
 // releases no credits.
+
+#include "colmap/mvs/native_run_deadline.h"
 
 #include <algorithm>
 #include <array>
@@ -24,10 +28,12 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <exception>
 #include <functional>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -169,8 +175,58 @@ class PairCoordinator {
     rolling_ = true;
     count_ = forecasts.size();
     forecasts_ = std::move(forecasts);
-    slots_ = slots;
-    slot_owner_.fill(kNoJob);
+    slots_.assign(slots.begin(), slots.end());
+    slot_owner_.assign(3, kNoJob);
+    job_slot_.assign(count_, kNoJob);
+    state_.assign(count_, JobState::kReserved);
+    ready_.assign(count_, false);
+    permit_.assign(count_, false);
+    solver_active_.assign(count_, false);
+    output_done_.assign(count_, false);
+    retired_.assign(count_, false);
+    proven_retired_.assign(count_, false);
+    joined_.assign(count_, false);
+  }
+
+  // Dynamic resident admission: process excludes the separately held bank.
+  // Every forecast is the FULL reviewed private bound, not incremental RSS.
+  // An explicit phase deadline replaces (not caps with) the legacy per-wait
+  // timeout. Work and failure-only drain rendezvous share that one endpoint;
+  // AwaitRetired is owner execution/retirement, not a fresh cleanup allowance.
+  PairCoordinator(ByteCharge capacity,
+                  ByteCharge process_charge,
+                  size_t max_concurrent_solvers,
+                  std::vector<ByteCharge> forecasts,
+                  std::chrono::milliseconds timeout,
+                  std::function<void(const PairEvent&)> sink = {},
+                  std::optional<NativeRunDeadline> execution_deadline = {})
+      : dispatch_(PairDispatch::kPair),
+        count_(forecasts.size()),
+        rolling_(true),
+        dynamic_(true),
+        capacity_(capacity),
+        solver_permits_(max_concurrent_solvers),
+        early_geometry_permits_(EarlyGeometryPermits::kOn),
+        timeout_(timeout),
+        execution_deadline_(execution_deadline),
+        sink_(std::move(sink)),
+        reserved_(process_charge) {
+    if (!count_ || !max_concurrent_solvers || timeout.count() <= 0 ||
+        !process_charge.host || !process_charge.device ||
+        !Fits(process_charge, capacity))
+      throw std::invalid_argument("invalid dynamic rolling admission");
+    for (const auto f : forecasts) {
+      ByteCharge total;
+      if (!f.host || !f.device)
+        throw std::invalid_argument("zero dynamic forecast");
+      if (!CheckedAdd(process_charge.host, f.host, &total.host) ||
+          !CheckedAdd(process_charge.device, f.device, &total.device))
+        throw std::overflow_error("dynamic forecast overflow");
+      if (!Fits(total, capacity))
+        throw std::invalid_argument("dynamic forecast exceeds private budget");
+    }
+    forecasts_ = std::move(forecasts);
+    slot_owner_.assign(std::min(count_, max_concurrent_solvers), kNoJob);
     job_slot_.assign(count_, kNoJob);
     state_.assign(count_, JobState::kReserved);
     ready_.assign(count_, false);
@@ -197,6 +253,13 @@ class PairCoordinator {
   // Parent-only FIFO admission. Cancellation and slot assignment are atomic.
   // No fitting empty slot means wait for an occupied fitting slot, not skip.
   size_t AdmitNext() {
+    if (execution_deadline_ && Clock::now() >= execution_deadline_->end) {
+      Cancel(kNoJob,
+             std::make_exception_ptr(
+                 std::runtime_error("owned pair: admission refused; absolute "
+                                    "phase deadline expired")));
+      return kNoJob;
+    }
     PairEvent event;
     size_t job;
     {
@@ -204,14 +267,23 @@ class PairCoordinator {
       if (!rolling_) throw std::logic_error("not rolling");
       if (cancelled_ || admitted_ == count_) return kNoJob;
       size_t slot = kNoJob;
-      for (size_t s = 0; s < 3; ++s) {
-        if (slot_owner_[s] == kNoJob && Fits(forecasts_[admitted_], slots_[s])) {
+      if (dynamic_ &&
+          !Fits(forecasts_[admitted_],
+                {capacity_.host - reserved_.host,
+                 capacity_.device - reserved_.device})) return kNoJob;
+      for (size_t s = 0; s < slot_owner_.size(); ++s) {
+        if (slot_owner_[s] == kNoJob && (dynamic_ || Fits(forecasts_[admitted_], slots_[s]))) {
           slot = s;
           break;
         }
       }
       if (slot == kNoJob) return kNoJob;
       job = admitted_++;
+      if (dynamic_) {
+        // Fits against remaining capacity above makes both additions safe.
+        reserved_.host += forecasts_[job].host;
+        reserved_.device += forecasts_[job].device;
+      }
       job_slot_[job] = slot;
       slot_owner_[slot] = job;
       event = MakeEventLocked(job, "admitted");
@@ -228,9 +300,10 @@ class PairCoordinator {
         if (retired_[j] && !joined_[j]) return j;
       return kNoJob;
     };
-    if (!cv_.wait_for(lock, timeout_, [&] { return find() != kNoJob; })) {
+    if (!cv_.wait_until(
+            lock, WaitDeadline(), [&] { return find() != kNoJob; })) {
       // A stuck owner cannot be detached or have its buffers fabricated dead.
-      std::terminate();
+      FatalCleanup("AwaitRetired: owner retirement not proven");
     }
     return find();
   }
@@ -244,7 +317,13 @@ class PairCoordinator {
       if (!rolling_ || job >= admitted_ || !retired_[job] || joined_[job])
         throw std::logic_error("invalid rolling join");
       joined_[job] = true;
-      if (proven_retired_[job]) slot_owner_[job_slot_[job]] = kNoJob;
+      if (proven_retired_[job]) {
+        slot_owner_[job_slot_[job]] = kNoJob;
+        if (dynamic_) {
+          reserved_.host -= forecasts_[job].host;
+          reserved_.device -= forecasts_[job].device;
+        }
+      }
       event = MakeEventLocked(job, "owner_joined");
     }
     InvokeSink(event);
@@ -334,7 +413,7 @@ class PairCoordinator {
   // bounded and cancellation-aware. No mutex is held across the return.
   void BeginPreparation(size_t job) {
     RequireJob(job);
-    const Clock::time_point deadline = Clock::now() + timeout_;
+    const Clock::time_point deadline = WaitDeadline();
     {
       std::unique_lock<std::mutex> lock(mutex_);
       if ((rolling_ && (job >= admitted_ || retired_[job])) ||
@@ -358,7 +437,7 @@ class PairCoordinator {
   // reservation is released by an early solver permit.
   void ReadyAndWait(size_t job) {
     RequireJob(job);
-    const Clock::time_point deadline = Clock::now() + timeout_;
+    const Clock::time_point deadline = WaitDeadline();
     std::vector<PairEvent> pending;
     {
       std::unique_lock<std::mutex> lock(mutex_);
@@ -440,7 +519,7 @@ class PairCoordinator {
   // Readiness (ComputeDone) is required. Bounded and cancellation-aware.
   void BeginOutput(size_t job) {
     RequireJob(job);
-    const Clock::time_point deadline = Clock::now() + timeout_;
+    const Clock::time_point deadline = WaitDeadline();
     PairEvent event;
     {
       std::unique_lock<std::mutex> lock(mutex_);
@@ -487,7 +566,7 @@ class PairCoordinator {
   // all active OutputDone (or cancellation) while owned objects remain alive.
   void AwaitOutputs(size_t job) {
     RequireJob(job);
-    const Clock::time_point deadline = Clock::now() + timeout_;
+    const Clock::time_point deadline = WaitDeadline();
     std::unique_lock<std::mutex> lock(mutex_);
     RequireLiveLocked(job);
     if (state_[job] != JobState::kOutputDone) {
@@ -538,15 +617,16 @@ class PairCoordinator {
       std::unique_lock<std::mutex> lock(mutex_);
       solver_active_[job] = false;
       cv_.notify_all();
-      const auto deadline = Clock::now() + timeout_;
+      const auto deadline = WaitDeadline();
       if (!cv_.wait_until(lock, deadline, [&] {
             return std::none_of(solver_active_.begin(), solver_active_.begin() + count_,
                                 [](bool active) { return active; });
           })) {
-        std::terminate();
+        FatalCleanup("CancelAndAwaitCleanup: active peer drain not proven");
       }
     } catch (...) {
-      std::terminate();
+      FatalCleanup(
+          "CancelAndAwaitCleanup: local drain threw; completion unknown");
     }
   }
 
@@ -584,6 +664,7 @@ class PairCoordinator {
         proven_retired_[job] = true;
       } else {
         proven_retired_[job] = false;
+        if (rolling_) PublishCancellationLocked();
         if (!first_error_) {
           first_error_ = std::make_exception_ptr(
               std::runtime_error("owned pair: retirement completion unproven"));
@@ -650,14 +731,32 @@ class PairCoordinator {
     }
   }
 
-  // Full reservation until all active retirements proved cleanup AND Finish runs;
-  // then zero. Unknown cleanup never releases.
+  // Dynamic: process plus admitted, not-yet-safely-joined private forecasts.
+  // Legacy: full reservation until Finish. Unknown cleanup never releases.
   ByteCharge ReservedBytes() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return reserved_;
   }
 
  private:
+  [[noreturn]] void FatalCleanup(const char* reason) const noexcept {
+    std::fprintf(stderr,
+                 "owned pair: %s; %s budget=%lld ms; "
+                 "terminating without freeing uncertain owners\n",
+                 reason,
+                 execution_deadline_ ? "absolute phase" : "legacy per-wait",
+                 static_cast<long long>(
+                     execution_deadline_ ? execution_deadline_->budget.count()
+                                         : timeout_.count()));
+    std::fflush(stderr);
+    std::terminate();
+  }
+
+  Clock::time_point WaitDeadline() const {
+    return execution_deadline_ ? execution_deadline_->end
+                               : Clock::now() + timeout_;
+  }
+
   void RequireLiveLocked(size_t job) const {
     if (rolling_ && (job >= admitted_ || retired_[job]))
       throw std::logic_error("stale or unadmitted rolling generation");
@@ -681,13 +780,21 @@ class PairCoordinator {
         lock.unlock();
         std::rethrow_exception(error);
       }
-      if (predicate()) {
+      // An already-ready lease must not start work after the phase expired.
+      if ((!execution_deadline_ || Clock::now() < deadline) && predicate()) {
         return;
       }
-      if (cv_.wait_until(lock, deadline) == std::cv_status::timeout) {
+      if (Clock::now() >= deadline ||
+          cv_.wait_until(lock, deadline) == std::cv_status::timeout) {
         if (!first_error_) {
           first_error_ = std::make_exception_ptr(std::runtime_error(
-              std::string("owned pair: ") + what + " wait timed out"));
+              std::string("owned pair: ") + what + " wait timed out; " +
+              (execution_deadline_ ? "absolute phase" : "legacy per-wait") +
+              " budget=" +
+              std::to_string(execution_deadline_
+                                 ? execution_deadline_->budget.count()
+                                 : timeout_.count()) +
+              " ms"));
         }
         cancelled_ = true;
         const PairEvent event = MakeEventLocked(job, "cancelled");
@@ -769,8 +876,10 @@ class PairCoordinator {
   size_t count_;
   bool rolling_ = false;
   size_t admitted_ = 0;
-  std::array<ByteCharge, 3> slots_{};
-  std::array<size_t, 3> slot_owner_{};
+  bool dynamic_ = false;
+  ByteCharge capacity_;
+  std::vector<ByteCharge> slots_;
+  std::vector<size_t> slot_owner_;
   std::vector<ByteCharge> forecasts_;
   std::vector<size_t> job_slot_;
   std::vector<bool> joined_;
@@ -778,6 +887,7 @@ class PairCoordinator {
   bool successful_initial_solver_ = false;
   EarlyGeometryPermits early_geometry_permits_;
   std::chrono::milliseconds timeout_;
+  std::optional<NativeRunDeadline> execution_deadline_;
   std::function<void(const PairEvent&)> sink_;
   mutable std::mutex mutex_;
   std::condition_variable cv_;

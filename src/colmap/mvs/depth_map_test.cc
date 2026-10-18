@@ -2,11 +2,84 @@
 
 #include "colmap/mvs/depth_map.h"
 
+#include <tuple>
+
 #include <gtest/gtest.h>
 
 namespace colmap {
 namespace mvs {
 namespace {
+
+Mat<float> MakeTempMat(const size_t width,
+                       const size_t height,
+                       const size_t depth,
+                       const float value) {
+  Mat<float> mat(width, height, depth);
+  mat.Fill(value);
+  return mat;
+}
+
+TEST(DepthMap, CopyConstructorPreservesSource) {
+  Mat<float> source(2, 2, 1);
+  source.Fill(3.5f);
+  const float* source_ptr = source.GetPtr();
+  const DepthMap depth_map(source, 1.0f, 2.0f);
+  EXPECT_NE(depth_map.GetPtr(), source_ptr);
+  EXPECT_EQ(depth_map.Get(0, 0), 3.5f);
+  EXPECT_EQ(depth_map.GetDepthMin(), 1.0f);
+  EXPECT_EQ(depth_map.GetDepthMax(), 2.0f);
+  EXPECT_EQ(source.Get(0, 0), 3.5f);
+  EXPECT_EQ(source.GetPtr(), source_ptr);
+}
+
+TEST(DepthMap, MovesOwnershipFromRvalueMat) {
+  const size_t width = 3;
+  const size_t height = 4;
+  Mat<float> mat(width, height, 1);
+  for (size_t row = 0; row < height; ++row) {
+    for (size_t col = 0; col < width; ++col) {
+      mat.Set(row, col, 0, 1.5f + static_cast<float>(row * width + col));
+    }
+  }
+  const float* source_ptr = mat.GetPtr();
+  const DepthMap depth_map(std::move(mat), 0.25f, 7.75f);
+  // Ownership of the downloaded buffer transferred without a second copy.
+  EXPECT_EQ(depth_map.GetPtr(), source_ptr);
+  EXPECT_EQ(depth_map.GetWidth(), width);
+  EXPECT_EQ(depth_map.GetHeight(), height);
+  EXPECT_EQ(depth_map.GetDepth(), 1);
+  EXPECT_EQ(depth_map.GetDepthMin(), 0.25f);
+  EXPECT_EQ(depth_map.GetDepthMax(), 7.75f);
+  EXPECT_EQ(depth_map.Get(0, 0), 1.5f);
+  EXPECT_EQ(depth_map.Get(height - 1, width - 1),
+            1.5f + static_cast<float>(height * width - 1));
+  EXPECT_EQ(depth_map.GetNumBytes(), width * height * sizeof(float));
+  // Moved-from object is safe: no buffer, and the source is not reused.
+  EXPECT_TRUE(mat.GetData().empty());
+  EXPECT_EQ(mat.GetPtr(), nullptr);
+}
+
+TEST(DepthMap, MovesOwnershipFromTemporaryMat) {
+  const DepthMap depth_map(MakeTempMat(2, 3, 1, 2.5f), 1.0f, 9.0f);
+  EXPECT_EQ(depth_map.GetWidth(), 2);
+  EXPECT_EQ(depth_map.GetHeight(), 3);
+  EXPECT_EQ(depth_map.GetDepth(), 1);
+  EXPECT_EQ(depth_map.Get(1, 1), 2.5f);
+  EXPECT_EQ(depth_map.GetDepthMin(), 1.0f);
+  EXPECT_EQ(depth_map.GetDepthMax(), 9.0f);
+  EXPECT_EQ(depth_map.GetNumBytes(), 6 * sizeof(float));
+}
+
+TEST(DepthMap, MoveConstructionChecksDepthBeforeMoving) {
+  Mat<float> mat(2, 2, 2);
+  mat.Fill(4.5f);
+  const float* source_ptr = mat.GetPtr();
+  EXPECT_THROW(std::ignore = DepthMap(std::move(mat), 1.0f, 2.0f),
+               std::exception);
+  // The depth check must happen before the move, so the source stays intact.
+  EXPECT_EQ(mat.GetPtr(), source_ptr);
+  EXPECT_EQ(mat.Get(0, 0, 0), 4.5f);
+}
 
 TEST(DepthMap, Empty) {
   DepthMap depth_map;

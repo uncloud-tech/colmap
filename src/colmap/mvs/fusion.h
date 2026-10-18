@@ -2,12 +2,14 @@
 
 #pragma once
 
+#include "colmap/mvs/fusion_mapped_mat.h"
 #include "colmap/mvs/mat.h"
 #include "colmap/mvs/workspace.h"
 #include "colmap/util/base_controller.h"
 #include "colmap/util/eigen_alignment.h"
 #include "colmap/util/ply.h"
 
+#include <atomic>
 #include <cfloat>
 #include <filesystem>
 #include <vector>
@@ -51,6 +53,15 @@ struct StereoFusionOptions {
   // Flag indicating whether to use LRU cache or pre-load all data
   bool use_cache = false;
 
+  // Read-only full-resolution COLMAP maps; decode RGB serially once.
+  // Input files must remain immutable until Run returns. Incompatible with
+  // cache. Only num_threads=1 is qualified for byte-exact stock output.
+  bool use_mmap = false;
+
+  // Fail before processing if any configured bitmap/depth/normal is missing.
+  // Set by strict optimized dispatch; legacy callers remain permissive.
+  bool require_complete_inputs = false;
+
   // Cache size in gigabytes for fusion. The fusion keeps the bitmaps, depth
   // maps, normal maps, and consistency graphs of this number of images in
   // memory. A higher value leads to less disk access and faster fusion, while
@@ -89,6 +100,8 @@ class StereoFusion : public BaseController {
  private:
   void InitFusedPixelMask(int image_idx, size_t width, size_t height);
   void Fuse(int thread_id, int image_idx, int row, int col);
+  bool IsPixelFused(int image_idx, int row, int col) const;
+  void VerifyMappedInputs() const;
 
   const StereoFusionOptions options_;
   const std::filesystem::path workspace_path_;
@@ -99,6 +112,10 @@ class StereoFusion : public BaseController {
   const float min_cos_normal_error_;
 
   std::unique_ptr<Workspace> workspace_;
+  std::vector<std::unique_ptr<FusionMappedMat>> mapped_depth_maps_;
+  std::vector<std::unique_ptr<FusionMappedMat>> mapped_normal_maps_;
+  std::vector<std::unique_ptr<Bitmap>> decoded_bitmaps_;
+  std::vector<std::unique_ptr<std::atomic<uint8_t>[]>> atomic_pixel_masks_;
   std::vector<char> used_images_;
   std::vector<char> fused_images_;
   std::vector<std::vector<int>> overlapping_images_;

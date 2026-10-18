@@ -1043,6 +1043,10 @@ void OptionManager::AddPatchMatchStereoOptions() {
                    &patch_match_stereo->sigma_spatial);
   AddDefaultOption("PatchMatchStereo.sigma_color",
                    &patch_match_stereo->sigma_color);
+  AddDefaultOption("PatchMatchStereo.owned_distinct_source_cache",
+                   &patch_match_stereo->owned_distinct_source_cache);
+  AddDefaultOption("PatchMatchStereo.owned_tex_lookahead",
+                   &patch_match_stereo->owned_tex_lookahead);
   AddDefaultOption("PatchMatchStereo.num_samples",
                    &patch_match_stereo->num_samples);
   AddDefaultOption("PatchMatchStereo.ncc_sigma",
@@ -1074,6 +1078,8 @@ void OptionManager::AddPatchMatchStereoOptions() {
                    &patch_match_stereo->allow_missing_files);
   AddDefaultOption("PatchMatchStereo.write_consistency_graph",
                    &patch_match_stereo->write_consistency_graph);
+  AddDefaultOption("PatchMatchStereo.random_seed",
+                   &patch_match_stereo->random_seed);
   AddDefaultOption("PatchMatchStereo.num_threads",
                    &patch_match_stereo->num_threads);
 }
@@ -1103,6 +1109,7 @@ void OptionManager::AddStereoFusionOptions() {
                    &stereo_fusion->check_num_images);
   AddDefaultOption("StereoFusion.cache_size", &stereo_fusion->cache_size);
   AddDefaultOption("StereoFusion.use_cache", &stereo_fusion->use_cache);
+  AddDefaultOption("StereoFusion.use_mmap", &stereo_fusion->use_mmap);
 }
 
 void OptionManager::AddPoissonMeshingOptions() {

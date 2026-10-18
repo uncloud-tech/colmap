@@ -22,6 +22,7 @@ COLMAP_ADD_LIBRARY(
         reconstruction_clustering.h reconstruction_clustering.cc
         rotation_averaging.h rotation_averaging.cc
         undistorters.h undistorters.cc
+        reconstruction_input_summary.h reconstruction_input_summary.cc
     PUBLIC_LINK_LIBS
         colmap_calibration
         colmap_estimators
@@ -133,5 +134,10 @@ COLMAP_ADD_TEST(
 COLMAP_ADD_TEST(
     NAME pairing_test
     SRCS pairing_test.cc
+    LINK_LIBS colmap_controllers
+)
+COLMAP_ADD_TEST(
+    NAME reconstruction_input_summary_test
+    SRCS reconstruction_input_summary_test.cc
     LINK_LIBS colmap_controllers
 )

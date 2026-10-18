@@ -1,9 +1,21 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "colmap/mvs/gpu_mat_prng.h"
+#include "colmap/mvs/stock_prng_state.h"
+
+#include <type_traits>
 
 namespace colmap {
 namespace mvs {
+
+#if defined(COLMAP_CUDA_ENABLED) && defined(COLMAP_MVS_ENABLED) && \
+    !defined(COLMAP_HIP_ENABLED)
+StockPrngStateLayout GetStockPrngStateLayout() {
+  static_assert(std::is_base_of<GpuMat<curandState>, GpuMatPRNG>::value);
+  return {sizeof(curandState), alignof(curandState)};
+}
+#endif
+
 namespace {
 
 __global__ void InitRandomStateKernel(GpuMatView<curandState> output) {

@@ -7,6 +7,11 @@ if(IS_MSVC)
 endif()
 
 set(OPTIONAL_LIBS)
+if(MVS_ENABLED)
+    # colmap_main compiles mvs.cc itself and needs the MVS generated headers,
+    # including in CPU-only builds (controllers links MVS privately).
+    list(APPEND OPTIONAL_LIBS colmap_mvs)
+endif()
 if(CUDA_ENABLED)
     list(APPEND OPTIONAL_LIBS colmap_util_cuda)
     if(MVS_ENABLED)
@@ -30,6 +35,9 @@ set(COLMAP_EXE_SRCS
     image.h image.cc
     sfm.h sfm.cc
     model.h model.cc
+    photo_directory_summary.h photo_directory_summary.cc
+    optimized_dense_plan.h optimized_dense_plan.cc
+    optimized_dense_plan_io.h optimized_dense_plan_options.h
 )
 set(COLMAP_EXE_PUBLIC_LIBS
     colmap_controllers
@@ -56,6 +64,12 @@ COLMAP_ADD_LIBRARY(
         colmap_sfm
 )
 
+# photo_directory_summary is also compiled into colmap_exe for command
+# tests/consumers, not only colmap_main (whose OPTIONAL_LIBS already link it).
+if(MVS_ENABLED AND CUDA_ENABLED AND NOT HIP_ENABLED)
+    target_link_libraries(colmap_exe PRIVATE colmap_mvs_cuda)
+endif()
+
 COLMAP_ADD_TEST(
     NAME image_test
     SRCS image_test.cc
@@ -74,6 +88,63 @@ COLMAP_ADD_TEST(
     LINK_LIBS colmap_exe
 )
 
+COLMAP_ADD_TEST(
+    NAME optimized_dense_plan_io_test
+    SRCS optimized_dense_plan_io_test.cc
+    LINK_LIBS colmap_exe
+)
+COLMAP_ADD_TEST(
+    NAME optimized_dense_plan_test
+    SRCS optimized_dense_plan_test.cc
+    LINK_LIBS colmap_exe
+)
+
+if(TESTS_ENABLED AND MVS_ENABLED AND CUDA_ENABLED AND NOT HIP_ENABLED)
+    target_link_libraries(colmap_exe_optimized_dense_plan_test colmap_mvs_cuda)
+endif()
+
+COLMAP_ADD_TEST(
+    NAME photo_directory_summary_test
+    SRCS photo_directory_summary_test.cc
+    LINK_LIBS colmap_exe
+)
+if(TESTS_ENABLED AND MVS_ENABLED AND CUDA_ENABLED AND NOT HIP_ENABLED)
+    target_link_libraries(colmap_exe_photo_directory_summary_test
+        colmap_mvs_cuda)
+endif()
+
+if(MVS_ENABLED AND CUDA_ENABLED AND NOT HIP_ENABLED)
+    COLMAP_ADD_TEST(
+        NAME resident_cli_contract_test
+        SRCS resident_cli_contract_test.cc
+        LINK_LIBS
+            colmap_exe
+            colmap_mvs_cuda
+            ${COLMAP_BOOST_HEADER_LIBS}
+    )
+endif()
+
+# CPU-safe refusal tests for the opt-in resident execution backend: the
+# raw-argv fail-closed dispatch guards run before any CUDA availability or
+# stock dispatch, so they run in every MVS build. The actual EXECUTION
+# surface requires the CUDA build (dev1).
+if(MVS_ENABLED)
+    COLMAP_ADD_TEST(
+        NAME resident_cli_runner_test
+        SRCS resident_cli_runner_test.cc
+        LINK_LIBS
+            colmap_exe
+            ${COLMAP_BOOST_HEADER_LIBS}
+    )
+    COLMAP_ADD_TEST(
+        NAME resident_cli_cohort_test
+        SRCS resident_cli_cohort_test.cc
+        LINK_LIBS
+            colmap_exe
+            ${COLMAP_BOOST_HEADER_LIBS}
+    )
+endif()
+
 set(COLMAP_MAIN_SRCS
     colmap.cc
     database.cc
@@ -81,6 +152,8 @@ set(COLMAP_MAIN_SRCS
     gui.cc
     image.cc
     model.cc
+    photo_directory_summary.cc
+    optimized_dense_plan.cc
     sfm.cc
     vocab_tree.cc
 )

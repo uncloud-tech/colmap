@@ -24,6 +24,10 @@ class GpuMatRefImage {
               const float sigma_color);
 
 #if !defined(COLMAP_HIP_ENABLED)
+  void FilterResident(cudaTextureObject_t texture, int layer,
+                      size_t window_radius, size_t window_step,
+                      float sigma_spatial, float sigma_color,
+                      cudaStream_t stream);
   void Filter(const uint8_t* image_data,
               size_t window_radius, size_t window_step,
               float sigma_spatial, float sigma_color,

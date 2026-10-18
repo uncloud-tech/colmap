@@ -1,0 +1,208 @@
+owned-bank-contract
+version 1
+build_cuda_enabled 0
+build_hip_enabled 0
+allocation_compatibility 20 756e7175616c69666965642d6370752d6f6e6c79
+invocation_options
+opt_int max_image_size -1
+opt_string gpu_index 2 2d31
+opt_double depth_min 3ff0000000000000
+opt_double depth_max 4020000000000000
+opt_int random_seed -1
+opt_int window_radius 1
+opt_int window_step 1
+opt_double sigma_spatial 3ff0000000000000
+opt_double sigma_color 3fe0000000000000
+opt_int num_samples 2
+opt_bool owned_distinct_source_cache 0
+opt_bool owned_tex_lookahead 0
+opt_double ncc_sigma 3fe0000000000000
+opt_double min_triangulation_angle 3ff0000000000000
+opt_double incident_angle_sigma 3fe0000000000000
+opt_int num_iterations 1
+opt_bool geom_consistency 1
+opt_double geom_consistency_regularizer 3fe0000000000000
+opt_double geom_consistency_max_cost 4000000000000000
+opt_bool filter 1
+opt_double filter_min_ncc 3fe0000000000000
+opt_double filter_min_triangulation_angle 3ff0000000000000
+opt_int filter_min_num_consistent 1
+opt_double filter_geom_consistency_max_cost 3ff0000000000000
+opt_bool write_consistency_graph 0
+opt_bool allow_missing_files 0
+opt_int num_threads 1
+opt_double cache_size 3ff0000000000000
+stereo_folder 16 73796e7468657469635f73746572656f
+problem_count 2
+problem 0
+reference_image_idx 1
+reference_name 15 73796e7468657469635f312e70706d
+output_depth_path 24 73796e7468657469632f6f75747075742f312e6465707468
+output_normal_path 25 73796e7468657469632f6f75747075742f312e6e6f726d616c
+problem_options
+opt_int max_image_size -1
+opt_string gpu_index 2 2d31
+opt_double depth_min 3ff0000000000000
+opt_double depth_max 4020000000000000
+opt_int random_seed -1
+opt_int window_radius 1
+opt_int window_step 1
+opt_double sigma_spatial 3ff0000000000000
+opt_double sigma_color 3fe0000000000000
+opt_int num_samples 2
+opt_bool owned_distinct_source_cache 0
+opt_bool owned_tex_lookahead 0
+opt_double ncc_sigma 3fe0000000000000
+opt_double min_triangulation_angle 3ff0000000000000
+opt_double incident_angle_sigma 3fe0000000000000
+opt_int num_iterations 1
+opt_bool geom_consistency 1
+opt_double geom_consistency_regularizer 3fe0000000000000
+opt_double geom_consistency_max_cost 4000000000000000
+opt_bool filter 1
+opt_double filter_min_ncc 3fe0000000000000
+opt_double filter_min_triangulation_angle 3ff0000000000000
+opt_int filter_min_num_consistent 1
+opt_double filter_geom_consistency_max_cost 3ff0000000000000
+opt_bool write_consistency_graph 0
+opt_bool allow_missing_files 0
+opt_int num_threads 1
+opt_double cache_size 3ff0000000000000
+input_count 3
+input 0
+is_reference 0
+image_idx 3
+image_name 15 73796e7468657469635f332e70706d
+image_dims 7 1
+max_image_size -1
+calib_k 40000000 00000000 40600000 00000000 40000000 3f000000 00000000 00000000 3f800000
+calib_r 3f800000 00000000 00000000 00000000 3f800000 00000000 00000000 00000000 3f800000
+calib_t 40400000 00000000 00000000
+image_path 23 73796e7468657469632f696e7075742f332e696d616765
+image_identity 23 73796e7468657469632f696e7075742f332e696d616765 53 0 133 1 0 2 0
+depth_path 23 73796e7468657469632f696e7075742f332e6465707468
+depth_identity 23 73796e7468657469632f696e7075742f332e6465707468 34 0 131 1 0 2 0
+depth_header 7 1 1
+normal_path 24 73796e7468657469632f696e7075742f332e6e6f726d616c
+normal_identity 24 73796e7468657469632f696e7075742f332e6e6f726d616c 90 0 134 1 0 2 0
+normal_header 7 1 3
+input 1
+is_reference 1
+image_idx 1
+image_name 15 73796e7468657469635f312e70706d
+image_dims 5 2
+max_image_size -1
+calib_k 40000000 00000000 40200000 00000000 40000000 3f800000 00000000 00000000 3f800000
+calib_r 3f800000 00000000 00000000 00000000 3f800000 00000000 00000000 00000000 3f800000
+calib_t 3f800000 00000000 00000000
+image_path 23 73796e7468657469632f696e7075742f312e696d616765
+image_identity 23 73796e7468657469632f696e7075742f312e696d616765 62 0 113 1 0 2 0
+depth_path 23 73796e7468657469632f696e7075742f312e6465707468
+depth_identity 23 73796e7468657469632f696e7075742f312e6465707468 46 0 111 1 0 2 0
+depth_header 5 2 1
+normal_path 24 73796e7468657469632f696e7075742f312e6e6f726d616c
+normal_identity 24 73796e7468657469632f696e7075742f312e6e6f726d616c 126 0 114 1 0 2 0
+normal_header 5 2 3
+input 2
+is_reference 0
+image_idx 2
+image_name 15 73796e7468657469635f322e70706d
+image_dims 3 2
+max_image_size -1
+calib_k 40000000 00000000 3fc00000 00000000 40000000 3f800000 00000000 00000000 3f800000
+calib_r 3f800000 00000000 00000000 00000000 3f800000 00000000 00000000 00000000 3f800000
+calib_t 40000000 00000000 00000000
+image_path 23 73796e7468657469632f696e7075742f322e696d616765
+image_identity 23 73796e7468657469632f696e7075742f322e696d616765 50 0 123 1 0 2 0
+depth_path 23 73796e7468657469632f696e7075742f322e6465707468
+depth_identity 23 73796e7468657469632f696e7075742f322e6465707468 30 0 121 1 0 2 0
+depth_header 3 2 1
+normal_path 24 73796e7468657469632f696e7075742f322e6e6f726d616c
+normal_identity 24 73796e7468657469632f696e7075742f322e6e6f726d616c 78 0 124 1 0 2 0
+normal_header 3 2 3
+problem 1
+reference_image_idx 2
+reference_name 15 73796e7468657469635f322e70706d
+output_depth_path 24 73796e7468657469632f6f75747075742f322e6465707468
+output_normal_path 25 73796e7468657469632f6f75747075742f322e6e6f726d616c
+problem_options
+opt_int max_image_size -1
+opt_string gpu_index 2 2d31
+opt_double depth_min 3ff0000000000000
+opt_double depth_max 4020000000000000
+opt_int random_seed -1
+opt_int window_radius 1
+opt_int window_step 1
+opt_double sigma_spatial 3ff0000000000000
+opt_double sigma_color 3fe0000000000000
+opt_int num_samples 2
+opt_bool owned_distinct_source_cache 0
+opt_bool owned_tex_lookahead 0
+opt_double ncc_sigma 3fe0000000000000
+opt_double min_triangulation_angle 3ff0000000000000
+opt_double incident_angle_sigma 3fe0000000000000
+opt_int num_iterations 1
+opt_bool geom_consistency 1
+opt_double geom_consistency_regularizer 3fe0000000000000
+opt_double geom_consistency_max_cost 4000000000000000
+opt_bool filter 1
+opt_double filter_min_ncc 3fe0000000000000
+opt_double filter_min_triangulation_angle 3ff0000000000000
+opt_int filter_min_num_consistent 1
+opt_double filter_geom_consistency_max_cost 3ff0000000000000
+opt_bool write_consistency_graph 0
+opt_bool allow_missing_files 0
+opt_int num_threads 1
+opt_double cache_size 3ff0000000000000
+input_count 3
+input 0
+is_reference 0
+image_idx 1
+image_name 15 73796e7468657469635f312e70706d
+image_dims 5 2
+max_image_size -1
+calib_k 40000000 00000000 40200000 00000000 40000000 3f800000 00000000 00000000 3f800000
+calib_r 3f800000 00000000 00000000 00000000 3f800000 00000000 00000000 00000000 3f800000
+calib_t 3f800000 00000000 00000000
+image_path 23 73796e7468657469632f696e7075742f312e696d616765
+image_identity 23 73796e7468657469632f696e7075742f312e696d616765 62 0 113 1 0 2 0
+depth_path 23 73796e7468657469632f696e7075742f312e6465707468
+depth_identity 23 73796e7468657469632f696e7075742f312e6465707468 46 0 111 1 0 2 0
+depth_header 5 2 1
+normal_path 24 73796e7468657469632f696e7075742f312e6e6f726d616c
+normal_identity 24 73796e7468657469632f696e7075742f312e6e6f726d616c 126 0 114 1 0 2 0
+normal_header 5 2 3
+input 1
+is_reference 1
+image_idx 2
+image_name 15 73796e7468657469635f322e70706d
+image_dims 3 2
+max_image_size -1
+calib_k 40000000 00000000 3fc00000 00000000 40000000 3f800000 00000000 00000000 3f800000
+calib_r 3f800000 00000000 00000000 00000000 3f800000 00000000 00000000 00000000 3f800000
+calib_t 40000000 00000000 00000000
+image_path 23 73796e7468657469632f696e7075742f322e696d616765
+image_identity 23 73796e7468657469632f696e7075742f322e696d616765 50 0 123 1 0 2 0
+depth_path 23 73796e7468657469632f696e7075742f322e6465707468
+depth_identity 23 73796e7468657469632f696e7075742f322e6465707468 30 0 121 1 0 2 0
+depth_header 3 2 1
+normal_path 24 73796e7468657469632f696e7075742f322e6e6f726d616c
+normal_identity 24 73796e7468657469632f696e7075742f322e6e6f726d616c 78 0 124 1 0 2 0
+normal_header 3 2 3
+input 2
+is_reference 0
+image_idx 0
+image_name 15 73796e7468657469635f302e70706d
+image_dims 4 3
+max_image_size -1
+calib_k 40000000 00000000 40000000 00000000 40000000 3fc00000 00000000 00000000 3f800000
+calib_r 3f800000 00000000 00000000 00000000 3f800000 00000000 00000000 00000000 3f800000
+calib_t 00000000 00000000 00000000
+image_path 23 73796e7468657469632f696e7075742f302e696d616765
+image_identity 23 73796e7468657469632f696e7075742f302e696d616765 68 0 103 1 0 2 0
+depth_path 23 73796e7468657469632f696e7075742f302e6465707468
+depth_identity 23 73796e7468657469632f696e7075742f302e6465707468 54 0 101 1 0 2 0
+depth_header 4 3 1
+normal_path 24 73796e7468657469632f696e7075742f302e6e6f726d616c
+normal_identity 24 73796e7468657469632f696e7075742f302e6e6f726d616c 150 0 104 1 0 2 0
+normal_header 4 3 3

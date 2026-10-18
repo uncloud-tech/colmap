@@ -564,6 +564,33 @@ TEST_F(OwnedPairTest, LegacyTwoIniStillUsesProductionOwners) {
   EXPECT_EQ(filter_options, 2);
 }
 
+TEST_F(OwnedPairTest, CoordinateSeedReachesOwnersAndMetadata) {
+  for (const int seed : {-1, 7}) {
+    for (size_t j = 0; j < 4; ++j) {
+      SetPatchMatchOption(j, "random_seed", std::to_string(seed));
+    }
+    std::atomic<size_t> calls{0};
+    EventCapture capture;
+    EXPECT_EQ(Invoke(ListArgs({0, 1, 2, 3}),
+                     [&](auto& job, auto& coordinator, size_t slot,
+                         const auto& hooks) {
+      EXPECT_EQ(job.patch_match_stereo->random_seed, seed);
+      ++calls;
+      Complete(job, coordinator, slot, hooks);
+    }), EXIT_SUCCESS);
+    EXPECT_EQ(calls.load(), 4);
+    size_t seed_options = 0;
+    for (const auto& record : Records(capture.Read())) {
+      if (record.at("event") == "effective_option" &&
+          record.at("option") == "random_seed") {
+        EXPECT_EQ(record.at("value_hex"), seed == -1 ? "2d31" : "37");
+        ++seed_options;
+      }
+    }
+    EXPECT_EQ(seed_options, 4);
+  }
+}
+
 TEST_F(OwnedPairTest, ExplicitUnfilteredPhotoReachesBothEpochsAndMetadata) {
   for (size_t j = 0; j < 4; ++j) SetPatchMatchOption(j, "filter", "false");
   for (const std::string dispatch : {"serial", "pair"}) {
@@ -990,6 +1017,214 @@ TEST_F(OwnedPairTest, HostPreparationFailureStopsNextEpochBeforeAdmission) {
   EXPECT_EQ(admissions, 2);
   EXPECT_NE(log.find("event=failed"), std::string::npos);
   EXPECT_NE(log.find("event=release enabled=1 reserved_host=0"), std::string::npos);
+}
+
+TEST_F(OwnedPairTest, ResidentModeRejectsNonRollingAndInvalidCharges) {
+  auto args = ListArgs({0, 1});
+  args.insert(args.end(), {"--owned_input_mode", "unknown"});
+  Reject(args);
+  args.back() = "resident";
+  Reject(args);  // No rolling mode, reviewed forecasts or explicit bank charge.
+  args.back() = "private";
+  args.insert(args.end(), {"--bank_host_charge_bytes", "1",
+                           "--bank_device_charge_bytes", "1"});
+  Reject(args);  // Private must not silently accept resident reservations.
+}
+
+TEST_F(OwnedPairTest, P08MappingForecastsAndDrain) {
+  PairSettings settings{};
+  settings.dispatch = "pair";
+  settings.resident_inputs = true;
+  settings.rolling_feed = true;
+  settings.max_concurrent_solvers = 2;
+  settings.capacity = {1000, 1000};
+  settings.process = {10, 20};
+  settings.bank_charge = {100, 200};
+  const auto identity = ResidentJobIndices(settings, 76);
+  ASSERT_EQ(identity.size(), 76);
+  for (size_t j = 0; j < 76; ++j) EXPECT_EQ(identity[j], j);
+  settings.benchmark_p08 = true;
+  const auto indices = ResidentJobIndices(settings, 76);
+  EXPECT_EQ(indices, (std::vector<size_t>{16, 17}));
+  for (size_t count : {0, 16, 17, 18, 75, 77})
+    EXPECT_THROW(ResidentJobIndices(settings, count), std::invalid_argument);
+  auto invalid = settings;
+  invalid.max_concurrent_solvers = 0;
+  EXPECT_THROW(ResidentJobIndices(invalid, 76), std::invalid_argument);
+  invalid = settings;
+  invalid.resident_inputs = false;
+  EXPECT_THROW(ResidentJobIndices(invalid, 76), std::invalid_argument);
+  std::vector<std::unique_ptr<JobOptions>> jobs;
+  std::vector<pair::ByteCharge> full_forecasts;
+  for (size_t j = 0; j < 76; ++j) {
+    auto job = std::make_unique<JobOptions>();
+    job->workspace = root_ / std::to_string(j);
+    job->reference_name = std::to_string(j);
+    job->patch_match_stereo->gpu_index = "0";
+    job->patch_match_stereo->geom_consistency = true;
+    jobs.push_back(std::move(job));
+    full_forecasts.push_back({30 + j, 40 + j});
+  }
+  const auto admitted = AdmitResidentBank(settings, full_forecasts, {100, 200});
+  EXPECT_EQ(admitted.process.host, 110);
+  EXPECT_EQ(admitted.process.device, 220);
+  // Production retains the complete bank slice outside the private ledger.
+  settings.capacity.host -= settings.bank_charge.host;
+  settings.capacity.device -= settings.bank_charge.device;
+  const std::vector<pair::ByteCharge> selected{full_forecasts[16], full_forecasts[17]};
+  for (bool fail : {false, true}) {
+    EventCapture capture;
+    std::atomic<size_t> calls{0};
+    auto execute = [&](JobOptions& job, pair::PairCoordinator& coordinator,
+                       size_t generation, const auto& hooks) {
+      ++calls;
+      EXPECT_EQ(&job, jobs.at(indices.at(generation)).get());
+      if (fail) throw std::runtime_error("selected owner failure");
+      Complete(job, coordinator, generation, hooks);
+    };
+    if (fail) {
+      EXPECT_THROW(RunRollingFeed(jobs, settings, selected, execute,
+          PrivateInputCheck{}, nullptr, indices), std::runtime_error);
+    } else {
+      RunRollingFeed(jobs, settings, selected, execute,
+          PrivateInputCheck{}, nullptr, indices);
+      EXPECT_EQ(calls.load(), 2);
+    }
+    bool joined = false;
+    size_t bounds = 0;
+    for (const auto& record : Records(capture.Read())) {
+      if (record.at("event") == "owners_joined") joined = true;
+      if (record.at("event") == "forecast_bound") {
+        EXPECT_TRUE(record.at("forecast_host") == "46" ||
+                    record.at("forecast_host") == "47");
+        EXPECT_TRUE(record.at("forecast_device") == "56" ||
+                    record.at("forecast_device") == "57");
+        ++bounds;
+      }
+    }
+    EXPECT_TRUE(joined);
+    if (!fail) EXPECT_EQ(bounds, 2);
+  }
+  auto noop = [](auto&, auto&, size_t, const auto&) {};
+  EXPECT_THROW(RunRollingFeed(jobs, settings, selected, noop,
+      PrivateInputCheck{}, nullptr, {16, 76}), std::invalid_argument);
+  EXPECT_EQ(jobs.size(), 76);  // Mapping never shrinks or reorders the bank inputs.
+}
+
+TEST_F(OwnedPairTest, ResidentRealParserInvokesCpuSeamWithoutCacheGate) {
+  if (AffinityCount() < 3) GTEST_SKIP() << "rolling requires three CPU equivalents";
+  for (size_t j = 0; j < 3; ++j) {
+    SetPatchMatchOption(j, "geom_consistency", "true");
+    SetPatchMatchOption(j, "cache_size", "100");  // Eliminated private input cache.
+  }
+  const auto forecasts = root_ / "resident-private-forecasts.txt";
+  Put(forecasts, "100 100\n100 100\n100 100\n");
+  auto args = ListArgs({0, 1, 2});
+  args.insert(args.end(), {"--static_three_solver_permits", "3",
+                          "--job_c_host_charge_bytes", "524288",
+                          "--job_c_device_charge_bytes", "128",
+                          "--owned_feed_mode", "rolling",
+                          "--job_forecast_list_path", forecasts.string(),
+                          "--owned_input_mode", "resident",
+                          "--bank_host_charge_bytes", "64",
+                          "--bank_device_charge_bytes", "64"});
+  std::vector<char*> argv;
+  for (auto& arg : args) argv.push_back(arg.data());
+  size_t calls = 0;
+  EXPECT_EQ(RunPairs(static_cast<int>(argv.size()), argv.data(), Complete,
+      &PrepareFutureHostJob, [&](auto& jobs, auto settings, auto bounds) {
+        ++calls;
+        EXPECT_EQ(jobs.size(), 3);
+        EXPECT_TRUE(settings.resident_inputs);
+        EXPECT_EQ(settings.bank_charge.host, 64);
+        EXPECT_EQ(bounds.size(), 3);
+      }), EXIT_SUCCESS);
+  EXPECT_EQ(calls, 1);
+  // Resident is COLMAP-only; reject PMVS before resolution, loading or GPU.
+  {
+    std::ifstream input(Ini(2));
+    ASSERT_TRUE(input);
+    const std::string original((std::istreambuf_iterator<char>(input)), {});
+    Put(Ini(2), "workspace_format=PMVS\n" + original);
+    EXPECT_THROW(RunPairs(static_cast<int>(argv.size()), argv.data(), Complete,
+        &PrepareFutureHostJob, [&](auto&, auto, auto) { ++calls; }), std::invalid_argument);
+    EXPECT_EQ(calls, 1);
+    Put(Ini(2), original);
+  }
+  // Unsupported phase/device are rejected before the injected execution seam.
+  SetPatchMatchOption(2, "gpu_index", "1");
+  EXPECT_THROW(RunPairs(static_cast<int>(argv.size()), argv.data(), Complete,
+      &PrepareFutureHostJob, [&](auto&, auto, auto) { ++calls; }), std::invalid_argument);
+  EXPECT_EQ(calls, 1);
+}
+
+TEST_F(OwnedPairTest, BoundedNormalLookaheadParserReservesAndRejects) {
+  if (AffinityCount() < 3) GTEST_SKIP() << "rolling requires three CPU equivalents";
+  for (size_t j = 0; j < 3; ++j) {
+    SetPatchMatchOption(j, "geom_consistency", "true");
+    SetPatchMatchOption(j, "cache_size", "100");
+  }
+  const auto forecasts = root_ / "bounded-resident-forecasts.txt";
+  Put(forecasts, "100 100\n100 100\n100 100\n");
+  const auto base_args = [&] {
+    auto args = ListArgs({0, 1, 2});
+    args.insert(args.end(), {"--static_three_solver_permits", "3",
+                            "--job_c_host_charge_bytes", "524288",
+                            "--job_c_device_charge_bytes", "128",
+                            "--owned_feed_mode", "rolling",
+                            "--job_forecast_list_path", forecasts.string(),
+                            "--owned_input_mode", "resident",
+                            "--bank_host_charge_bytes", "64",
+                            "--bank_device_charge_bytes", "64"});
+    return args;
+  };
+  const auto expect_mode = [&](std::vector<std::string> extra, bool bounded,
+                               size_t future) {
+    auto args = base_args();
+    args.insert(args.end(), extra.begin(), extra.end());
+    std::vector<char*> argv;
+    for (auto& arg : args) argv.push_back(arg.data());
+    size_t calls = 0;
+    EXPECT_EQ(RunPairs(static_cast<int>(argv.size()), argv.data(), Complete,
+        &PrepareFutureHostJob, [&](auto&, const auto& settings, auto) {
+          ++calls;
+          EXPECT_EQ(settings.normal_bounded, bounded);
+          EXPECT_EQ(settings.normal_future, future);
+        }), EXIT_SUCCESS);
+    EXPECT_EQ(calls, 1);
+  };
+  expect_mode({}, false, 0);
+  expect_mode({"--owned_normal_lookahead", "1",
+               "--owned_normal_lookahead_depth", "2",
+               "--normal_lookahead_charge_bytes", "40000"}, true, 2);
+  expect_mode({"--owned_normal_lookahead", "1",
+               "--owned_normal_lookahead_depth", "1",
+               "--normal_lookahead_charge_bytes", "40000"}, true, 1);
+  const auto reject = [&](std::vector<std::string> extra) {
+    auto args = base_args();
+    args.insert(args.end(), extra.begin(), extra.end());
+    Reject(std::move(args));
+  };
+  reject({"--owned_normal_lookahead", "1"});  // Charge is mandatory.
+  reject({"--owned_normal_lookahead", "1",
+          "--normal_lookahead_charge_bytes", "40000",
+          "--owned_normal_lookahead_depth", "3"});  // Depth beyond 1-2.
+  reject({"--owned_normal_lookahead", "1",
+          "--normal_lookahead_charge_bytes", "0"});  // Positive charge only.
+  reject({"--owned_normal_lookahead", "0",
+          "--normal_lookahead_charge_bytes", "64"});  // Off mode takes nothing.
+  reject({"--owned_normal_lookahead", "2",
+          "--normal_lookahead_charge_bytes", "64"});  // Binary flag only.
+  reject({"--owned_normal_lookahead", "1",
+          "--normal_lookahead_charge_bytes", "40000",
+          "--host_lookahead", "1", "--host_lookahead_charge_bytes", "1"});
+  // Private (non-resident) mode must reject the normal lookahead outright.
+  {
+    auto args = ListArgs({0, 1});
+    args.insert(args.end(), {"--owned_normal_lookahead", "1",
+                             "--normal_lookahead_charge_bytes", "64"});
+    Reject(std::move(args));
+  }
 }
 
 TEST(OwnedPairEventsTest, SameClockTickTokensAreStrictlyIncreasing) {

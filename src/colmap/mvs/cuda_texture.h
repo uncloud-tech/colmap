@@ -11,6 +11,26 @@
 namespace colmap {
 namespace mvs {
 
+#if !defined(COLMAP_HIP_ENABLED)
+// Owns only a texture object; the array owner must outlive this view.
+class CudaArrayTextureView {
+ public:
+  CudaArrayTextureView(cudaArray_t array, const cudaTextureDesc& desc) {
+    cudaResourceDesc resource{};
+    resource.resType = cudaResourceTypeArray;
+    resource.res.array.array = array;
+    CUDA_SAFE_CALL(cudaCreateTextureObject(&texture_, &resource, &desc, nullptr));
+  }
+  ~CudaArrayTextureView() { CUDA_SAFE_CALL(cudaDestroyTextureObject(texture_)); }
+  CudaArrayTextureView(const CudaArrayTextureView&) = delete;
+  CudaArrayTextureView& operator=(const CudaArrayTextureView&) = delete;
+  cudaTextureObject_t GetObj() const { return texture_; }
+
+ private:
+  cudaTextureObject_t texture_ = 0;
+};
+#endif
+
 template <typename T>
 class CudaArrayLayeredTexture {
  public:
@@ -29,6 +49,24 @@ class CudaArrayLayeredTexture {
       const GpuMat<T>& mat,
       cudaStream_t stream);
   void CopyFromGpuMat(const GpuMat<T>& mat, cudaStream_t stream);
+  std::unique_ptr<CudaArrayTextureView> CreateView(
+      const cudaTextureDesc& desc) const {
+    return std::make_unique<CudaArrayTextureView>(array_, desc);
+  }
+  // Input is one fully padded layer, not an entire bank staging allocation.
+  void CopyLayerFromHost(size_t layer, const T* data, cudaStream_t stream) {
+    THROW_CHECK_LT(layer, depth_);
+    owned::ScopedStreamCompletion completion(stream);
+    cudaMemcpy3DParms params{};
+    params.extent = make_cudaExtent(width_, height_, 1);
+    params.dstPos = make_cudaPos(0, 0, layer);
+    params.kind = cudaMemcpyHostToDevice;
+    params.srcPtr = make_cudaPitchedPtr(
+        (void*)data, width_ * sizeof(T), width_, height_);
+    params.dstArray = array_;
+    CUDA_SAFE_CALL(cudaMemcpy3DAsync(&params, stream));
+    completion.Wait();
+  }
   static std::unique_ptr<CudaArrayLayeredTexture<T>> FromHostArray(
       const cudaTextureDesc& texture_desc,
       size_t width, size_t height, size_t depth,

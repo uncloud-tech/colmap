@@ -14,6 +14,17 @@
 namespace colmap {
 namespace {
 
+#if defined(COLMAP_MVS_ENABLED)
+TEST(OptionManager, PatchMatchCoordinateSeed) {
+  OptionManager options;
+  options.AddPatchMatchStereoOptions();
+  EXPECT_EQ(options.patch_match_stereo->random_seed, -1);
+  const char* argv[] = {"colmap", "--PatchMatchStereo.random_seed", "7"};
+  ASSERT_TRUE(options.Parse(3, const_cast<char**>(argv)));
+  EXPECT_EQ(options.patch_match_stereo->random_seed, 7);
+}
+#endif
+
 TEST(OptionManager, Reset) {
   OptionManager options;
   *options.database_path = "/test/path";

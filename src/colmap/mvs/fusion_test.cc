@@ -3,12 +3,29 @@
 #include "colmap/mvs/fusion.h"
 
 #include "colmap/math/math.h"
+#include "colmap/mvs/fusion_mapped_mat.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/sensor/bitmap.h"
 #include "colmap/util/file.h"
+#include "colmap/util/ply.h"
 #include "colmap/util/testing.h"
+#include "colmap/util/threading.h"
 
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
 #include <fstream>
+#include <future>
+#include <iterator>
+#include <sstream>
+#include <stdexcept>
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <cerrno>
+
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 #include <gtest/gtest.h>
 
@@ -16,8 +33,12 @@ namespace colmap {
 namespace mvs {
 namespace {
 
-TEST(StereoFusion, Integration) {
-  const auto temp_dir = CreateTestDir();
+// 28 ten-row tasks, but only 2240 pixels per image.
+constexpr size_t kWidth = 8;
+constexpr size_t kHeight = 280;
+
+std::vector<std::string> CreateFusionWorkspace(
+    const std::filesystem::path& temp_dir) {
   CreateDirIfNotExists(temp_dir / "sparse");
   CreateDirIfNotExists(temp_dir / "images");
   CreateDirIfNotExists(temp_dir / "stereo");
@@ -29,8 +50,8 @@ TEST(StereoFusion, Integration) {
   synthetic_dataset_options.num_rigs = 1;
   synthetic_dataset_options.num_cameras_per_rig = 1;
   synthetic_dataset_options.num_frames_per_rig = 2;
-  synthetic_dataset_options.camera_width = 30;
-  synthetic_dataset_options.camera_height = 20;
+  synthetic_dataset_options.camera_width = kWidth;
+  synthetic_dataset_options.camera_height = kHeight;
   Reconstruction reconstruction;
   SynthesizeDataset(synthetic_dataset_options, &reconstruction);
   reconstruction.Write(temp_dir / "sparse");
@@ -40,33 +61,32 @@ TEST(StereoFusion, Integration) {
   for (const auto& [image_id, image] : reconstruction.Images()) {
     image_names.push_back(image.Name());
 
-    // Create depth map with constant depth.
-    Mat<float> depth_map(synthetic_dataset_options.camera_width,
-                         synthetic_dataset_options.camera_height,
-                         1);
-    depth_map.Fill(5.0f);
+    Mat<float> depth_map(kWidth, kHeight, 1);
+    Mat<float> normal_map(kWidth, kHeight, 3);
+    Bitmap bitmap(kWidth, kHeight, true);
+    for (size_t row = 0; row < kHeight; ++row) {
+      for (size_t col = 0; col < kWidth; ++col) {
+        depth_map.Set(row,
+                      col,
+                      0,
+                      row == 0 && col < 2 ? -static_cast<float>(col)
+                                          : 4.0f + 0.001f * row + 0.01f * col);
+        const Eigen::Vector3f normal =
+            Eigen::Vector3f(0.001f * row, 0.01f * col, 1.0f).normalized();
+        for (size_t channel = 0; channel < 3; ++channel) {
+          normal_map.Set(row, col, channel, normal[channel]);
+        }
+        EXPECT_TRUE(bitmap.SetPixel(
+            col,
+            row,
+            BitmapColor<uint8_t>(row % 251, 32 + col, 128 + row % 97)));
+      }
+    }
     depth_map.Write(temp_dir / "stereo" / "depth_maps" /
                     (image.Name() + ".geometric.bin"));
-
-    // Create normal map pointing in z direction.
-    Mat<float> normal_map(synthetic_dataset_options.camera_width,
-                          synthetic_dataset_options.camera_height,
-                          3);
-    const size_t num_pixels = normal_map.GetHeight() * normal_map.GetWidth();
-    for (size_t i = 0; i < num_pixels; ++i) {
-      normal_map.GetPtr()[3 * i + 0] = 0.0f;  // nx
-      normal_map.GetPtr()[3 * i + 1] = 0.0f;  // ny
-      normal_map.GetPtr()[3 * i + 2] = 1.0f;  // nz
-    }
     normal_map.Write(temp_dir / "stereo" / "normal_maps" /
                      (image.Name() + ".geometric.bin"));
-
-    // Create bitmap.
-    Bitmap bitmap(synthetic_dataset_options.camera_width,
-                  synthetic_dataset_options.camera_height,
-                  true);
-    bitmap.Fill(BitmapColor<uint8_t>(0, 64, 128));
-    bitmap.Write(temp_dir / "images" / image.Name());
+    EXPECT_TRUE(bitmap.Write(temp_dir / "images" / image.Name()));
   }
 
   // Write fusion config
@@ -76,6 +96,25 @@ TEST(StereoFusion, Integration) {
   }
   fusion_cfg.close();
 
+  return image_names;
+}
+
+// Fit one complete image entry (RGB + depth + normal), but not two. The
+// initialization touches both depths and fusion then loads normals/colors,
+// forcing eviction without ever making a single entry exceed the cache cap.
+size_t FusionCacheBytes() {
+  return kWidth * kHeight * 4 * sizeof(float) +
+         Bitmap(kWidth, kHeight, true).NumBytes();
+}
+
+double FusionCacheGiB() {
+  return static_cast<double>(FusionCacheBytes()) / (1024.0 * 1024.0 * 1024.0);
+}
+
+TEST(StereoFusion, Integration) {
+  const auto temp_dir = CreateTestDir();
+  const auto image_names = CreateFusionWorkspace(temp_dir);
+
   // Run fusion
   StereoFusionOptions options;
   options.min_num_pixels = 1;
@@ -83,6 +122,7 @@ TEST(StereoFusion, Integration) {
   options.max_traversal_depth = 10;
   options.check_num_images = 10;
   options.use_cache = false;
+  options.num_threads = 1;
 
   StereoFusion fusion(options, temp_dir, "COLMAP", "", "geometric");
   fusion.Run();
@@ -91,7 +131,7 @@ TEST(StereoFusion, Integration) {
   const auto& fused_points = fusion.GetFusedPoints();
   const auto& visibility = fusion.GetFusedPointsVisibility();
 
-  EXPECT_GT(fused_points.size(), 0);
+  ASSERT_FALSE(fused_points.empty());
   EXPECT_EQ(fused_points.size(), visibility.size());
 
   for (const auto& point : fused_points) {
@@ -101,9 +141,9 @@ TEST(StereoFusion, Integration) {
     EXPECT_LT(point.y, 10.0f);
     EXPECT_GT(point.z, -10.0f);
     EXPECT_LT(point.z, 10.0f);
-    EXPECT_EQ(point.r, 0);
-    EXPECT_EQ(point.g, 64);
-    EXPECT_EQ(point.b, 128);
+    EXPECT_GE(point.g, 32);
+    EXPECT_LT(point.g, 32 + kWidth);
+    EXPECT_GE(point.b, 128);
     EXPECT_FLOAT_EQ(
         point.nx * point.nx + point.ny * point.ny + point.nz * point.nz, 1.0f);
   }
@@ -111,6 +151,93 @@ TEST(StereoFusion, Integration) {
   for (const auto& vis : visibility) {
     EXPECT_GT(vis.size(), 0);
   }
+
+  bool stock_stop_checked = false;
+  StereoFusion cancelled_stock(options, temp_dir, "COLMAP", "", "geometric");
+  cancelled_stock.SetCheckIfStoppedFunc([&stock_stop_checked]() {
+    stock_stop_checked = true;
+    return true;
+  });
+  cancelled_stock.Run();
+  EXPECT_TRUE(stock_stop_checked);
+  EXPECT_TRUE(cancelled_stock.GetFusedPoints().empty());
+
+#if defined(__unix__) || defined(__APPLE__)
+  // Full-resolution serial mapped fusion must preserve every output byte.
+  options.use_mmap = true;
+  StereoFusion mapped(options, temp_dir, "COLMAP", "", "geometric");
+  mapped.Run();
+  ASSERT_EQ(mapped.GetFusedPoints().size(), fused_points.size());
+  EXPECT_EQ(mapped.GetFusedPointsVisibility(), visibility);
+  const auto ReadBytes = [](const std::filesystem::path& path) {
+    std::ifstream stream(path, std::ios::binary);
+    EXPECT_TRUE(stream.is_open()) << path;
+    return std::string(std::istreambuf_iterator<char>(stream),
+                       std::istreambuf_iterator<char>());
+  };
+  WriteBinaryPlyPoints(temp_dir / "stock.ply", fused_points);
+  WriteBinaryPlyPoints(temp_dir / "mapped.ply", mapped.GetFusedPoints());
+  EXPECT_EQ(ReadBytes(temp_dir / "stock.ply"),
+            ReadBytes(temp_dir / "mapped.ply"));
+  WritePointsVisibility(temp_dir / "stock.vis", visibility);
+  WritePointsVisibility(temp_dir / "mapped.vis",
+                        mapped.GetFusedPointsVisibility());
+  EXPECT_EQ(ReadBytes(temp_dir / "stock.vis"),
+            ReadBytes(temp_dir / "mapped.vis"));
+
+  options.use_mmap = false;
+  options.use_cache = true;
+  options.cache_size = FusionCacheGiB();
+  StereoFusion cached(options, temp_dir, "COLMAP", "", "geometric");
+  cached.Run();
+  ASSERT_FALSE(cached.GetFusedPoints().empty());
+  WriteBinaryPlyPoints(temp_dir / "cached.ply", cached.GetFusedPoints());
+  WritePointsVisibility(temp_dir / "cached.vis",
+                        cached.GetFusedPointsVisibility());
+  EXPECT_EQ(ReadBytes(temp_dir / "cached.ply"),
+            ReadBytes(temp_dir / "mapped.ply"));
+  EXPECT_EQ(ReadBytes(temp_dir / "cached.vis"),
+            ReadBytes(temp_dir / "mapped.vis"));
+
+  options.use_cache = false;
+  options.use_mmap = true;
+  options.num_threads = 28;
+  StereoFusion parallel(options, temp_dir, "COLMAP", "", "geometric");
+  parallel.Run();
+  ASSERT_FALSE(parallel.GetFusedPoints().empty());
+  EXPECT_EQ(parallel.GetFusedPoints().size(),
+            parallel.GetFusedPointsVisibility().size());
+  for (const auto& point : parallel.GetFusedPoints()) {
+    EXPECT_TRUE(std::isfinite(point.x));
+    EXPECT_TRUE(std::isfinite(point.y));
+    EXPECT_TRUE(std::isfinite(point.z));
+    EXPECT_TRUE(std::isfinite(point.nx));
+    EXPECT_TRUE(std::isfinite(point.ny));
+    EXPECT_TRUE(std::isfinite(point.nz));
+  }
+
+  // Cancellation at the next image boundary occurs only after row tasks join.
+  int checks = 0;
+  StereoFusion joined(options, temp_dir, "COLMAP", "", "geometric");
+  joined.SetCheckIfStoppedFunc([&checks]() { return ++checks == 5; });
+  joined.Run();
+  EXPECT_EQ(checks, 5);
+  EXPECT_FALSE(joined.GetFusedPoints().empty());
+  joined.SetCheckIfStoppedFunc([]() { return false; });
+  joined.Run();  // Reusing owners must not retain masks or task output.
+  EXPECT_FALSE(joined.GetFusedPoints().empty());
+
+  options.mask_path = temp_dir / "masks";
+  CreateDirIfNotExists(options.mask_path);
+  for (const auto& name : image_names) {
+    Bitmap mask(kWidth, kHeight, false);
+    mask.Fill(BitmapColor<uint8_t>(0));
+    mask.Write(options.mask_path / (name + ".png"));
+  }
+  StereoFusion masked(options, temp_dir, "COLMAP", "", "geometric");
+  masked.Run();
+  EXPECT_TRUE(masked.GetFusedPoints().empty());
+  options.mask_path.clear();
 
   bool stop_checked = false;
   StereoFusion cancelled_fusion(options, temp_dir, "COLMAP", "", "geometric");
@@ -121,6 +248,268 @@ TEST(StereoFusion, Integration) {
   cancelled_fusion.Run();
   EXPECT_TRUE(stop_checked);
   EXPECT_TRUE(cancelled_fusion.GetFusedPoints().empty());
+
+  // Bitmap dimensions are also strict: the mapped path cannot resize RGB.
+  Bitmap small_bitmap(1, 1, true);
+  small_bitmap.Fill(BitmapColor<uint8_t>(0));
+  small_bitmap.Write(temp_dir / "images" / image_names.front());
+  StereoFusion wrong_bitmap(options, temp_dir, "COLMAP", "", "geometric");
+  EXPECT_THROW(wrong_bitmap.Run(), std::exception);
+  Bitmap restored_bitmap(kWidth, kHeight, true);
+  restored_bitmap.Fill(BitmapColor<uint8_t>(0, 64, 128));
+  restored_bitmap.Write(temp_dir / "images" / image_names.front());
+
+  // Dimensions must be rejected, never silently downsized.
+  Mat<float> wrong_size(1, 1, 1);
+  wrong_size.Fill(5.0f);
+  const auto depth_path = temp_dir / "stereo" / "depth_maps" /
+                          (image_names.front() + ".geometric.bin");
+  wrong_size.Write(depth_path);
+  StereoFusion wrong_resolution(options, temp_dir, "COLMAP", "", "geometric");
+  EXPECT_THROW(wrong_resolution.Run(), std::exception);
+  std::ofstream(depth_path, std::ios::binary | std::ios::trunc) << "bad";
+  StereoFusion malformed(options, temp_dir, "COLMAP", "", "geometric");
+  EXPECT_THROW(malformed.Run(), std::exception);
+#else
+  options.use_mmap = true;
+  StereoFusion unsupported(options, temp_dir, "COLMAP", "", "geometric");
+  EXPECT_THROW(unsupported.Run(), std::runtime_error);
+  EXPECT_THROW((FusionMappedMat(temp_dir / "unused", 1, 1, 1)),
+               std::runtime_error);
+#endif
+}
+
+#if defined(__unix__) || defined(__APPLE__)
+TEST(StereoFusion, MappedWorkerFailureDrainsReaders) {
+  const auto path = CreateTestDir() / "depth.bin";
+  Mat<float> depth(8, 280, 1);
+  depth.Fill(4.25f);
+  depth.Write(path);
+  {
+    FusionMappedMat mapped(path, 8, 280, 1);
+    std::promise<void> reader_started;
+    const auto started = reader_started.get_future().share();
+    // Declare the pool last so even exceptional unwinding joins before unmap.
+    ThreadPool pool(2);
+    const auto failed = pool.AddTask([started]() {
+      started.wait();
+      throw std::runtime_error("controlled worker failure");
+    });
+    const auto reader = pool.AddTask([&mapped, &reader_started, failed]() {
+      reader_started.set_value();
+      // This reader remains outstanding until the other worker has thrown.
+      failed.wait();
+      float sum = 0;
+      for (size_t row = 0; row < mapped.GetHeight(); ++row) {
+        for (size_t col = 0; col < mapped.GetWidth(); ++col) {
+          sum += mapped.Get(row, col);
+        }
+      }
+      return sum;
+    });
+    EXPECT_THROW(pool.Wait(), AggregateException);
+    EXPECT_EQ(reader.wait_for(std::chrono::seconds(0)),
+              std::future_status::ready);
+    EXPECT_FLOAT_EQ(reader.get(), 8 * 280 * 4.25f);
+    mapped.VerifyUnchanged();
+    EXPECT_NO_THROW(pool.Wait());
+  }
+  // Removal is only after both pool and mapped owner have been destroyed.
+  EXPECT_TRUE(std::filesystem::remove(path));
+}
+
+// Invoke the real binary: a missing dependency must not produce a receipt
+// (or an output), while the legacy mapped command remains permissive.
+TEST(StereoFusion, CliStrictRequiresEveryConfiguredDependency) {
+  const char* binary = std::getenv("COLMAP_BINARY");
+  if (binary == nullptr || binary[0] == '\0') {
+    GTEST_SKIP() << "Set COLMAP_BINARY to the colmap executable";
+  }
+  ASSERT_TRUE(std::filesystem::is_regular_file(binary));
+  const auto root = CreateTestDir();
+  for (const std::string missing : {"bitmap", "depth", "normal", "none"}) {
+    const auto dir = root / missing;
+    ASSERT_TRUE(std::filesystem::create_directory(dir));
+    const auto names = CreateFusionWorkspace(dir);
+    ASSERT_EQ(names.size(), 2);
+    // Remove the LAST configured input, so a per-image late check alone is
+    // not enough to establish completeness before any processing.
+    if (missing == "bitmap") {
+      ASSERT_TRUE(std::filesystem::remove(dir / "images" / names.back()));
+    } else if (missing != "none") {
+      ASSERT_TRUE(std::filesystem::remove(
+          dir / "stereo" / (missing == "depth" ? "depth_maps" : "normal_maps") /
+          (names.back() + ".geometric.bin")));
+    }
+    for (const bool strict : {true, false}) {
+      const auto output = dir / (strict ? "strict.ply" : "legacy.ply");
+      const auto receipt = dir / "receipt.json";
+      const std::string workspace_arg = dir.string();
+      const std::string output_arg = output.string();
+      const std::string receipt_arg = receipt.string();
+      const pid_t pid = fork();
+      ASSERT_NE(pid, -1);
+      if (pid == 0) {
+        std::vector<std::string> args = {binary,
+                                         "stereo_fusion",
+                                         "--workspace_path",
+                                         workspace_arg,
+                                         "--output_path",
+                                         output_arg,
+                                         "--StereoFusion.use_mmap",
+                                         "true",
+                                         "--StereoFusion.use_cache",
+                                         "false",
+                                         "--StereoFusion.num_threads",
+                                         "1",
+                                         "--StereoFusion.min_num_pixels",
+                                         "1"};
+        if (strict)
+          args.insert(args.end(),
+                      {"--optimized_only",
+                       "true",
+                       "--optimized_dispatch_receipt",
+                       receipt_arg});
+        std::vector<char*> argv;
+        for (auto& arg : args) argv.push_back(arg.data());
+        argv.push_back(nullptr);
+        execv(binary, argv.data());
+        _exit(127);
+      }
+      int status = 0;
+      pid_t waited;
+      do {
+        waited = waitpid(pid, &status, 0);
+      } while (waited == -1 && errno == EINTR);
+      ASSERT_EQ(waited, pid);
+      const bool success = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+      const bool expected_success = !strict || missing == "none";
+      EXPECT_EQ(success, expected_success) << missing << " strict=" << strict;
+      EXPECT_EQ(std::filesystem::exists(output), expected_success);
+      EXPECT_EQ(std::filesystem::exists(receipt), strict && missing == "none");
+      if (strict && missing == "none") {
+        ASSERT_TRUE(std::filesystem::remove(receipt));
+      }
+    }
+    std::filesystem::remove_all(dir);
+  }
+}
+
+TEST(StereoFusion, CliSerialExactness) {
+  // CMake supplies the actual colmap CLI. No PATH lookup or shell is involved.
+  const char* binary = std::getenv("COLMAP_BINARY");
+  if (binary == nullptr || binary[0] == '\0') {
+    GTEST_SKIP() << "Set COLMAP_BINARY to the colmap executable";
+  }
+  ASSERT_TRUE(std::filesystem::is_regular_file(binary));
+  const auto dir = CreateTestDir();
+  CreateFusionWorkspace(dir);
+  for (const std::string mode : {"stock", "cached", "mapped"}) {
+    const auto output = dir / (mode + ".ply");
+    const std::string workspace_arg = dir.string();
+    const std::string output_arg = output.string();
+    std::ostringstream cache_size_stream;
+    cache_size_stream.precision(17);
+    cache_size_stream << FusionCacheGiB();
+    const std::string cache_size_arg = cache_size_stream.str();
+    const pid_t pid = fork();
+    ASSERT_NE(pid, -1);
+    if (pid == 0) {
+      execl(binary,
+            binary,
+            "stereo_fusion",
+            "--workspace_path",
+            workspace_arg.c_str(),
+            "--output_path",
+            output_arg.c_str(),
+            "--StereoFusion.use_mmap",
+            mode == "mapped" ? "1" : "0",
+            "--StereoFusion.use_cache",
+            mode == "cached" ? "1" : "0",
+            "--StereoFusion.cache_size",
+            cache_size_arg.c_str(),
+            "--StereoFusion.num_threads",
+            "1",
+            "--StereoFusion.min_num_pixels",
+            "1",
+            static_cast<char*>(nullptr));
+      _exit(127);
+    }
+    int status = 0;
+    pid_t waited;
+    do {
+      waited = waitpid(pid, &status, 0);
+    } while (waited == -1 && errno == EINTR);
+    ASSERT_EQ(waited, pid);
+    ASSERT_TRUE(WIFEXITED(status));
+    ASSERT_EQ(WEXITSTATUS(status), 0);
+    const auto points = ReadPly(output);
+    ASSERT_FALSE(points.empty());
+    const auto visibility =
+        ReadPointsVisibility(output.string() + ".vis", points.size());
+    ASSERT_EQ(visibility.size(), points.size());
+    for (const auto& vis : visibility) {
+      ASSERT_FALSE(vis.empty());
+    }
+  }
+  for (const std::string suffix : {".ply", ".ply.vis"}) {
+    std::ifstream mapped(dir / ("mapped" + suffix), std::ios::binary);
+    ASSERT_TRUE(mapped.is_open());
+    const std::string mapped_bytes((std::istreambuf_iterator<char>(mapped)),
+                                   {});
+    ASSERT_FALSE(mapped_bytes.empty());
+    for (const std::string mode : {"stock", "cached"}) {
+      std::ifstream stock(dir / (mode + suffix), std::ios::binary);
+      ASSERT_TRUE(stock.is_open());
+      const std::string stock_bytes((std::istreambuf_iterator<char>(stock)),
+                                    {});
+      EXPECT_EQ(stock_bytes, mapped_bytes) << mode << suffix;
+    }
+  }
+}
+#endif
+
+TEST(StereoFusion, StrictPreflightPrecedesDecoding) {
+  const auto dir = CreateTestDir();
+  const auto names = CreateFusionWorkspace(dir);
+  ASSERT_EQ(names.size(), 2);
+  // A decoder would fail on the first configured image. Strict preflight
+  // instead must diagnose the last configured dependency before decoding.
+  std::ofstream(dir / "stereo/depth_maps" / (names.front() + ".geometric.bin"),
+                std::ios::trunc)
+      << "bad";
+  const auto missing =
+      dir / "stereo/normal_maps" / (names.back() + ".geometric.bin");
+  ASSERT_TRUE(std::filesystem::remove(missing));
+  StereoFusionOptions options;
+  options.use_mmap = true;
+  options.num_threads = 1;
+  options.require_complete_inputs = true;
+  StereoFusion fusion(options, dir, "COLMAP", "", "geometric");
+  try {
+    fusion.Run();
+    FAIL() << "Strict fusion accepted missing dependency";
+  } catch (const std::invalid_argument& exc) {
+    EXPECT_NE(std::string(exc.what()).find(missing.string()),
+              std::string::npos);
+  }
+  EXPECT_TRUE(fusion.GetFusedPoints().empty());
+  std::filesystem::remove_all(dir);
+}
+
+TEST(StereoFusion, MappedOptions) {
+  StereoFusionOptions options;
+  EXPECT_FALSE(options.use_mmap);
+  options.use_mmap = true;
+  EXPECT_TRUE(options.Check());
+  options.max_image_size = 100;
+  EXPECT_FALSE(options.Check());
+  options.max_image_size = -1;
+  options.use_cache = true;
+  EXPECT_FALSE(options.Check());
+  options.use_cache = false;
+  StereoFusion fusion(options, "", "PMVS", "", "geometric");
+  EXPECT_THROW(fusion.Run(), std::exception);
 }
 
 TEST(ReadPointsVisibility, RoundTrip) {
