@@ -124,6 +124,14 @@ if(MVS_ENABLED AND CUDA_ENABLED AND NOT HIP_ENABLED)
     )
 endif()
 
+if(MVS_ENABLED)
+    COLMAP_ADD_TEST(
+        NAME mvs_test
+        SRCS mvs_test.cc
+        LINK_LIBS colmap_exe
+    )
+endif()
+
 # CPU-safe refusal tests for the opt-in resident execution backend: the
 # raw-argv fail-closed dispatch guards run before any CUDA availability or
 # stock dispatch, so they run in every MVS build. The actual EXECUTION

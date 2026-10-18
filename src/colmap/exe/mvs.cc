@@ -943,6 +943,21 @@ int RunPoissonMesher(int argc, char** argv) {
   return EXIT_SUCCESS;
 }
 
+namespace {
+
+Reconstruction RunStereoFuserWithMaterialization(
+    const std::filesystem::path& output_path,
+    const std::filesystem::path& workspace_path,
+    std::string workspace_format,
+    const std::string& pmvs_option_name,
+    std::string input_type,
+    const mvs::StereoFusionOptions& options,
+    std::string output_type,
+    std::function<bool()> check_if_stopped,
+    bool materialize_ply);
+
+}  // namespace
+
 int RunStereoFuser(int argc, char** argv) {
   std::filesystem::path workspace_path;
   std::string input_type = "geometric";
@@ -1000,13 +1015,17 @@ int RunStereoFuser(int argc, char** argv) {
   }
 
   options.stereo_fusion->require_complete_inputs = optimized_only;
-  RunStereoFuserImpl(output_path,
-                     workspace_path,
-                     workspace_format,
-                     pmvs_option_name,
-                     input_type,
-                     *options.stereo_fusion,
-                     output_type);
+  // The CLI discards the returned model. PLY/VIS are written directly from
+  // the fuser, so do not duplicate the dense points in a Reconstruction.
+  RunStereoFuserWithMaterialization(output_path,
+                                    workspace_path,
+                                    workspace_format,
+                                    pmvs_option_name,
+                                    input_type,
+                                    *options.stereo_fusion,
+                                    output_type,
+                                    {},
+                                    /*materialize_ply=*/false);
 
   if (optimized_only)
     mvs::PublishOptimizedReceipt(optimized_dispatch_receipt,
@@ -1022,6 +1041,29 @@ Reconstruction RunStereoFuserImpl(const std::filesystem::path& output_path,
                                   const mvs::StereoFusionOptions& options,
                                   std::string output_type,
                                   std::function<bool()> check_if_stopped) {
+  return RunStereoFuserWithMaterialization(output_path,
+                                           workspace_path,
+                                           std::move(workspace_format),
+                                           pmvs_option_name,
+                                           std::move(input_type),
+                                           options,
+                                           std::move(output_type),
+                                           std::move(check_if_stopped),
+                                           /*materialize_ply=*/true);
+}
+
+namespace {
+
+Reconstruction RunStereoFuserWithMaterialization(
+    const std::filesystem::path& output_path,
+    const std::filesystem::path& workspace_path,
+    std::string workspace_format,
+    const std::string& pmvs_option_name,
+    std::string input_type,
+    const mvs::StereoFusionOptions& options,
+    std::string output_type,
+    std::function<bool()> check_if_stopped,
+    bool materialize_ply) {
   StringToLower(&workspace_format);
   THROW_CHECK(workspace_format == "colmap" || workspace_format == "pmvs")
       << "Invalid `workspace_format` " << workspace_format
@@ -1051,13 +1093,16 @@ Reconstruction RunStereoFuserImpl(const std::filesystem::path& output_path,
 
   Reconstruction reconstruction;
 
-  // read data from sparse reconstruction
+  // Keep the post-fusion sparse model read/validation even for CLI PLY. The
+  // public API and BIN/TXT also need its cameras and registered images.
   if (workspace_format == "colmap") {
     reconstruction.Read(workspace_path / "sparse");
   }
 
-  // overwrite sparse point cloud with dense point cloud from fuser
-  reconstruction.ImportPLY(fuser.GetFusedPoints());
+  if (materialize_ply || output_type != "ply") {
+    // Overwrite sparse points only when the model is returned or serialized.
+    reconstruction.ImportPLY(fuser.GetFusedPoints());
+  }
 
   std::filesystem::path write_path = output_path;
   if (stopped) {
@@ -1096,4 +1141,5 @@ Reconstruction RunStereoFuserImpl(const std::filesystem::path& output_path,
   return reconstruction;
 }
 
+}  // namespace
 }  // namespace colmap
