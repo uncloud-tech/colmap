@@ -104,7 +104,7 @@ std::vector<std::string> CreateFusionWorkspace(
 #if defined(__unix__) || defined(__APPLE__)
 // Reuse the workspace writer, but replace random camera geometry and dense
 // maps with a worked example: three two-view components and one singleton.
-// Sparse tracks are retained solely to establish the two-image overlap.
+// An explicit sparse track establishes the two-image overlap.
 std::string CreateCardinalityFusionWorkspace(
     const std::filesystem::path& temp_dir) {
   const auto names = CreateFusionWorkspace(temp_dir);
@@ -118,6 +118,19 @@ std::string CreateCardinalityFusionWorkspace(
     pinhole.model_id = CameraModelId::kPinhole;
     pinhole.params = {8.0, 8.0, 0.5, 0.5};
   }
+  // The reused generator's default calibration is for a much larger image;
+  // its in-frame filtering does not guarantee shared tracks at 8x280. Replace
+  // those observations with a real two-view track under the new calibration.
+  // Model accepts zero triangulation angle at fusion's minimum angle of zero.
+  reconstruction.DeleteAllPoints2DAndPoints3D();
+  Track track;
+  Point2D point2D;
+  point2D.xy = Eigen::Vector2d(2.5, 1.5);
+  for (const auto& [image_id, image] : reconstruction.Images()) {
+    reconstruction.Image(image_id).SetPoints2D(std::vector<Point2D>{point2D});
+    track.AddElement(image_id, 0);
+  }
+  reconstruction.AddPoint3D(Eigen::Vector3d(1.0, 0.5, 4.0), std::move(track));
   reconstruction.Write(temp_dir / "sparse");
 
   for (const auto& name : names) {
