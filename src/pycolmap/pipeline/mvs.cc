@@ -231,6 +231,13 @@ void BindMVS(py::module& m) {
               "use_cache",
               &SFOpts::use_cache,
               "Flag indicating whether to use LRU cache or pre-load all data")
+          .def_readwrite(
+              "use_mmap",
+              &SFOpts::use_mmap,
+              "Opt-in read-only memory mapping of full-resolution COLMAP maps. "
+              "Requires max_image_size=-1 and use_cache=False. "
+              "Input files must remain immutable until fusion returns. "
+              "Only num_threads=1 is qualified for byte-exact stock output.")
           .def_readwrite("cache_size",
                          &SFOpts::cache_size,
                          "Cache size in gigabytes for fusion.")

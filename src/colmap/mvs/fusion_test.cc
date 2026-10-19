@@ -40,25 +40,42 @@ constexpr size_t kWidth = 8;
 constexpr size_t kHeight = 280;
 
 std::vector<std::string> CreateFusionWorkspace(
-    const std::filesystem::path& temp_dir) {
+    const std::filesystem::path& temp_dir, const bool default_quality = false) {
   CreateDirIfNotExists(temp_dir / "sparse");
   CreateDirIfNotExists(temp_dir / "images");
   CreateDirIfNotExists(temp_dir / "stereo");
   CreateDirIfNotExists(temp_dir / "stereo" / "depth_maps");
   CreateDirIfNotExists(temp_dir / "stereo" / "normal_maps");
 
-  // Create synthetic reconstruction with 2 overlapping images.
+  // Retain the two-view diagnostic; default quality needs five observations.
   SyntheticDatasetOptions synthetic_dataset_options;
   synthetic_dataset_options.num_rigs = 1;
   synthetic_dataset_options.num_cameras_per_rig = 1;
-  synthetic_dataset_options.num_frames_per_rig = 2;
+  synthetic_dataset_options.num_frames_per_rig = default_quality ? 5 : 2;
   synthetic_dataset_options.camera_width = kWidth;
   synthetic_dataset_options.camera_height = kHeight;
+  if (default_quality) {
+    synthetic_dataset_options.camera_model_id = CameraModelId::kPinhole;
+    synthetic_dataset_options.camera_params = {
+        100, 100, kWidth / 2.0, kHeight / 2.0};
+  }
   Reconstruction reconstruction;
   SynthesizeDataset(synthetic_dataset_options, &reconstruction);
+  if (default_quality) {
+    for (const auto& [image_id, image] : reconstruction.Images()) {
+      // A fronto-parallel plane at z=4 shifts by exactly one pixel between
+      // adjacent views: f * baseline / depth = 100 * 0.04 / 4 = 1.
+      // Four columns remain visible in all five registered views.
+      reconstruction.Frame(image.FrameId())
+          .SetCamFromWorld(
+              image.CameraId(),
+              Rigid3d(Eigen::Quaterniond::Identity(),
+                      Eigen::Vector3d(0.04 * (image_id - 1), 0, 0)));
+    }
+  }
   reconstruction.Write(temp_dir / "sparse");
 
-  // Create depth maps, normal maps, and consistency graphs for both images.
+  // Create depth maps and normal maps for every image.
   std::vector<std::string> image_names;
   for (const auto& [image_id, image] : reconstruction.Images()) {
     image_names.push_back(image.Name());
@@ -71,10 +88,14 @@ std::vector<std::string> CreateFusionWorkspace(
         depth_map.Set(row,
                       col,
                       0,
-                      row == 0 && col < 2 ? -static_cast<float>(col)
-                                          : 4.0f + 0.001f * row + 0.01f * col);
+                      default_quality ? 4.0f
+                      : row == 0 && col < 2
+                          ? -static_cast<float>(col)
+                          : 4.0f + 0.001f * row + 0.01f * col);
         const Eigen::Vector3f normal =
-            Eigen::Vector3f(0.001f * row, 0.01f * col, 1.0f).normalized();
+            default_quality
+                ? Eigen::Vector3f(0, 0, 1)
+                : Eigen::Vector3f(0.001f * row, 0.01f * col, 1.0f).normalized();
         for (size_t channel = 0; channel < 3; ++channel) {
           normal_map.Set(row, col, channel, normal[channel]);
         }
@@ -250,6 +271,12 @@ TEST(StereoFusion, MappedCardinalityVisibilityAndMerge) {
       }
     }
   }
+}
+
+TEST(StereoFusion, CliSerialExactness) { RunCliSerialExactness(false); }
+
+TEST(StereoFusion, CliSerialDefaultQualityExactness) {
+  RunCliSerialExactness(true);
 }
 #endif
 
@@ -549,15 +576,29 @@ TEST(StereoFusion, CliStrictRequiresEveryConfiguredDependency) {
   }
 }
 
-TEST(StereoFusion, CliSerialExactness) {
+void RunCliSerialExactness(const bool default_quality) {
   // CMake supplies the actual colmap CLI. No PATH lookup or shell is involved.
   const char* binary = std::getenv("COLMAP_BINARY");
   if (binary == nullptr || binary[0] == '\0') {
     GTEST_SKIP() << "Set COLMAP_BINARY to the colmap executable";
   }
   ASSERT_TRUE(std::filesystem::is_regular_file(binary));
+  if (default_quality) {
+    const StereoFusionOptions defaults;
+    ASSERT_EQ(defaults.min_num_pixels, 5);
+    ASSERT_EQ(defaults.max_num_pixels, 10000);
+    ASSERT_EQ(defaults.max_traversal_depth, 100);
+    ASSERT_EQ(defaults.max_reproj_error, 2);
+    ASSERT_EQ(defaults.max_depth_error, 0.01f);
+    ASSERT_EQ(defaults.max_normal_error, 10);
+    ASSERT_EQ(defaults.check_num_images, 50);
+    ASSERT_EQ(defaults.max_image_size, -1);
+  }
   const auto dir = CreateTestDir();
-  CreateFusionWorkspace(dir);
+  const auto image_names = CreateFusionWorkspace(dir, default_quality);
+  ASSERT_EQ(image_names.size(), default_quality ? 5 : 2);
+  // The cap fits one largest entry but cannot retain two, so both fixtures
+  // force eviction while loading multiple images. Do not change stock defaults.
   for (const std::string mode : {"stock", "cached", "mapped"}) {
     const auto output = dir / (mode + ".ply");
     const std::string workspace_arg = dir.string();
@@ -584,8 +625,9 @@ TEST(StereoFusion, CliSerialExactness) {
             cache_size_arg.c_str(),
             "--StereoFusion.num_threads",
             "1",
-            "--StereoFusion.min_num_pixels",
-            "1",
+            // Omit the override entirely for full default-quality coverage.
+            default_quality ? nullptr : "--StereoFusion.min_num_pixels",
+            default_quality ? nullptr : "1",
             static_cast<char*>(nullptr));
       _exit(127);
     }
@@ -603,7 +645,7 @@ TEST(StereoFusion, CliSerialExactness) {
         ReadPointsVisibility(output.string() + ".vis", points.size());
     ASSERT_EQ(visibility.size(), points.size());
     for (const auto& vis : visibility) {
-      ASSERT_FALSE(vis.empty());
+      ASSERT_GE(vis.size(), default_quality ? 5 : 1);
     }
   }
   for (const std::string suffix : {".ply", ".ply.vis"}) {

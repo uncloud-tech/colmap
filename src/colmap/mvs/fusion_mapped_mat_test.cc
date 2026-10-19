@@ -2,7 +2,9 @@
 #include "colmap/mvs/fusion_mapped_mat.h"
 
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <stdexcept>
@@ -18,6 +20,8 @@
 #endif
 
 #ifndef COLMAP_FUSION_MAPPED_MAT_STANDALONE_TEST
+#include "colmap/mvs/mat.h"
+
 #include <gtest/gtest.h>
 #endif
 
@@ -101,6 +105,51 @@ void RunReaderChecks() {
     assigned = std::move(moved);
     Check(assigned.Get(1, 1, 2) == 8.5f);
     assigned.VerifyUnchanged();
+  }
+  {
+    // Include signed infinities and quiet NaNs with distinct signs/payloads
+    // in every planar channel, retaining the deliberately unaligned header.
+    const uint32_t bits[] = {0x7f800000,
+                             0xff800000,
+                             0x7fc00001,
+                             0xffc12345,
+                             0xff800000,
+                             0x7fc54321,
+                             0x7f800000,
+                             0xffc00001,
+                             0x7fc12345,
+                             0xffc54321,
+                             0xff800000,
+                             0x7f800000};
+    {
+      std::ofstream out(file.path, std::ios::binary | std::ios::trunc);
+      out << "2&2&3&";
+      out.write(reinterpret_cast<const char*>(bits), sizeof(bits));
+      out.close();
+      Check(!out.fail());
+    }
+    FusionMappedMat mapped(file.path, 2, 2, 3);
+#ifndef COLMAP_FUSION_MAPPED_MAT_STANDALONE_TEST
+    Mat<float> stock;
+    stock.Read(file.path);
+#endif
+    for (size_t c = 0; c < 3; ++c) {
+      for (size_t r = 0; r < 2; ++r) {
+        for (size_t x = 0; x < 2; ++x) {
+          const float value = mapped.Get(r, x, c);
+          uint32_t actual;
+          std::memcpy(&actual, &value, sizeof(actual));
+          Check(actual == bits[c * 4 + r * 2 + x]);
+#ifndef COLMAP_FUSION_MAPPED_MAT_STANDALONE_TEST
+          const float stock_value = stock.Get(r, x, c);
+          uint32_t stock_bits;
+          std::memcpy(&stock_bits, &stock_value, sizeof(stock_bits));
+          Check(actual == stock_bits);
+#endif
+        }
+      }
+    }
+    mapped.VerifyUnchanged();
   }
   file.Write("2&2&1&", 4);
   Check(FusionMappedMat(file.path, 2, 2, 1).Get(1, 1) == 0.5f);
