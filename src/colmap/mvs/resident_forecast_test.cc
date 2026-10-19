@@ -1016,6 +1016,27 @@ TEST_F(ResidentForecastFixture, LedgerTermsPositive) {
   EXPECT_THROW(VerifyResidentForecastLedgerTerms(wire, 2), std::exception);
 }
 
+TEST_F(ResidentForecastFixture, LedgerTermsExplicitPairBindsCliAndSum) {
+  auto wire = ParseResidentForecast(four_wire_);
+  std::vector<uint64_t> hosts;
+  std::vector<uint64_t> devices;
+  for (const auto& reference : wire.references) {
+    hosts.push_back(reference.private_host_bytes);
+    devices.push_back(reference.private_device_bytes);
+  }
+  ASSERT_GE(hosts.size(), 2u);
+  std::sort(hosts.begin(), hosts.end(), std::greater<uint64_t>());
+  std::sort(devices.begin(), devices.end(), std::greater<uint64_t>());
+  wire.rolling_active_jobs = 2;
+  wire.rolling_host_bytes = hosts[0] + hosts[1];
+  wire.rolling_device_bytes = devices[0] + devices[1];
+  EXPECT_NO_THROW(VerifyResidentForecastLedgerTerms(wire, 2));
+  EXPECT_THROW(VerifyResidentForecastLedgerTerms(wire, 1), std::exception);
+  // A pair declaration cannot carry an N1 max-member reservation.
+  wire.rolling_host_bytes = wire.planner_max_member_host_bytes;
+  EXPECT_THROW(VerifyResidentForecastLedgerTerms(wire, 2), std::exception);
+}
+
 TEST_F(ResidentForecastFixture, LedgerTermsRefuseInconsistentPlanner) {
   auto wire = ParseResidentForecast(four_wire_);
   wire.planner_max_member_host_bytes += 1;

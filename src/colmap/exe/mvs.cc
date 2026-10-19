@@ -590,15 +590,19 @@ int RunPatchMatchStereoWithExecution(
                                    pm.write_consistency_graph,
                                    pm.allow_missing_files,
                                    pm.geom_consistency);
+      mvs::ValidateOptimizedStereoConcurrency(
+          pm.geom_consistency,
+          owned_run_max_concurrent_solvers,
+          !owned_run_forecast_path.empty(),
+          !owned_run_cohort_forecast_path.empty());
       mvs::ValidateOptimizedReceiptPath(optimized_dispatch_receipt);
       if (execution != mvs::PatchMatchExecution::kStock ||
           workspace_format != "COLMAP" || pm.max_image_size != -1 ||
-          pm.num_threads < 1 || owned_run_max_concurrent_solvers != "1" ||
-          !owned_metadata_export_path.empty() ||
+          pm.num_threads < 1 || !owned_metadata_export_path.empty() ||
           !owned_metadata_verify_path.empty() || photo_export_mode)
         throw std::invalid_argument(
             "optimized_only requires native COLMAP, explicit threads, "
-            "concurrency1, execution not metadata");
+            "supported explicit concurrency, execution not metadata");
       if (pm.geom_consistency
               ? photo_run_mode || (owned_run_forecast_path.empty() ==
                                    owned_run_cohort_forecast_path.empty())
@@ -834,13 +838,15 @@ int RunPatchMatchStereoWithExecution(
                                          sha);
       deadline_guard->Check();
       if (optimized_only && result == EXIT_SUCCESS)
-        mvs::PublishOptimizedReceipt(optimized_dispatch_receipt,
-                                     mvs::OptimizedDispatchReceipt(
-                                       "geo", owned_tile_threads,
-                                       options.patch_match_stereo->num_samples,
-                                       true,
-                                       options.patch_match_stereo
-                                           ->owned_tex_lookahead));
+        mvs::PublishOptimizedReceipt(
+            optimized_dispatch_receipt,
+            mvs::OptimizedDispatchReceipt(
+                "geo",
+                owned_tile_threads,
+                options.patch_match_stereo->num_samples,
+                true,
+                options.patch_match_stereo->owned_tex_lookahead,
+                static_cast<int>(limits.max_concurrent_solvers)));
       return result;
 #else
       LOG(ERROR) << "The resident runner requires the dense-stereo "

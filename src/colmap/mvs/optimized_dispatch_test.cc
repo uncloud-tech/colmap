@@ -20,6 +20,31 @@ int main() {
     }
     assert(rejected);
   };
+  // The production CLI uses this exact bounded policy before dispatch.
+  ValidateOptimizedStereoConcurrency(false, "1", false, false);
+  ValidateOptimizedStereoConcurrency(true, "1", true, false);
+  ValidateOptimizedStereoConcurrency(true, "1", false, true);
+  ValidateOptimizedStereoConcurrency(true, "2", true, false);
+  rejects([] { ValidateOptimizedStereoConcurrency(false, "2", false, false); });
+  rejects([] { ValidateOptimizedStereoConcurrency(false, "2", true, false); });
+  rejects([] { ValidateOptimizedStereoConcurrency(true, "2", false, false); });
+  rejects([] { ValidateOptimizedStereoConcurrency(true, "2", false, true); });
+  rejects([] { ValidateOptimizedStereoConcurrency(true, "2", true, true); });
+  for (const auto* unsupported : {"", "0", "3", "02", " 2", "-1", "2x"}) {
+    rejects([&] {
+      ValidateOptimizedStereoConcurrency(true, unsupported, true, false);
+    });
+  }
+  // N2 receipts name the admitted maximum, not observed physical overlap.
+  const auto n2 = OptimizedDispatchReceipt("geo", 32, 7, true, false, 2);
+  assert(n2.find("\"backend\":\"owned_cuda\"") != std::string::npos);
+  assert(n2.find("\"max_concurrent_solvers\":2") != std::string::npos);
+  assert(n2.find("\"lookahead\":false") != std::string::npos);
+  rejects([] { OptimizedDispatchReceipt("photo", 32, 7, true, false, 2); });
+  rejects([] { OptimizedDispatchReceipt("geo", 32, 7, true, false, 3); });
+  rejects([] { OptimizedDispatchReceipt("geo", 8, 7, true, false, 2); });
+  rejects([] { OptimizedDispatchReceipt("geo", 32, 16, true, false, 2); });
+  rejects([] { OptimizedDispatchReceipt("geo", 32, 7, false, false, 2); });
   ValidateOptimizedFusion("COLMAP", true, false, 1, -1);
   rejects([] { ValidateOptimizedFusion("COLMAP", false, false, 1, -1); });
   rejects([] { ValidateOptimizedFusion("COLMAP", true, true, 1, -1); });

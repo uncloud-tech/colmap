@@ -48,6 +48,26 @@ inline void ValidateOptimizedStereo(bool cuda,
   }
 }
 
+// Full-bank resident forecasts bind rolling_active_jobs EXACTLY to the CLI
+// value before any payload allocation. Cohort CLI limits are only ceilings;
+// per-cohort k may be lower, so N2 cohorts need a separate effective-k
+// contract.
+inline void ValidateOptimizedStereoConcurrency(bool geom_consistency,
+                                               const std::string& concurrency,
+                                               bool full_bank_forecast,
+                                               bool cohort_forecast) {
+  if (concurrency == "1") return;
+  if (geom_consistency && concurrency == "2" && full_bank_forecast &&
+      !cohort_forecast) {
+    return;
+  }
+  throw std::invalid_argument(
+      "optimized_only requires PHOTO concurrency1 or GEO concurrency1|2; "
+      "GEO concurrency2 requires one full-bank owned_run_forecast with "
+      "explicit active_jobs=2 and matching budgets; cohort N2 and N>2 "
+      "are unsupported, no fallback");
+}
+
 inline void ValidateOptimizedFusion(const std::string& format,
                                     bool mmap,
                                     bool cache,
@@ -65,7 +85,12 @@ inline std::string OptimizedDispatchReceipt(const std::string& phase,
                                             int selected_tile = 0,
                                             int samples = 0,
                                             bool cuda = false,
-                                            bool lookahead = true) {
+                                            bool lookahead = true,
+                                            int max_concurrent_solvers = 1) {
+  if (max_concurrent_solvers != 1 &&
+      !(phase == "geo" && max_concurrent_solvers == 2)) {
+    throw std::invalid_argument("unsupported effective optimized concurrency");
+  }
   if (phase == "fusion") {
     return "{\"schema_version\":1,\"phase\":\"fusion\",\"backend\":\"cpu\","
            "\"tile\":null,\"cache\":false,\"lookahead\":null,"
@@ -84,6 +109,10 @@ inline std::string OptimizedDispatchReceipt(const std::string& phase,
          "\"lookahead\":" +
          std::string(lookahead ? "true" : "false") +
          ",\"lifetime\":\"preallocated_rotation\","
-         "\"fusion_mode\":null}\n";
+         "\"fusion_mode\":null" +
+         std::string(max_concurrent_solvers == 2
+                         ? ",\"max_concurrent_solvers\":2"
+                         : "") +
+         "}\n";
 }
 }  // namespace colmap::mvs
