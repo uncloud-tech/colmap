@@ -273,11 +273,6 @@ TEST(StereoFusion, MappedCardinalityVisibilityAndMerge) {
   }
 }
 
-TEST(StereoFusion, CliSerialExactness) { RunCliSerialExactness(false); }
-
-TEST(StereoFusion, CliSerialDefaultQualityExactness) {
-  RunCliSerialExactness(true);
-}
 #endif
 
 // Fit one complete image entry (RGB + depth + normal), but not two. The
@@ -662,6 +657,12 @@ void RunCliSerialExactness(const bool default_quality) {
       EXPECT_EQ(stock_bytes, mapped_bytes) << mode << suffix;
     }
   }
+}
+
+TEST(StereoFusion, CliSerialExactness) { RunCliSerialExactness(false); }
+
+TEST(StereoFusion, CliSerialDefaultQualityExactness) {
+  RunCliSerialExactness(true);
 }
 #endif
 
