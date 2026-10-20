@@ -254,7 +254,7 @@ if(CUDA_ENABLED)
             patch_match.h patch_match.cc
             patch_match_cuda.h patch_match_cuda.cu
             patch_match_cuda_owned.h patch_match_cuda_owned.cu
-            owned_prng.h owned_prng_seed.h
+            owned_prng.h owned_prng_seed.h owned_prng_boundary.h
             patch_match_calibration.h
             owned_input_bank.cu
             owned_cuda_execution.h

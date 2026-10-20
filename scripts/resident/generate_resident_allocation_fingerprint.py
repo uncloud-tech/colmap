@@ -107,6 +107,7 @@ CLOSURE = (
     'src/colmap/mvs/gpu_mat_prng.cu',
     'src/colmap/mvs/owned_prng_seed.h',
     'src/colmap/mvs/owned_prng.h',
+    'src/colmap/mvs/owned_prng_boundary.h',
     'src/colmap/mvs/gpu_mat_ref_image.h',
     'src/colmap/mvs/gpu_mat_ref_image.cu',
     'src/colmap/sensor/bitmap.h',

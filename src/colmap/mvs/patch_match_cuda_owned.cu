@@ -1088,7 +1088,7 @@ template <int kWindowSize,
           bool kTexLookahead = false>
 __global__ void SweepFromTopToBottom(const ReferenceCalibration calibration,
     GpuMatView<float> global_workspace,
-    GpuMatView<curandState> rand_state_map,
+    PrngBoundaryView<curandState> rand_state_map,
     GpuMatView<float> cost_map,
     GpuMatView<float> depth_map,
     GpuMatView<float> normal_map,
@@ -1720,7 +1720,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
                        kFilterGeomConsistency, cache, lookahead>     \
       <<<sweep_grid_size_, sweep_block_size_, 0, stream_->Get()>>>(          \
           CurrentCalibration(), global_workspace_->View(),                      \
-          rand_state_map_->View(),                        \
+          SweepPrngView(),                        \
           cost_map_->View(),                              \
           depth_map_->View(),                             \
           normal_map_->View(),                            \
@@ -1836,7 +1836,7 @@ void PatchMatchCuda::InitRefImage() {
   ref_width_ = ref_image.GetWidth();
   ref_height_ = ref_image.GetHeight();
 
-  rotation_layout_ = BuildOwnedScratchRotationLayout(
+  rotation_layout_ = BuildOwnedBoundaryRotationLayout(
       ref_width_, ref_height_, problem_.src_image_idxs.size(),
       options_.filter && options_.num_iterations > 0);
 
@@ -2131,6 +2131,19 @@ __global__ void InitOwnedPrngFromSeed(GpuMatView<curandState> output,
   }
 }
 
+// One writer per canonical perimeter pixel, including degenerate dimensions.
+__global__ void CompactOwnedPrngBoundary(GpuMatView<curandState> input,
+                                       curandState* output,
+                                       PrngBoundaryLayout layout) {
+  const size_t row = blockIdx.y * blockDim.y + threadIdx.y;
+  const size_t col = blockIdx.x * blockDim.x + threadIdx.x;
+  if (row < input.GetHeight() && col < input.GetWidth() &&
+      (row == 0 || col == 0 || row + 1 == input.GetHeight() ||
+       col + 1 == input.GetWidth())) {
+    output[layout.Index(row, col)] = input.Get(row, col);
+  }
+}
+
 __global__ void CopyResidentDepth(cudaTextureObject_t texture, int layer,
                                   GpuMatView<float> output) {
   const size_t col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2169,8 +2182,8 @@ std::unique_ptr<GpuMatPRNG> MakeOwnedPrng(const int width,
 }
 
 void PatchMatchCuda::InitWorkspaceMemory() {
-  rand_state_map_.Set(0, MakeOwnedPrng(
-      ref_width_, ref_height_, stream_->Get(), options_.random_seed));
+  init_rand_state_map_ = MakeOwnedPrng(
+      ref_width_, ref_height_, stream_->Get(), options_.random_seed);
 
   depth_map_.Set(0, std::make_unique<GpuMat<float>>(ref_width_, ref_height_));
   if (options_.geom_consistency) {
@@ -2189,7 +2202,7 @@ void PatchMatchCuda::InitWorkspaceMemory() {
     }
   } else {
     depth_map_->FillWithRandomNumbers(
-        options_.depth_min, options_.depth_max, *rand_state_map_.Current(), stream_->Get());
+        options_.depth_min, options_.depth_max, *init_rand_state_map_, stream_->Get());
   }
 
   normal_map_.Set(0, std::make_unique<GpuMat<float>>(ref_width_, ref_height_, 3));
@@ -2223,17 +2236,27 @@ void PatchMatchCuda::InitWorkspaceMemory() {
                               init_normal_map.GetWidth() * sizeof(float), stream_->Get());
   } else {
     InitNormalMap<<<elem_wise_grid_size_, elem_wise_block_size_, 0, stream_->Get()>>>(
-        CurrentCalibration(), normal_map_->View(), rand_state_map_->View());
+        CurrentCalibration(), normal_map_->View(), init_rand_state_map_->View());
   }
 }
 
 void PatchMatchCuda::InitRotationStorage() {
   static_assert(sizeof(curandState) == 48, "Rotation layout requires XORWOW48");
   const size_t sources = problem_.src_image_idxs.size();
-  // Genuine swapped-shape allocations, even for square images. No additional
-  // initialization: preserve all original work, including overwritten PRNG init.
-  rand_state_map_.Set(1, std::make_unique<GpuMatPRNG>(
-      ref_height_, ref_width_, GpuMatPRNG::UninitializedTag{}));
+  // Keep original full-image initialization (including PHOTO rejection draws)
+  // and compact only AFTER it has completed. Interior states never feed a sweep.
+  const PrngBoundaryLayout boundary(ref_width_, ref_height_);
+  boundary_rand_states_ =
+      std::make_unique<GpuMat<curandState>>(boundary.Count(), 1);
+  {
+    ScopedStreamCompletion completion(stream_->Get());
+    CompactOwnedPrngBoundary<<<elem_wise_grid_size_, elem_wise_block_size_,
+                              0, stream_->Get()>>>(
+        init_rand_state_map_->View(), boundary_rand_states_->GetPtr(), boundary);
+    completion.Wait();
+  }
+  init_rand_state_map_.reset();
+  // Genuine swapped-shape allocations, even for square images.
   depth_map_.Set(1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_));
   normal_map_.Set(1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_, 3));
   ref_image_.Set(1, std::make_unique<GpuMatRefImage>(ref_height_, ref_width_));
@@ -2271,7 +2294,7 @@ void PatchMatchCuda::EmitRotationAllocations() {
   for (const auto& slot : rotation_layout_.slots) {
     const auto p = slot.parity;
     switch (slot.role) {
-      case RotationRole::kPrng: emit(slot, *rand_state_map_.At(p)); break;
+      case RotationRole::kPrng: emit(slot, *boundary_rand_states_); break;
       case RotationRole::kDepth: emit(slot, *depth_map_.At(p)); break;
       case RotationRole::kNormal: emit(slot, *normal_map_.At(p)); break;
       case RotationRole::kRefImage: emit(slot, *ref_image_.At(p)->image); break;
@@ -2291,11 +2314,8 @@ void PatchMatchCuda::EmitRotationAllocations() {
 void PatchMatchCuda::Rotate() {
   rotation_in_half_pi_ = (rotation_in_half_pi_ + 1) % 4;
 
-  // Preserve initialization even though rotation overwrites its result.
-  ReinitializeOwnedPrng(*rand_state_map_.Alternate(),
-                       stream_->Get(), options_.random_seed);
-  rand_state_map_->Rotate(rand_state_map_.Alternate(), stream_->Get());
-  rand_state_map_.Flip();
+  // RNG states stay in canonical perimeter coordinates; only SweepPrngView's
+  // orientation changes. Corners retain updates from both incident boundaries.
 
   depth_map_->Rotate(depth_map_.Alternate(), stream_->Get());
   depth_map_.Flip();

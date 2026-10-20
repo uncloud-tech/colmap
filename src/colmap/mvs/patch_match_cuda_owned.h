@@ -7,6 +7,7 @@
 #include "colmap/mvs/owned_tile.h"
 #include "colmap/mvs/owned_rotation_storage.h"
 #include "colmap/mvs/owned_selection_scratch.h"
+#include "colmap/mvs/owned_prng_boundary.h"
 #include "colmap/mvs/patch_match_calibration.h"
 
 #include "colmap/mvs/cuda_texture.h"
@@ -168,7 +169,15 @@ class PatchMatchCuda {
   }
   OwnedRotationPair<GpuMat<float>> prev_sel_prob_map_;
   OwnedRotationPair<GpuMat<float>> cost_map_;
-  OwnedRotationPair<GpuMatPRNG> rand_state_map_;
+  // Full-image initialization preserves launch seeds and all initialization
+  // draws. Released only after post-init perimeter compaction completes.
+  std::unique_ptr<GpuMatPRNG> init_rand_state_map_;
+  std::unique_ptr<GpuMat<curandState>> boundary_rand_states_;
+  PrngBoundaryView<curandState> SweepPrngView() const {
+    return {boundary_rand_states_->GetPtr(),
+            PrngBoundaryLayout(ref_width_, ref_height_),
+            static_cast<unsigned>(rotation_in_half_pi_)};
+  }
   // Only the final orientation-3 sweep writes this odd-shaped output owner.
   std::unique_ptr<GpuMat<uint8_t>> consistency_mask_;
 

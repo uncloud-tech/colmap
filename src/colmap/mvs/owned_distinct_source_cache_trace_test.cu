@@ -113,12 +113,34 @@ SweepOutput RunSweep(int seed, int sources, bool flat, bool coincident) {
   GpuMat<float> workspace(64, sources, 2);
   GpuMat<uint8_t> mask(kWidth, kHeight, sources);
   auto rng = MakeOwnedPrng(kWidth, kHeight, stream.Get(), seed);
+  // Preserve the initialized XORWOW states, but pass the same compact canonical
+  // boundary view as the solver. Compare every retained state after the sweep.
+  const PrngBoundaryLayout boundary(kWidth, kHeight);
+  GpuMat<curandState> boundary_rng(boundary.Count(), 1);
+  std::vector<curandState> initial_rng(kWidth * kHeight);
+  std::vector<curandState> packed_rng(boundary.Count());
+  {
+    ScopedStreamCompletion completion(stream.Get());
+    rng->CopyToHost(initial_rng.data(), kWidth * sizeof(curandState), stream.Get());
+    completion.Wait();
+  }
+  for (size_t row = 0; row < kHeight; ++row) {
+    for (size_t col = 0; col < kWidth; ++col) {
+      if (row == 0 || col == 0 || row + 1 == kHeight || col + 1 == kWidth) {
+        packed_rng[boundary.Index(row, col)] = initial_rng[row * kWidth + col];
+      }
+    }
+  }
+  const PrngBoundaryView<curandState> rng_view{
+      boundary_rng.GetPtr(), boundary, 0};
   constexpr int kRecords = kWidth * kHeight * (kSamples + 1);
   GpuMat<CacheTraceRecord> trace(kRecords, 1);
   std::vector<CacheTraceRecord> empty(kRecords);
   std::vector<float> normals(kWidth * kHeight * 3, 0);
   std::fill(normals.begin() + kWidth * kHeight * 2, normals.end(), -1.0f);
   ScopedStreamCompletion completion(stream.Get());
+  boundary_rng.CopyToDevice(
+      packed_rng.data(), boundary.Count() * sizeof(curandState), stream.Get());
   depth.FillWithScalar(3.0f, stream.Get());
   normal.CopyToDevice(normals.data(), kWidth * sizeof(float), stream.Get());
   previous.FillWithScalar(0.5f, stream.Get());
@@ -142,7 +164,7 @@ SweepOutput RunSweep(int seed, int sources, bool flat, bool coincident) {
   SweepFromTopToBottom<11, 1, kTile, kGeometry, false, false, kCache,
                        kLookahead>
       <<<grid, kTile, 0, stream.Get()>>>(
-          calibration, workspace.View(), rng->View(), cost.View(), depth.View(),
+          calibration, workspace.View(), rng_view, cost.View(), depth.View(),
           normal.View(), mask.View(), probability.View(), previous.View(),
           reference_texture->GetObj(), reference.sum_image->View(),
           reference.squared_sum_image->View(), source_texture->GetObj(), nullptr,
@@ -153,9 +175,10 @@ SweepOutput RunSweep(int seed, int sources, bool flat, bool coincident) {
   output.depth = depth.CopyToMat(stream.Get());
   output.normal = normal.CopyToMat(stream.Get());
   output.probability = probability.CopyToMat(stream.Get());
-  output.rng.resize(kWidth * kHeight);
+  output.rng.resize(boundary.Count());
   output.trace.resize(kRecords);
-  rng->CopyToHost(output.rng.data(), kWidth * sizeof(curandState), stream.Get());
+  boundary_rng.CopyToHost(
+      output.rng.data(), boundary.Count() * sizeof(curandState), stream.Get());
   trace.CopyToHost(
       output.trace.data(), kRecords * sizeof(CacheTraceRecord), stream.Get());
   completion.Wait();
