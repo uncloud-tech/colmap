@@ -1616,19 +1616,22 @@ Mat<float> PatchMatchCuda::GetSelProbMap() const {
 }
 
 std::vector<int> PatchMatchCuda::GetConsistentImageIdxs() const {
-  // The baseline had an empty placeholder until the last filtered sweep.
-  // Retained but unwritten mask allocations must not become observable data.
+  // No output mask exists when filtering cannot execute. Graph availability
+  // otherwise does not depend on the controller's write_consistency_graph flag.
   if (!options_.filter || options_.num_iterations == 0) return {};
   stream_->Activate();
   const Mat<uint8_t> mask = consistency_mask_->CopyToMat(stream_->Get());
   std::vector<int> consistent_image_idxs;
   std::vector<int> pixel_consistent_image_idxs;
   pixel_consistent_image_idxs.reserve(mask.GetDepth());
-  for (size_t r = 0; r < mask.GetHeight(); ++r) {
-    for (size_t c = 0; c < mask.GetWidth(); ++c) {
+  // The final filtered sweep has orientation 3 (width H, height W).
+  // CudaRotateKernel writes output(y = input_width - 1 - x, x = y).
+  // Read that same canonical output without allocating its device destination.
+  for (size_t r = 0; r < ref_height_; ++r) {
+    for (size_t c = 0; c < ref_width_; ++c) {
       pixel_consistent_image_idxs.clear();
       for (size_t d = 0; d < mask.GetDepth(); ++d) {
-        if (mask.Get(r, c, d)) {
+        if (mask.Get(c, ref_height_ - 1 - r, d)) {
           pixel_consistent_image_idxs.push_back(problem_.src_image_idxs[d]);
         }
       }
@@ -1721,7 +1724,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
           cost_map_->View(),                              \
           depth_map_->View(),                             \
           normal_map_->View(),                            \
-          consistency_mask_->View(),                      \
+          consistency_mask_ ? consistency_mask_->View() : GpuMatView<uint8_t>{}, \
           SelectionView(),                               \
           prev_sel_prob_map_->View(),                     \
           ref_image_texture_->GetObj(),                   \
@@ -1789,11 +1792,6 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 
       Rotate();
 
-      // Rotate selected image map.
-      if (last_sweep && options_.filter) {
-        consistency_mask_.Alternate()->Rotate(consistency_mask_.Current(), stream_->Get());
-      }
-
       sweep_timer.Print(" Sweep " + std::to_string(sweep + 1));
       if (sweep_observer_) {
         sweep_observer_(iter + 1, sweep + 1);
@@ -1839,7 +1837,8 @@ void PatchMatchCuda::InitRefImage() {
   ref_height_ = ref_image.GetHeight();
 
   rotation_layout_ = BuildOwnedScratchRotationLayout(
-      ref_width_, ref_height_, problem_.src_image_idxs.size());
+      ref_width_, ref_height_, problem_.src_image_idxs.size(),
+      options_.filter && options_.num_iterations > 0);
 
   // Upload to device and filter.
   ref_image_.Set(0, std::make_unique<GpuMatRefImage>(ref_width_, ref_height_));
@@ -2240,8 +2239,12 @@ void PatchMatchCuda::InitRotationStorage() {
   ref_image_.Set(1, std::make_unique<GpuMatRefImage>(ref_height_, ref_width_));
   prev_sel_prob_map_.Set(1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_, sources));
   cost_map_.Set(1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_, sources));
-  consistency_mask_.Set(0, std::make_unique<GpuMat<uint8_t>>(ref_width_, ref_height_, sources));
-  consistency_mask_.Set(1, std::make_unique<GpuMat<uint8_t>>(ref_height_, ref_width_, sources));
+  // No device consumer follows the last filtered sweep. Keep its orientation-3
+  // output directly; the host getter reconstructs canonical coordinates.
+  if (options_.filter && options_.num_iterations > 0) {
+    consistency_mask_ =
+        std::make_unique<GpuMat<uint8_t>>(ref_height_, ref_width_, sources);
+  }
 }
 
 void PatchMatchCuda::EmitRotationAllocations() {
@@ -2279,7 +2282,7 @@ void PatchMatchCuda::EmitRotationAllocations() {
         break;
       case RotationRole::kSelectionPrevious: emit(slot, *prev_sel_prob_map_.At(p)); break;
       case RotationRole::kCost: emit(slot, *cost_map_.At(p)); break;
-      case RotationRole::kMask: emit(slot, *consistency_mask_.At(p)); break;
+      case RotationRole::kMask: emit(slot, *consistency_mask_); break;
       case RotationRole::kWorkspace: emit(slot, *global_workspace_); break;
     }
   }
@@ -2317,10 +2320,6 @@ void PatchMatchCuda::Rotate() {
 
   cost_map_->Rotate(cost_map_.Alternate(), stream_->Get());
   cost_map_.Flip();
-
-  // Only parity changes here. The final filtered sweep rotates the mask from
-  // Alternate into Current after all ordinary rotation work, as in the baseline.
-  consistency_mask_.Flip();
 
   // The next launch snapshots the new orientation; no module write.
   ComputeCudaConfig();

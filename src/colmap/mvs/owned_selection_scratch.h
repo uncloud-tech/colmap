@@ -10,13 +10,16 @@ namespace colmap::mvs::owned {
 // qualification.
 inline OwnedRotationLayout BuildOwnedScratchRotationLayout(size_t width,
                                                            size_t height,
-                                                           size_t sources) {
+                                                           size_t sources,
+                                                           bool retain_mask = true) {
   auto layout = BuildOwnedRotationLayout(width, height, sources);
-  for (auto it = layout.slots.begin(); it != layout.slots.end(); ++it) {
-    if (it->role == RotationRole::kSelectionCurrent && it->parity == 1) {
+  for (auto it = layout.slots.begin(); it != layout.slots.end();) {
+    if ((it->role == RotationRole::kSelectionCurrent && it->parity == 1) ||
+        (it->role == RotationRole::kMask && (!retain_mask || it->parity == 0))) {
       layout.logical_bytes -= it->requested_span_bytes;
-      layout.slots.erase(it);
-      break;
+      it = layout.slots.erase(it);
+    } else {
+      ++it;
     }
   }
   return layout;
