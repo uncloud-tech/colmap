@@ -6,6 +6,7 @@
 #include "colmap/mvs/owned_cuda_execution.h"
 #include "colmap/mvs/owned_tile.h"
 #include "colmap/mvs/owned_rotation_storage.h"
+#include "colmap/mvs/owned_selection_scratch.h"
 #include "colmap/mvs/patch_match_calibration.h"
 
 #include "colmap/mvs/cuda_texture.h"
@@ -26,6 +27,20 @@
 namespace colmap {
 namespace mvs {
 namespace owned {
+
+// Device allocation adapter for the CUDA-independent scratch owner. No stream
+// is retained here: PatchMatchCuda fences before members unwind or are destroyed.
+class CudaSelectionStorage {
+ public:
+  explicit CudaSelectionStorage(size_t bytes);
+  ~CudaSelectionStorage();
+  CudaSelectionStorage(const CudaSelectionStorage&) = delete;
+  CudaSelectionStorage& operator=(const CudaSelectionStorage&) = delete;
+  float* GetPtr() { return ptr_; }
+
+ private:
+  float* ptr_ = nullptr;
+};
 
 class PatchMatchCuda {
  public:
@@ -144,7 +159,13 @@ class PatchMatchCuda {
   OwnedRotationPair<GpuMatRefImage> ref_image_;
   OwnedRotationPair<GpuMat<float>> depth_map_;
   OwnedRotationPair<GpuMat<float>> normal_map_;
-  OwnedRotationPair<GpuMat<float>> sel_prob_map_;
+  // Backward messages overwrite every valid lane before any scratch read.
+  // Only the rotated previous probabilities persist across sweeps.
+  std::unique_ptr<OwnedSelectionScratch<CudaSelectionStorage>> sel_prob_map_;
+  GpuMatView<float> SelectionView() const {
+    return sel_prob_map_->View<GpuMatView<float>>(
+        prev_sel_prob_map_.CurrentParity());
+  }
   OwnedRotationPair<GpuMat<float>> prev_sel_prob_map_;
   OwnedRotationPair<GpuMat<float>> cost_map_;
   OwnedRotationPair<GpuMatPRNG> rand_state_map_;

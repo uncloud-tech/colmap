@@ -101,6 +101,7 @@ CLOSURE = (
     'src/colmap/mvs/owned_texture_row_batch.h',
     'src/colmap/mvs/owned_cuda_execution.h',
     'src/colmap/mvs/owned_rotation_storage.h',
+    'src/colmap/mvs/owned_selection_scratch.h',
     'src/colmap/mvs/gpu_mat.h',
     'src/colmap/mvs/gpu_mat_prng.h',
     'src/colmap/mvs/gpu_mat_prng.cu',

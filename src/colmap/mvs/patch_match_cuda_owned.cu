@@ -1550,6 +1550,12 @@ __global__ void SweepFromTopToBottom(const ReferenceCalibration calibration,
 #if defined(COLMAP_OWNED_CACHE_TRACE_TEST)
 }  // namespace
 #else
+CudaSelectionStorage::CudaSelectionStorage(size_t bytes) {
+  CUDA_SAFE_CALL(cudaMalloc(reinterpret_cast<void**>(&ptr_), bytes));
+}
+
+CudaSelectionStorage::~CudaSelectionStorage() { (void)cudaFree(ptr_); }
+
 PatchMatchCuda::PatchMatchCuda(const PatchMatchOptions& options,
                                const PatchMatch::Problem& problem,
                                const int owned_tile_threads)
@@ -1716,7 +1722,7 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
           depth_map_->View(),                             \
           normal_map_->View(),                            \
           consistency_mask_->View(),                      \
-          sel_prob_map_->View(),                          \
+          SelectionView(),                               \
           prev_sel_prob_map_->View(),                     \
           ref_image_texture_->GetObj(),                   \
           ref_image_->sum_image->View(),                  \
@@ -1832,7 +1838,7 @@ void PatchMatchCuda::InitRefImage() {
   ref_width_ = ref_image.GetWidth();
   ref_height_ = ref_image.GetHeight();
 
-  rotation_layout_ = BuildOwnedRotationLayout(
+  rotation_layout_ = BuildOwnedScratchRotationLayout(
       ref_width_, ref_height_, problem_.src_image_idxs.size());
 
   // Upload to device and filter.
@@ -2189,13 +2195,11 @@ void PatchMatchCuda::InitWorkspaceMemory() {
 
   normal_map_.Set(0, std::make_unique<GpuMat<float>>(ref_width_, ref_height_, 3));
 
-  // Note that it is not necessary to keep the selection probability map in
-  // memory for all pixels. Theoretically, it is possible to incorporate
-  // the temporary selection probabilities in the global_workspace_.
-  // However, it is useful to keep the probabilities for the entire image
-  // in memory, so that it can be exported.
-  sel_prob_map_.Set(0, std::make_unique<GpuMat<float>>(
-      ref_width_, ref_height_, problem_.src_image_idxs.size()));
+  // The backward pass writes every pixel/source before the forward pass reads
+  // it, regardless of filtering. Only previous probabilities survive a sweep
+  // and are exported; the current plane can reuse one packed allocation.
+  sel_prob_map_ = std::make_unique<OwnedSelectionScratch<CudaSelectionStorage>>(
+      ref_width_, ref_height_, problem_.src_image_idxs.size());
   prev_sel_prob_map_.Set(0, std::make_unique<GpuMat<float>>(
       ref_width_, ref_height_, problem_.src_image_idxs.size()));
   prev_sel_prob_map_->FillWithScalar(0.5f, stream_->Get());
@@ -2234,7 +2238,6 @@ void PatchMatchCuda::InitRotationStorage() {
   depth_map_.Set(1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_));
   normal_map_.Set(1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_, 3));
   ref_image_.Set(1, std::make_unique<GpuMatRefImage>(ref_height_, ref_width_));
-  sel_prob_map_.Set(1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_, sources));
   prev_sel_prob_map_.Set(1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_, sources));
   cost_map_.Set(1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_, sources));
   consistency_mask_.Set(0, std::make_unique<GpuMat<uint8_t>>(ref_width_, ref_height_, sources));
@@ -2271,7 +2274,9 @@ void PatchMatchCuda::EmitRotationAllocations() {
       case RotationRole::kRefImage: emit(slot, *ref_image_.At(p)->image); break;
       case RotationRole::kRefSum: emit(slot, *ref_image_.At(p)->sum_image); break;
       case RotationRole::kRefSquaredSum: emit(slot, *ref_image_.At(p)->squared_sum_image); break;
-      case RotationRole::kSelectionCurrent: emit(slot, *sel_prob_map_.At(p)); break;
+      case RotationRole::kSelectionCurrent:
+        emit(slot, sel_prob_map_->View<GpuMatView<float>>(0));
+        break;
       case RotationRole::kSelectionPrevious: emit(slot, *prev_sel_prob_map_.At(p)); break;
       case RotationRole::kCost: emit(slot, *cost_map_.At(p)); break;
       case RotationRole::kMask: emit(slot, *consistency_mask_.At(p)); break;
@@ -2304,11 +2309,11 @@ void PatchMatchCuda::Rotate() {
   ref_image_.Flip();
   BindRefImageTexture();
 
-  // Four separate allocations: rotate completed current into alternate previous;
-  // the next sweep overwrites alternate current before reading its contents.
-  sel_prob_map_->Rotate(prev_sel_prob_map_.Alternate(), stream_->Get());
+  // Rotate all scratch slices into a distinct persistent owner and wait for
+  // completion before its packed storage is reinterpreted by the next sweep.
+  // Previous probabilities have not flipped yet and identify the source shape.
+  prev_sel_prob_map_.Alternate()->RotateFrom(SelectionView(), stream_->Get());
   prev_sel_prob_map_.Flip();
-  sel_prob_map_.Flip();
 
   cost_map_->Rotate(cost_map_.Alternate(), stream_->Get());
   cost_map_.Flip();

@@ -259,6 +259,7 @@ if(CUDA_ENABLED)
             owned_input_bank.cu
             owned_cuda_execution.h
             owned_rotation_storage.h
+            owned_selection_scratch.h
             owned_tile.h
             owned_source_cache.h
             owned_texture_row_batch.h

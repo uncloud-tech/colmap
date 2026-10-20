@@ -8,6 +8,7 @@
 #include "colmap/util/logging.h"
 #include "colmap/util/string.h"
 
+#include <climits>
 #include <fstream>
 
 #if !defined(COLMAP_HIP_ENABLED)
@@ -138,6 +139,8 @@ class GpuMat {
                              const GpuMat<curandState>& random_state,
                              cudaStream_t stream);
   void Rotate(GpuMat<T>* output, cudaStream_t stream);
+  // Rotate a disjoint, possibly packed input view into this pitched owner.
+  void RotateFrom(GpuMatView<T> input, cudaStream_t stream);
 #endif
 
   void Read(const std::filesystem::path& path);
@@ -501,6 +504,33 @@ void GpuMat<T>::FillWithRandomNumbers(
   internal::FillWithRandomNumbersKernel<T>
       <<<gridSize_, blockSize_, 0, stream>>>(
           View(), random_state.View(), min_value, max_value);
+  completion.Wait();
+}
+
+template <typename T>
+void GpuMat<T>::RotateFrom(const GpuMatView<T> input,
+                         const cudaStream_t stream) {
+  THROW_CHECK(input.GetPtr() != GetPtr());
+  THROW_CHECK_EQ(input.GetWidth(), GetHeight());
+  THROW_CHECK_EQ(input.GetHeight(), GetWidth());
+  THROW_CHECK_EQ(input.GetDepth(), GetDepth());
+  THROW_CHECK_GT(input.GetWidth(), 0);
+  THROW_CHECK_GT(input.GetHeight(), 0);
+  THROW_CHECK_LE(input.GetWidth(), INT_MAX);
+  THROW_CHECK_LE(input.GetHeight(), INT_MAX);
+  THROW_CHECK_LE(input.GetPitch(), INT_MAX);
+  THROW_CHECK_LE(GetPitch(), INT_MAX);
+  THROW_CHECK_LE(input.GetWidth() * sizeof(T), input.GetPitch());
+  owned::ScopedStreamCompletion completion(stream);
+  for (size_t slice = 0; slice < depth_; ++slice) {
+    CudaRotate(reinterpret_cast<const T*>(
+                   reinterpret_cast<const char*>(input.GetPtr()) +
+                   slice * input.GetPitch() * input.GetHeight()),
+               reinterpret_cast<T*>(reinterpret_cast<char*>(GetPtr()) +
+                                    slice * GetPitch() * GetHeight()),
+               input.GetWidth(), input.GetHeight(), input.GetPitch(),
+               GetPitch(), stream);
+  }
   completion.Wait();
 }
 
