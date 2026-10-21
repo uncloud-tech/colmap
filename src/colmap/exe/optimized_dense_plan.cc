@@ -210,6 +210,8 @@ std::string Produce(const OptimizedDensePlanArguments& args) {
            {"num_samples", Json(args.num_samples)},
            {"dispatch_support",
             dense_plan::DispatchSupportJson(true, args.num_samples)},
+           {"concurrency_support",
+            dense_plan::ConcurrencySupportJson(true, args.num_samples)},
            {"build",
             Json::Object({{"revision", Json(revision)},
                           {"version", Json(GetVersionInfo())},

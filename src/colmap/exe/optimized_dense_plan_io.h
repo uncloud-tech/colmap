@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #pragma once
 
+#include "colmap/mvs/optimized_dispatch.h"
+
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
@@ -127,6 +129,26 @@ class Json {
   }
   std::string bytes_;
 };
+
+// Additive schema-1 metadata. Values are compiled-supported ceilings, not
+// selected defaults, admission, effective dispatch or qualification. N>1 still
+// requires the exact full-bank forecast and runtime resource checks.
+// Unsupported builds/sample specializations have no concurrency capability.
+inline Json ConcurrencySupportJson(bool cuda, int samples) {
+  if (!mvs::OptimizedStereoCacheSupported(cuda, 16, samples) &&
+      !mvs::OptimizedStereoCacheSupported(cuda, 32, samples))
+    return Json();
+  const auto phase = [](bool geo) {
+    return Json::Object(
+        {{"full_bank",
+          Json(mvs::OptimizedStereoMaxConcurrency(geo, true, false))},
+         {"cohort",
+          Json(mvs::OptimizedStereoMaxConcurrency(geo, false, true))}});
+  };
+  return Json::Object({{"status", Json("compiled_supported_not_qualified")},
+                       {"photo", phase(false)},
+                       {"geo", phase(true)}});
+}
 
 // Publish a complete sibling temporary inode with link(2)'s atomic no-replace
 // semantics. No mkdir, no replacing symlinks, no partial destination on error.

@@ -69,6 +69,65 @@ void TestDensePlanOptions() {
   Check(json.find("\"depth_min\":-1") != std::string::npos);
   Check(json.find("\"gpu_index\":\"-1\"") != std::string::npos);
 }
+void TestDensePlanConcurrency() {
+  Check(dense_plan::ConcurrencySupportJson(true, 7).Dump() ==
+        "{\"status\":\"compiled_supported_not_qualified\","
+        "\"photo\":{\"full_bank\":1,\"cohort\":1},"
+        "\"geo\":{\"full_bank\":5,\"cohort\":1}}");
+  for (const auto& [cuda, samples] :
+       std::vector<std::pair<bool, int>>{{false, 7}, {true, 0}, {true, 16}}) {
+    Check(dense_plan::ConcurrencySupportJson(cuda, samples).Dump() == "null");
+  }
+  for (int samples : {1, 15}) {
+    Check(dense_plan::ConcurrencySupportJson(true, samples).Dump() ==
+          dense_plan::ConcurrencySupportJson(true, 7).Dump());
+  }
+
+  // Compare emitted ceilings against actual public dispatch validation, not
+  // against a second copy of the policy helper. The golden above deliberately
+  // makes a future policy expansion an explicit metadata-contract decision.
+  std::vector<std::pair<std::string, dense_plan::Json>> phases;
+  for (bool geo : {false, true}) {
+    std::vector<std::pair<std::string, dense_plan::Json>> modes;
+    for (bool cohort : {false, true}) {
+      int maximum = 0;
+      for (int n = 1; n <= 6; ++n) {
+        bool supported = true;
+        try {
+          mvs::ValidateOptimizedStereoConcurrency(
+              geo, std::to_string(n), !cohort, cohort);
+        } catch (const std::invalid_argument&) {
+          supported = false;
+        }
+        if (supported) {
+          Check(n == maximum + 1);
+          maximum = n;
+          const auto receipt = mvs::OptimizedDispatchReceipt(
+              geo ? "geo" : "photo", 16, 7, true, true, n);
+          if (n == 1)
+            Check(receipt.find("max_concurrent_solvers") == std::string::npos);
+          else
+            Check(receipt.find("\"max_concurrent_solvers\":" +
+                               std::to_string(n)) != std::string::npos);
+        }
+      }
+      modes.emplace_back(cohort ? "cohort" : "full_bank",
+                         dense_plan::Json(maximum));
+    }
+    phases.emplace_back(geo ? "geo" : "photo", dense_plan::Json::Object(modes));
+    Rejects([&] {
+      mvs::ValidateOptimizedStereoConcurrency(geo, "2", false, false);
+    });
+    Rejects(
+        [&] { mvs::ValidateOptimizedStereoConcurrency(geo, "2", true, true); });
+  }
+  Check(dense_plan::ConcurrencySupportJson(true, 7).Dump() ==
+        dense_plan::Json::Object(
+            {{"status", dense_plan::Json("compiled_supported_not_qualified")},
+             {"photo", phases[0].second},
+             {"geo", phases[1].second}})
+            .Dump());
+}
 void TestDensePlanArguments() {
   std::vector<std::string> args = {"colmap",
                                    "--workspace_path",
@@ -205,11 +264,15 @@ int main() {
   colmap::TestDensePlanJson();
   colmap::TestDensePlanArguments();
   colmap::TestDensePlanOptions();
+  colmap::TestDensePlanConcurrency();
   colmap::TestDensePlanExclusiveOutput();
 }
 #else
 TEST(OptimizedDensePlanIO, TypedJson) { colmap::TestDensePlanJson(); }
 TEST(OptimizedDensePlanIO, TypedOptions) { colmap::TestDensePlanOptions(); }
+TEST(OptimizedDensePlanIO, ConcurrencySupport) {
+  colmap::TestDensePlanConcurrency();
+}
 TEST(OptimizedDensePlanIO, ArgumentsAndConfiguredCap) {
   colmap::TestDensePlanArguments();
 }

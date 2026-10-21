@@ -16,6 +16,7 @@
 // covered by the CLI tests.
 #include "colmap/mvs/resident_forecast.h"
 
+#include "colmap/mvs/optimized_dispatch.h"
 #include "colmap/mvs/owned_resident_minima.h"
 #include "colmap/mvs/resident_contract.h"
 #include "colmap/util/logging.h"
@@ -24,10 +25,10 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
-#include <limits>
 #include <exception>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -1035,6 +1036,147 @@ TEST_F(ResidentForecastFixture, LedgerTermsExplicitPairBindsCliAndSum) {
   // A pair declaration cannot carry an N1 max-member reservation.
   wire.rolling_host_bytes = wire.planner_max_member_host_bytes;
   EXPECT_THROW(VerifyResidentForecastLedgerTerms(wire, 2), std::exception);
+}
+
+// Extend the parsed contract with a fifth distinct reference and round-trip
+// the complete declaration through all binding/parameter gates. These are
+// declared CPU bounds, not physical measurements or hardware qualification.
+TEST_F(ResidentForecastFixture, OptimizedN3N4N5BindDistinctTopNAndCaps) {
+  auto contract = ParseOwnedBankContract(four_contract_);
+  auto fifth = contract.problems.back();
+  fifth.reference_image_idx = 4;
+  fifth.reference_name = "synthetic_4.ppm";
+  fifth.output_depth_path = "synthetic/output/4.depth";
+  fifth.output_normal_path = "synthetic/output/4.normal";
+  for (auto& input : fifth.inputs) {
+    if (!input.is_reference) continue;
+    input.image_idx = 4;
+    input.image_name = fifth.reference_name;
+    input.image_path = "synthetic/input/4.image";
+    input.depth_path = "synthetic/input/4.depth";
+    input.normal_path = "synthetic/input/4.normal";
+    input.image_identity.path = input.image_path;
+    input.depth_identity.path = input.depth_path;
+    input.normal_identity.path = input.normal_path;
+  }
+  contract.problems.push_back(fifth);
+  const auto five_contract = SerializeOwnedBankContract(contract);
+  ASSERT_EQ(ParseOwnedBankContract(five_contract).problems.size(), 5u);
+  for (const size_t concurrency : {3u, 4u, 5u}) {
+    SCOPED_TRACE(concurrency);
+    auto wire = ParseResidentForecast(four_wire_, &TestSha256);
+    auto reference = wire.references.back();
+    reference.reference_image_idx = fifth.reference_image_idx;
+    reference.reference_name = fifth.reference_name;
+    reference.input_count = fifth.inputs.size();
+    wire.references.push_back(reference);
+    wire.contract_raw = five_contract;
+    wire.contract_sha256 = TestSha256(five_contract);
+    ASSERT_EQ(wire.references.size(), 5u);
+    // Independent rankings: host top3=2300, top4=2600, all5=2700;
+    // device top3=24000, top4=30000, all5=31000.
+    const uint64_t hosts[] = {900, 600, 300, 800, 100};
+    const uint64_t devices[] = {7000, 9000, 8000, 6000, 1000};
+    for (size_t i = 0; i < 5; ++i) {
+      wire.references[i].private_host_bytes = hosts[i];
+      wire.references[i].private_device_bytes = devices[i];
+    }
+    wire.planner_max_member_host_bytes = 900;
+    wire.planner_max_member_device_bytes = 9000;
+    wire.rolling_active_jobs = concurrency;
+    wire.rolling_host_bytes = concurrency == 3   ? 2300
+                              : concurrency == 4 ? 2600
+                                                 : 2700;
+    wire.rolling_device_bytes = concurrency == 3   ? 24000
+                                : concurrency == 4 ? 30000
+                                                   : 31000;
+    // Parse the COMPLETE N3/N4/N5 declaration, including presence flags, rather
+    // than exercising only a post-parse in-memory mutation.
+    wire = ParseResidentForecast(BuildWire(wire), &TestSha256);
+    ASSERT_TRUE(wire.has_build_allocation_fingerprint);
+    ASSERT_TRUE(wire.has_source_fingerprint);
+    ASSERT_EQ(wire.rolling_active_jobs, concurrency);
+    EXPECT_NO_THROW(ValidateOptimizedStereoConcurrency(
+        true, std::to_string(concurrency), true, false));
+    EXPECT_NO_THROW(
+        VerifyResidentForecastBinding(wire, five_contract, &TestSha256));
+    EXPECT_NO_THROW(VerifyResidentForecastParameters(
+        wire, wire.build_allocation_fingerprint));
+    EXPECT_NO_THROW(VerifyResidentForecastLedgerTerms(wire, concurrency));
+    EXPECT_THROW(VerifyResidentForecastLedgerTerms(wire, concurrency - 1),
+                 std::exception);
+    // Shared bank/process/normal producer charged once, no extra margin.
+    const uint64_t host_cap = concurrency == 3   ? 2147490488ull
+                              : concurrency == 4 ? 2147490788ull
+                                                 : 2147490888ull;
+    const uint64_t device_cap = concurrency == 3   ? 2147513355ull
+                                : concurrency == 4 ? 2147519355ull
+                                                   : 2147520355ull;
+    EXPECT_NO_THROW(VerifyResidentForecastFitsCaps(wire, host_cap, device_cap));
+    EXPECT_THROW(VerifyResidentForecastFitsCaps(wire, host_cap - 1, device_cap),
+                 std::exception);
+    EXPECT_THROW(VerifyResidentForecastFitsCaps(wire, host_cap, device_cap - 1),
+                 std::exception);
+    for (const bool missing_build : {true, false}) {
+      auto absent = wire;
+      if (missing_build)
+        absent.has_build_allocation_fingerprint = false;
+      else
+        absent.has_source_fingerprint = false;
+      EXPECT_THROW(ParseResidentForecast(BuildWire(absent), &TestSha256),
+                   std::exception);
+      EXPECT_THROW(VerifyResidentForecastParameters(
+                       absent, wire.build_allocation_fingerprint),
+                   std::exception);
+    }
+    auto bad = wire;
+    --bad.rolling_host_bytes;
+    EXPECT_THROW(VerifyResidentForecastLedgerTerms(bad, concurrency),
+                 std::exception);
+    bad = wire;
+    --bad.rolling_device_bytes;
+    EXPECT_THROW(VerifyResidentForecastLedgerTerms(bad, concurrency),
+                 std::exception);
+    // Checked top-N addition must reject overflow on either independent
+    // ranking, even if an attacker declares the wrapped reserve.
+    for (const bool host : {true, false}) {
+      bad = wire;
+      if (host) {
+        bad.references[0].private_host_bytes = UINT64_MAX;
+        bad.planner_max_member_host_bytes = UINT64_MAX;
+        bad.rolling_host_bytes = concurrency == 3   ? 1399
+                                 : concurrency == 4 ? 1699
+                                                    : 1799;
+      } else {
+        bad.references[0].private_device_bytes = UINT64_MAX;
+        bad.planner_max_member_device_bytes = UINT64_MAX;
+        bad.rolling_device_bytes = concurrency == 3   ? 16999
+                                   : concurrency == 4 ? 22999
+                                                      : 23999;
+      }
+      bad = ParseResidentForecast(BuildWire(bad), &TestSha256);
+      EXPECT_THROW(VerifyResidentForecastLedgerTerms(bad, concurrency),
+                   std::exception);
+      // Even an unlimited cap cannot make an overflowing aggregate fit.
+      bad = wire;
+      if (host)
+        bad.bank_host_bytes = UINT64_MAX;
+      else
+        bad.bank_device_bytes = UINT64_MAX;
+      bad = ParseResidentForecast(BuildWire(bad), &TestSha256);
+      EXPECT_THROW(VerifyResidentForecastFitsCaps(bad, UINT64_MAX, UINT64_MAX),
+                   std::exception);
+    }
+    // Fewer jobs than N must refuse, not silently clamp effective N.
+    bad = wire;
+    bad.references.resize(concurrency - 1);
+    EXPECT_THROW(VerifyResidentForecastLedgerTerms(bad, concurrency),
+                 std::exception);
+    bad = wire;
+    bad.references[1] = bad.references[0];
+    EXPECT_THROW(VerifyResidentForecastBinding(bad, five_contract, &TestSha256),
+                 std::exception);
+  }
 }
 
 TEST_F(ResidentForecastFixture, LedgerTermsRefuseInconsistentPlanner) {

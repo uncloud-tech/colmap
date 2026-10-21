@@ -10,7 +10,7 @@
 #include "colmap/mvs/owned_pair_run.h"
 #include "colmap/mvs/owned_tile.h"
 #include "colmap/mvs/owned_pair_validation.h"
-#include "colmap/mvs/owned_rotation_storage.h"
+#include "colmap/mvs/owned_resident_minima.h"
 #include "colmap/mvs/patch_match.h"
 #include "colmap/mvs/workspace.h"
 #include "colmap/util/file.h"
@@ -252,10 +252,10 @@ void CheckInputs(const mvs::PatchMatchOptions& options,
   const uint64_t host=pair::CheckedAdd(cache,pair::CheckedAdd(
       pair::CheckedMultiply(2,retained),
       std::max(staging,pair::CheckedMultiply(24,a))));
-  // Persistent pitched layout plus source/pose arrays and both live reference
-  // arrays during rebinding. This logical minimum is NOT a physical bound.
-  uint64_t device=pair::CheckedAdd(pair::BuildOwnedRotationLayout(
-      ref.GetWidth(),ref.GetHeight(),s).logical_bytes,u);
+  // Current-owned initialization/steady envelope, plus private source arrays
+  // and both live reference arrays. Logical only, NOT a physical bound.
+  uint64_t device=pair::CheckedAdd(pair::BuildOwnedRotationMemoryPhases(
+      ref.GetWidth(),ref.GetHeight(),s).peak,u);
   if (options.geom_consistency) {
     device=pair::CheckedAdd(device,pair::CheckedMultiply(4,u));
   }
@@ -278,20 +278,10 @@ void CheckResidentInputs(const mvs::PatchMatch::Problem& problem,
                          pair::ByteCharge charge,
                          bool include_owner_normal = false) {
   const auto& ref = problem.images->at(problem.ref_image_idx);
-  const uint64_t a = pair::CheckedMultiply(ref.GetWidth(), ref.GetHeight());
-  const uint64_t sources = problem.src_image_idxs.size();
-  if (!a || !sources) throw std::invalid_argument("empty resident problem");
-  uint64_t host = pair::CheckedMultiply(24, a);
-  if (include_owner_normal) {
-    host = pair::CheckedAdd(host, pair::CheckedMultiply(12, a));
-  }
-  uint64_t device = pair::BuildOwnedRotationLayout(
-      ref.GetWidth(), ref.GetHeight(), sources).logical_bytes;
-  device = pair::CheckedAdd(device, pair::CheckedMultiply(2, a));
-  // Four pose arrays (688 bytes/source) plus the private int layer mapping.
-  device = pair::CheckedAdd(device, pair::CheckedMultiply(692, sources));
-  device = pair::CheckedAdd(device, 32);
-  if (charge.host < host || charge.device < device)
+  const auto minimum = pair::ResidentPrivateLogicalMinimum(
+      ref.GetWidth(), ref.GetHeight(), problem.src_image_idxs.size(),
+      include_owner_normal);
+  if (charge.host < minimum.host || charge.device < minimum.device)
     throw std::invalid_argument("resident private reservation below logical minimum");
 }
 

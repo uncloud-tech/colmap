@@ -6,6 +6,7 @@
 // stubbed substitute. Registered with the normal CMake test suite.
 #include "colmap/mvs/resident_forecast.h"
 
+#include "colmap/mvs/optimized_dispatch.h"
 #include "colmap/mvs/owned_resident_minima.h"
 #include "colmap/mvs/resident_contract.h"
 #include "colmap/util/logging.h"
@@ -107,12 +108,10 @@ TEST(ResidentPrivateMinima, BoundedAddsOwnerNormalOnce) {
   EXPECT_EQ(bounded.host, eager.host + 12u * 4u * 2u);
   EXPECT_EQ(bounded.device, eager.device);
   EXPECT_EQ(eager.host, 24u * 4u * 2u);
-  // Rotation layout plus 2*area plus the 692-byte-per-source pose arrays
-  // and the 32-byte calibration allowance.
-  EXPECT_EQ(
-      eager.device,
-      owned::BuildOwnedRotationLayout(4, 2, 2).logical_bytes +
-          2u * 8u + 692u * 2u + 32u);
+  // A=8, perimeter=8, S=2: init=97*A+48*8+8*4*S=1224;
+  // steady=92*A+48*8+8*4*S=1184. Include the larger phase,
+  // 2*area, 692 bytes per source and the 32-byte calibration allowance.
+  EXPECT_EQ(eager.device, 1224u + 2u * 8u + 692u * 2u + 32u);
 }
 
 // The minima match the native estimator terms exactly and the margin is
@@ -235,6 +234,132 @@ TEST_F(ResidentForecastNativeTest, ChargeGateAgainstNativeMinima) {
   refused.references[1].private_device_bytes -= 2;
   EXPECT_THROW(VerifyResidentForecastCharges(refused, minima),
                std::exception);
+}
+
+// Five distinct real reference files and native estimator-backed admission
+// charges (no CUDA execution). Raw contract binding is covered separately by
+// OptimizedN3N4N5BindDistinctTopNAndCaps in resident_forecast_test.cc.
+TEST_F(ResidentForecastNativeTest, OptimizedN3N4N5AgainstNativeMinima) {
+  const float K[9] = {10, 0, 2, 0, 10, 1, 0, 0, 1};
+  const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  const float T[3] = {0, 0, 0};
+  std::vector<owned::BankInput> extra_inputs;
+  for (const int idx : {3, 4}) {
+    const auto path = root_ / (std::to_string(idx) + ".png");
+    Bitmap bitmap(4, 2, true);
+    bitmap.Fill(BitmapColor<uint8_t>(30, 90, 150));
+    ASSERT_TRUE(bitmap.Write(path));
+    Image image(path, 4, 2, K, R, T);
+    image.Downsize(2, 2);
+    owned::BankInput input;
+    input.image_idx = idx;
+    input.image = image;
+    input.max_image_size = 2;
+    input.depth_path = root_ / (std::to_string(idx) + ".depth.bin");
+    input.normal_path = root_ / (std::to_string(idx) + ".normal.bin");
+    DepthMap depth(4, 2, 1, 10);
+    depth.Fill(2);
+    depth.Write(input.depth_path);
+    NormalMap normal(4, 2);
+    normal.Fill(0.5f);
+    normal.Write(input.normal_path);
+    extra_inputs.push_back(input);
+  }
+  // Keep the existing two-job fixture untouched; extend locally with new
+  // references and identical immutable input bank membership.
+  auto jobs = jobs_;
+  jobs.resize(5, jobs_[0]);
+  for (size_t i = 0; i < jobs.size(); ++i) {
+    auto& job = jobs[i];
+    job.reference_image_idx = static_cast<int>(i);
+    job.source_image_idxs.clear();
+    for (int source = 0; source < 5; ++source) {
+      if (source != job.reference_image_idx)
+        job.source_image_idxs.push_back(source);
+    }
+    for (const auto& input : extra_inputs) {
+      job.images.push_back(input.image);
+      job.inputs.push_back(input);
+    }
+    ASSERT_EQ(job.source_image_idxs.size(), 4u);
+    ASSERT_EQ(job.inputs.size(), 5u);
+  }
+  const auto minima =
+      ComputeResidentLedgerMinima(jobs, ResidentForecastNormals::kBounded, 2);
+  ASSERT_EQ(minima.private_minima.size(), 5u);
+  ResidentForecastWire wire;
+  wire.qualification = kResidentForecastExecutableQualification;
+  wire.completeness = kResidentForecastComplete;
+  wire.concurrency_basis = kResidentForecastRollingDeclared;
+  wire.mode = "bounded";
+  wire.max_future = 2;
+  wire.image_channels = 3;
+  // This digest is an explicit test identity, not compiled-build qualification.
+  wire.has_build_allocation_fingerprint = true;
+  wire.has_source_fingerprint = true;
+  wire.build_allocation_fingerprint = std::string(64, 'a');
+  wire.source_fingerprint = wire.build_allocation_fingerprint;
+  wire.metadata_source = "explicit_unclassified";
+  wire.unclassified_provenance = "native_test_zero_allowance";
+  wire.bank_host_bytes = minima.bank_host_bytes;
+  wire.bank_device_bytes = minima.bank_device_bytes;
+  wire.normal_owner_bytes = minima.normal_owner_bytes;
+  wire.normal_future_bytes = minima.normal_future_bytes;
+  wire.normal_transient_bytes = minima.normal_transient_bytes;
+  wire.normal_charge_bytes =
+      minima.normal_future_bytes + minima.normal_transient_bytes;
+  wire.process_mode = "once";
+  wire.process_count = 1;
+  wire.process_host_bytes = 2147483648ull;
+  wire.process_device_bytes = 2147483648ull;
+  for (size_t i = 0; i < jobs.size(); ++i) {
+    ResidentForecastReference reference;
+    reference.reference_image_idx = static_cast<int>(i);
+    reference.reference_name = std::to_string(i) + ".png";
+    reference.input_count = 5;
+    reference.private_host_bytes = minima.private_minima[i][0];
+    reference.private_device_bytes = minima.private_minima[i][1];
+    wire.references.push_back(reference);
+  }
+  // All five shapes/source counts are equal; literal multiplicity is the
+  // independent expected top-N reserve. Bank and process are counted once.
+  wire.planner_max_member_host_bytes = wire.references[0].private_host_bytes;
+  wire.planner_max_member_device_bytes =
+      wire.references[0].private_device_bytes;
+  for (const size_t concurrency : {3u, 4u, 5u}) {
+    wire.rolling_active_jobs = concurrency;
+    wire.rolling_host_bytes = concurrency * wire.planner_max_member_host_bytes;
+    wire.rolling_device_bytes =
+        concurrency * wire.planner_max_member_device_bytes;
+    EXPECT_NO_THROW(ValidateOptimizedStereoConcurrency(
+        true, std::to_string(concurrency), true, false));
+    EXPECT_NO_THROW(VerifyResidentForecastParameters(
+        wire, wire.build_allocation_fingerprint));
+    EXPECT_NO_THROW(VerifyResidentForecastLedgerTerms(wire, concurrency));
+    EXPECT_NO_THROW(VerifyResidentForecastCharges(wire, minima));
+    const auto host_cap = wire.bank_host_bytes + wire.process_host_bytes +
+                          wire.normal_charge_bytes + wire.rolling_host_bytes;
+    const auto device_cap = wire.bank_device_bytes + wire.process_device_bytes +
+                            wire.rolling_device_bytes;
+    EXPECT_NO_THROW(VerifyResidentForecastFitsCaps(wire, host_cap, device_cap));
+    EXPECT_THROW(VerifyResidentForecastFitsCaps(wire, host_cap - 1, device_cap),
+                 std::exception);
+    EXPECT_THROW(VerifyResidentForecastFitsCaps(wire, host_cap, device_cap - 1),
+                 std::exception);
+    auto bad = wire;
+    bad.has_build_allocation_fingerprint = false;
+    EXPECT_THROW(VerifyResidentForecastParameters(
+                     bad, wire.build_allocation_fingerprint),
+                 std::exception);
+    bad = wire;
+    bad.has_source_fingerprint = false;
+    EXPECT_THROW(VerifyResidentForecastParameters(
+                     bad, wire.build_allocation_fingerprint),
+                 std::exception);
+    bad = wire;
+    --bad.references[2].private_device_bytes;
+    EXPECT_THROW(VerifyResidentForecastCharges(bad, minima), std::exception);
+  }
 }
 
 }  // namespace

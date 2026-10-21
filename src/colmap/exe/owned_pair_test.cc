@@ -747,7 +747,9 @@ TEST_F(OwnedPairTest, GeometryEnvelopeUsesActualDimensionsAndPhotoIsUnchanged) {
   // q=4+30+33=67, u=2*10*11=220, a=4; do not use reference
   // dimensions or the sum of source pixels in place of padded upload layers.
   const uint64_t q = 67, u = 220, a = 4;
-  const uint64_t rotation = pair::BuildOwnedRotationLayout(2, 2, 2).logical_bytes;
+  // A=4, perimeter=4, S=2: init=97*A+48*4+8*2*S=612;
+  // steady=92*A+48*4+8*2*S=592. Reserve the larger phase.
+  const uint64_t rotation = 612;
   mvs::PatchMatchOptions options;
   options.geom_consistency = true;
   options.cache_size = (17 * q) / 1073741824.0;

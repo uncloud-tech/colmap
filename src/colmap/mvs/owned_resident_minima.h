@@ -3,13 +3,9 @@
 
 // Shared native logical minima for the resident full-bank execution.
 //
-// REVIEW STATUS (Sol 6ada hold, 2026-10-15): the private-minimum and
-// margin formulas below are a DELIBERATE DUPLICATE of the accepted
-// owned-pair driver's CheckResidentInputs/Margin (owned_pair.cc is frozen
-// in this lane). They are NOT one shared implementation yet; convergence
-// happens only at the runner checkpoint if, and only if, byte-identical
-// semantics there are preserved. Until then no single-formula claim is
-// made and the driver's own tests remain the semantics anchor.
+// Shared by current-owned pair, full-bank and cohort admission. The rotation
+// envelope covers initialization compaction AND steady retained allocations;
+// legacy layout APIs for other algorithms remain separate.
 //
 // These are the reviewed lower bounds the resident forecast ledger is
 // validated against. They deliberately state LOGICAL minima (no additional
@@ -21,7 +17,7 @@
 // same expressions. Unknown new source remains unqualified until review.
 
 #include "colmap/mvs/owned_pair_validation.h"
-#include "colmap/mvs/owned_rotation_storage.h"
+#include "colmap/mvs/owned_rotation_memory.h"
 
 #include <cstdint>
 #include <stdexcept>
@@ -52,10 +48,12 @@ struct ResidentPrivateMinimum {
 // result/reference scratch allowance covers a distinct holder, so these are
 // additive and never double counted, and the bounded bank forecast excludes
 // the retained reference normals exactly once (see
-// HostInputBank::EstimateBounded). Device terms: the persistent pitched
-// rotation layout plus source/pose arrays (692 bytes per source incl. the
+// HostInputBank::EstimateBounded). Device terms: the current-owned rotation
+// phase envelope plus source/pose arrays (692 bytes per source including the
 // private int layer mapping), both live reference arrays during rebinding
-// (2 * area), and the retained 32-byte calibration policy allowance.
+// (2 * area), and the retained 32-byte calibration policy allowance. The default
+// retained mask conservatively covers filtered and unfiltered executions;
+// requested spans are not pitched physical allocation guarantees.
 inline ResidentPrivateMinimum ResidentPrivateLogicalMinimum(
     const uint64_t width,
     const uint64_t height,
@@ -70,8 +68,8 @@ inline ResidentPrivateMinimum ResidentPrivateLogicalMinimum(
   if (include_owner_normal) {
     minimum.host = CheckedAdd(minimum.host, CheckedMultiply(12, area));
   }
-  uint64_t device = BuildOwnedRotationLayout(width, height, sources)
-                        .logical_bytes;
+  uint64_t device =
+      BuildOwnedRotationMemoryPhases(width, height, sources).peak;
   device = CheckedAdd(device, CheckedMultiply(2, area));
   device = CheckedAdd(device, CheckedMultiply(692, sources));
   device = CheckedAdd(device, 32);

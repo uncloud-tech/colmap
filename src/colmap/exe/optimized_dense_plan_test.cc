@@ -247,6 +247,10 @@ TEST_P(OptimizedDensePlanNative,
       json.find(
           "\"dispatch_support\":{\"backend\":\"owned_cuda\",\"tiles\":[16,32]"),
       std::string::npos);
+  EXPECT_NE(json.find("\"schema_version\":1"), std::string::npos);
+  EXPECT_NE(json.find("\"concurrency_support\":" +
+                      dense_plan::ConcurrencySupportJson(true, 7).Dump()),
+            std::string::npos);
   EXPECT_NE(json.find("\"cache_size\":2.5"), std::string::npos);
   EXPECT_NE(json.find("\"random_seed\":42"), std::string::npos);
   EXPECT_NE(json.find("\"source_cap\":" + cap), std::string::npos);

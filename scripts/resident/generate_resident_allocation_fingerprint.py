@@ -146,6 +146,7 @@ CLOSURE = (
     'src/colmap/mvs/patch_match_cuda_owned.cu',
     'src/colmap/mvs/resident_contract.h',
     'src/colmap/mvs/resident_contract.cc',
+    'src/colmap/mvs/owned_rotation_memory.h',
     'src/colmap/mvs/owned_resident_minima.h',
     'src/colmap/mvs/resident_forecast.h',
     'src/colmap/mvs/resident_forecast.cc',

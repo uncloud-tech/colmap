@@ -48,24 +48,38 @@ inline void ValidateOptimizedStereo(bool cuda,
   }
 }
 
+// Compiled-supported ceiling only, never resource admission or qualification.
+// Without an exclusive full-bank forecast, both phases remain singleton-only.
+inline int OptimizedStereoMaxConcurrency(bool geom_consistency,
+                                         bool full_bank_forecast,
+                                         bool cohort_forecast) {
+  return geom_consistency && full_bank_forecast && !cohort_forecast ? 5 : 1;
+}
+
 // Full-bank resident forecasts bind rolling_active_jobs EXACTLY to the CLI
 // value before any payload allocation. Cohort CLI limits are only ceilings;
-// per-cohort k may be lower, so N2 cohorts need a separate effective-k
-// contract.
+// per-cohort k may be lower, so concurrent cohorts need a separate effective-k
+// contract. Full-bank N must not exceed the number of distinct references;
+// the forecast gate refuses rather than silently clamping the receipt.
 inline void ValidateOptimizedStereoConcurrency(bool geom_consistency,
                                                const std::string& concurrency,
                                                bool full_bank_forecast,
                                                bool cohort_forecast) {
-  if (concurrency == "1") return;
-  if (geom_consistency && concurrency == "2" && full_bank_forecast &&
-      !cohort_forecast) {
-    return;
+  const int maximum = OptimizedStereoMaxConcurrency(
+      geom_consistency, full_bank_forecast, cohort_forecast);
+  for (int n = 1; n <= maximum; ++n) {
+    if (concurrency == std::to_string(n)) return;
   }
+  const int geo_maximum = OptimizedStereoMaxConcurrency(true, true, false);
+  std::string geo_values = "1";
+  for (int n = 2; n <= geo_maximum; ++n) geo_values += "|" + std::to_string(n);
   throw std::invalid_argument(
-      "optimized_only requires PHOTO concurrency1 or GEO concurrency1|2; "
-      "GEO concurrency2 requires one full-bank owned_run_forecast with "
-      "explicit active_jobs=2 and matching budgets; cohort N2 and N>2 "
-      "are unsupported, no fallback");
+      "optimized_only requires PHOTO concurrency1 or GEO concurrency" +
+      geo_values + "; GEO concurrency2.." + std::to_string(geo_maximum) +
+      " requires one full-bank owned_run_forecast with "
+      "explicit active_jobs equal to concurrency and matching budgets; "
+      "cohort N>1 and N>" +
+      std::to_string(geo_maximum) + " are unsupported, no fallback");
 }
 
 inline void ValidateOptimizedFusion(const std::string& format,
@@ -88,7 +102,9 @@ inline std::string OptimizedDispatchReceipt(const std::string& phase,
                                             bool lookahead = true,
                                             int max_concurrent_solvers = 1) {
   if (max_concurrent_solvers != 1 &&
-      !(phase == "geo" && max_concurrent_solvers == 2)) {
+      !(phase == "geo" && max_concurrent_solvers >= 2 &&
+        max_concurrent_solvers <=
+            OptimizedStereoMaxConcurrency(true, true, false))) {
     throw std::invalid_argument("unsupported effective optimized concurrency");
   }
   if (phase == "fusion") {
@@ -110,9 +126,10 @@ inline std::string OptimizedDispatchReceipt(const std::string& phase,
          std::string(lookahead ? "true" : "false") +
          ",\"lifetime\":\"preallocated_rotation\","
          "\"fusion_mode\":null" +
-         std::string(max_concurrent_solvers == 2
-                         ? ",\"max_concurrent_solvers\":2"
-                         : "") +
+         (max_concurrent_solvers > 1
+              ? ",\"max_concurrent_solvers\":" +
+                    std::to_string(max_concurrent_solvers)
+              : "") +
          "}\n";
 }
 }  // namespace colmap::mvs

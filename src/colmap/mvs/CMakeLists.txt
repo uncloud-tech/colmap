@@ -51,6 +51,7 @@ COLMAP_ADD_LIBRARY(
         owned_cohort.h
         optimized_photo_options.h
         optimized_photo_paths.h
+        owned_rotation_memory.h
         owned_resident_minima.h
         resident_forecast.h resident_forecast.cc resident_forecast_minima.cc
         resident_wire_lexical.h

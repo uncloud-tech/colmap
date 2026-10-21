@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: BSD-3-Clause
-// Standalone CPU seam: g++ -std=c++17 -Isrc optimized_dispatch_test.cc -o
-// /tmp/optimized_dispatch_test
+// Standalone CPU seam: g++ -std=c++17 -pthread -Isrc optimized_dispatch_test.cc
+// -o /tmp/optimized_dispatch_test
 #include "colmap/mvs/optimized_dispatch.h"
 
 #include "colmap/mvs/optimized_receipt.h"
+#include "colmap/mvs/owned_pair_coordinator.h"
 
 #include <cassert>
 #include <fstream>
 #include <functional>
+#include <limits>
+#include <thread>
+#include <vector>
 
 int main() {
   using namespace colmap::mvs;
@@ -30,10 +34,123 @@ int main() {
   rejects([] { ValidateOptimizedStereoConcurrency(true, "2", false, false); });
   rejects([] { ValidateOptimizedStereoConcurrency(true, "2", false, true); });
   rejects([] { ValidateOptimizedStereoConcurrency(true, "2", true, true); });
-  for (const auto* unsupported : {"", "0", "3", "02", " 2", "-1", "2x"}) {
+  for (const auto* concurrency : {"3", "4", "5"}) {
+    ValidateOptimizedStereoConcurrency(true, concurrency, true, false);
+    rejects([&] {
+      ValidateOptimizedStereoConcurrency(false, concurrency, true, false);
+    });
+    rejects([&] {
+      ValidateOptimizedStereoConcurrency(true, concurrency, false, false);
+    });
+    rejects([&] {
+      ValidateOptimizedStereoConcurrency(true, concurrency, false, true);
+    });
+    rejects([&] {
+      ValidateOptimizedStereoConcurrency(true, concurrency, true, true);
+    });
+  }
+  for (const auto* unsupported :
+       {"", "0", "6", "02", "03", "04", "05", " 3", "+4", "4 ", "-1", "2x"}) {
     rejects([&] {
       ValidateOptimizedStereoConcurrency(true, unsupported, true, false);
     });
+  }
+  // Exercise the existing dynamic admission seam at each extended bound. The
+  // owner must complete output/retirement AND join before reusing any credit.
+  for (const size_t concurrency : {3u, 4u, 5u}) {
+    using namespace colmap::mvs::owned;
+    const std::vector<ByteCharge> forecasts(concurrency + 1, {10, 20});
+    PairCoordinator coordinator({2 + concurrency * 10, 3 + concurrency * 20},
+                                {2, 3},
+                                concurrency,
+                                forecasts,
+                                std::chrono::milliseconds(1000));
+    for (size_t job = 0; job < concurrency; ++job) {
+      assert(coordinator.AdmitNext() == job);
+    }
+    assert(coordinator.AdmitNext() == std::numeric_limits<size_t>::max());
+    const auto reserved = coordinator.ReservedBytes();
+    assert(reserved.host == 2 + concurrency * 10);
+    assert(reserved.device == 3 + concurrency * 20);
+    for (size_t job = 0; job <= concurrency; ++job) {
+      coordinator.BeginPreparation(job);
+      coordinator.ReadyAndWait(job);
+      coordinator.SolverDone(job);
+      coordinator.BeginOutput(job);
+      coordinator.EndOutput(job);
+      coordinator.AwaitOutputs(job);
+      coordinator.Retire(job, true);
+      if (job == 0) {
+        // Even proven retirement is not yet a joined owner.
+        assert(coordinator.AdmitNext() == std::numeric_limits<size_t>::max());
+        assert(coordinator.ReservedBytes().host == reserved.host);
+        assert(coordinator.ReservedBytes().device == reserved.device);
+      }
+      coordinator.Joined(job);
+      if (job == 0) assert(coordinator.AdmitNext() == concurrency);
+    }
+    coordinator.Finish();
+    assert(coordinator.ReservedBytes().host == 0);
+    assert(coordinator.ReservedBytes().device == 0);
+  }
+  // Five active owners must all drain and join after cancellation. No new
+  // work or private-credit reuse is allowed between cancellation and join.
+  {
+    using namespace colmap::mvs::owned;
+    PairCoordinator coordinator({52, 103},
+                                {2, 3},
+                                size_t{5},
+                                std::vector<ByteCharge>(6, {10, 20}),
+                                std::chrono::milliseconds(1000));
+    for (size_t job = 0; job < 5; ++job) {
+      assert(coordinator.AdmitNext() == job);
+      coordinator.BeginPreparation(job);
+      coordinator.ReadyAndWait(job);
+    }
+    std::vector<std::thread> owners;
+    for (size_t job = 0; job < 5; ++job) {
+      owners.emplace_back([&, job] {
+        coordinator.CancelAndAwaitCleanup(job, {}, [] {});
+        coordinator.Retire(job);
+      });
+    }
+    for (auto& owner : owners) owner.join();
+    assert(coordinator.ReservedBytes().host == 52);
+    assert(coordinator.ReservedBytes().device == 103);
+    assert(coordinator.AdmitNext() == std::numeric_limits<size_t>::max());
+    for (size_t job = 0; job < 5; ++job) {
+      coordinator.Joined(job);
+      assert(coordinator.ReservedBytes().host == 52 - (job + 1) * 10);
+      assert(coordinator.ReservedBytes().device == 103 - (job + 1) * 20);
+      assert(coordinator.AdmitNext() == std::numeric_limits<size_t>::max());
+    }
+    bool failed = false;
+    try {
+      coordinator.Finish();
+    } catch (const std::runtime_error&) {
+      failed = true;
+    }
+    assert(failed);  // Proven cleanup must not turn cancellation into success.
+    assert(coordinator.ReservedBytes().host == 0);
+    assert(coordinator.ReservedBytes().device == 0);
+  }
+  // N5 admission retains checked process-plus-private charges in both spaces.
+  for (const bool host : {true, false}) {
+    using namespace colmap::mvs::owned;
+    bool overflow = false;
+    try {
+      PairCoordinator coordinator(
+          {UINT64_MAX, UINT64_MAX},
+          {2, 3},
+          size_t{5},
+          std::vector<ByteCharge>(
+              5,
+              host ? ByteCharge{UINT64_MAX, 20} : ByteCharge{10, UINT64_MAX}),
+          std::chrono::milliseconds(1000));
+    } catch (const std::overflow_error&) {
+      overflow = true;
+    }
+    assert(overflow);
   }
   // N2 receipts name the admitted maximum, not observed physical overlap.
   const auto n2 = OptimizedDispatchReceipt("geo", 32, 7, true, false, 2);
@@ -41,7 +158,35 @@ int main() {
   assert(n2.find("\"max_concurrent_solvers\":2") != std::string::npos);
   assert(n2.find("\"lookahead\":false") != std::string::npos);
   rejects([] { OptimizedDispatchReceipt("photo", 32, 7, true, false, 2); });
-  rejects([] { OptimizedDispatchReceipt("geo", 32, 7, true, false, 3); });
+  for (int concurrency : {3, 4, 5}) {
+    assert(OptimizedDispatchReceipt("geo", 32, 7, true, false, concurrency) ==
+           "{\"schema_version\":1,\"phase\":\"geo\",\"backend\":\"owned_cuda\","
+           "\"tile\":32,\"cache\":true,\"lookahead\":false,\"lifetime\":"
+           "\"preallocated_rotation\",\"fusion_mode\":null,"
+           "\"max_concurrent_solvers\":" +
+               std::to_string(concurrency) + "}\n");
+    rejects([&] {
+      OptimizedDispatchReceipt("photo", 32, 7, true, false, concurrency);
+    });
+    rejects([&] {
+      OptimizedDispatchReceipt("fusion", 0, 0, false, false, concurrency);
+    });
+  }
+  for (int unsupported : {-1, 0, 6}) {
+    rejects([&] {
+      OptimizedDispatchReceipt("geo", 32, 7, true, false, unsupported);
+    });
+  }
+  // Keep the existing N1/N2 schema and bytes unchanged.
+  assert(OptimizedDispatchReceipt("geo", 32, 7, true, false, 1) ==
+         "{\"schema_version\":1,\"phase\":\"geo\",\"backend\":\"owned_cuda\","
+         "\"tile\":32,\"cache\":true,\"lookahead\":false,\"lifetime\":"
+         "\"preallocated_rotation\",\"fusion_mode\":null}\n");
+  assert(n2 ==
+         "{\"schema_version\":1,\"phase\":\"geo\",\"backend\":\"owned_cuda\","
+         "\"tile\":32,\"cache\":true,\"lookahead\":false,\"lifetime\":"
+         "\"preallocated_rotation\",\"fusion_mode\":null,"
+         "\"max_concurrent_solvers\":2}\n");
   rejects([] { OptimizedDispatchReceipt("geo", 8, 7, true, false, 2); });
   rejects([] { OptimizedDispatchReceipt("geo", 32, 16, true, false, 2); });
   rejects([] { OptimizedDispatchReceipt("geo", 32, 7, false, false, 2); });
