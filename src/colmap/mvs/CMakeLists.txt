@@ -111,7 +111,7 @@ COLMAP_ADD_TEST(
 COLMAP_ADD_TEST(
     NAME fusion_test
     SRCS fusion_test.cc
-    LINK_LIBS colmap_mvs
+    LINK_LIBS colmap_mvs colmap_controllers
 )
 if(TESTS_ENABLED AND TARGET colmap_main)
     add_dependencies(colmap_mvs_fusion_test colmap_main)

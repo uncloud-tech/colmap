@@ -6,6 +6,9 @@
 #include "colmap/controllers/incremental_pipeline.h"
 #include "colmap/feature/sift.h"
 #include "colmap/mvs/patch_match_options.h"
+#if defined(COLMAP_MVS_ENABLED)
+#include "colmap/mvs/fusion.h"
+#endif
 #include "colmap/util/file.h"
 #include "colmap/util/testing.h"
 
@@ -15,6 +18,55 @@ namespace colmap {
 namespace {
 
 #if defined(COLMAP_MVS_ENABLED)
+TEST(OptionManager, ResizingQualityPresetsRetainLegacyFusion) {
+  struct Preset {
+    void (OptionManager::*modify)();
+    int max_image_size;
+    int check_num_images;
+  };
+  for (const auto& preset :
+       {Preset{&OptionManager::ModifyForLowQuality, 1000, 25},
+        Preset{&OptionManager::ModifyForMediumQuality, 1600, 33},
+        Preset{&OptionManager::ModifyForHighQuality, 2400, 50}}) {
+    SCOPED_TRACE(preset.max_image_size);
+    OptionManager options;
+    (options.*preset.modify)();
+    const auto& fusion = *options.stereo_fusion;
+    EXPECT_FALSE(fusion.use_mmap);
+    EXPECT_EQ(fusion.max_image_size, preset.max_image_size);
+    EXPECT_EQ(fusion.check_num_images, preset.check_num_images);
+    EXPECT_EQ(fusion.num_threads, -1);
+    EXPECT_EQ(fusion.min_num_pixels, 5);
+    EXPECT_EQ(fusion.max_num_pixels, 10000);
+    EXPECT_EQ(fusion.max_traversal_depth, 100);
+    EXPECT_EQ(fusion.max_reproj_error, 2.0);
+    EXPECT_EQ(fusion.max_depth_error, 0.01f);
+    EXPECT_EQ(fusion.max_normal_error, 10.0);
+    EXPECT_TRUE(fusion.Check());
+    EXPECT_NO_THROW(mvs::StereoFusion(fusion, "", "COLMAP", "", "geometric"));
+
+    // Explicit incompatible requests still refuse; no runtime fallback.
+    auto mapped = fusion;
+    mapped.use_mmap = true;
+    EXPECT_FALSE(mapped.Check());
+    EXPECT_THROW(mvs::StereoFusion(mapped, "", "COLMAP", "", "geometric"),
+                 std::exception);
+  }
+}
+
+TEST(OptionManager, ExplicitFullResolutionMappedFusion) {
+  OptionManager options;
+  options.AddStereoFusionOptions();
+  const char* argv[] = {"colmap", "--StereoFusion.use_mmap", "1"};
+  ASSERT_TRUE(options.Parse(3, const_cast<char**>(argv)));
+  EXPECT_TRUE(options.stereo_fusion->use_mmap);
+  EXPECT_EQ(options.stereo_fusion->max_image_size, -1);
+  EXPECT_EQ(options.stereo_fusion->num_threads, -1);
+  EXPECT_TRUE(options.stereo_fusion->Check());
+  EXPECT_NO_THROW(
+      mvs::StereoFusion(*options.stereo_fusion, "", "COLMAP", "", "geometric"));
+}
+
 TEST(OptionManager, PatchMatchCoordinateSeed) {
   OptionManager options;
   options.AddPatchMatchStereoOptions();

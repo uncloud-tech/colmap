@@ -2,6 +2,7 @@
 
 #include "colmap/mvs/fusion.h"
 
+#include "colmap/controllers/option_manager.h"
 #include "colmap/math/math.h"
 #include "colmap/mvs/fusion_mapped_mat.h"
 #include "colmap/scene/synthetic.h"
@@ -298,6 +299,7 @@ TEST(StereoFusion, Integration) {
   options.max_traversal_depth = 10;
   options.check_num_images = 10;
   options.use_cache = false;
+  options.use_mmap = false;
   options.num_threads = 1;
 
   StereoFusion fusion(options, temp_dir, "COLMAP", "", "geometric");
@@ -594,7 +596,7 @@ void RunCliSerialExactness(const bool default_quality) {
   ASSERT_EQ(image_names.size(), default_quality ? 5 : 2);
   // The cap fits one largest entry but cannot retain two, so both fixtures
   // force eviction while loading multiple images. Do not change stock defaults.
-  for (const std::string mode : {"stock", "cached", "mapped"}) {
+  for (const std::string mode : {"stock", "cached", "mapped", "default"}) {
     const auto output = dir / (mode + ".ply");
     const std::string workspace_arg = dir.string();
     const std::string output_arg = output.string();
@@ -605,6 +607,24 @@ void RunCliSerialExactness(const bool default_quality) {
     const pid_t pid = fork();
     ASSERT_NE(pid, -1);
     if (pid == 0) {
+      if (mode == "default") {
+        // Exercise omitted backend flags with the same qualified serial
+        // schedule and numerical options as the explicit mapped and legacy
+        // controls.
+        execl(binary,
+              binary,
+              "stereo_fusion",
+              "--workspace_path",
+              workspace_arg.c_str(),
+              "--output_path",
+              output_arg.c_str(),
+              "--StereoFusion.num_threads",
+              "1",
+              default_quality ? nullptr : "--StereoFusion.min_num_pixels",
+              default_quality ? nullptr : "1",
+              static_cast<char*>(nullptr));
+        _exit(127);
+      }
       execl(binary,
             binary,
             "stereo_fusion",
@@ -649,7 +669,7 @@ void RunCliSerialExactness(const bool default_quality) {
     const std::string mapped_bytes((std::istreambuf_iterator<char>(mapped)),
                                    {});
     ASSERT_FALSE(mapped_bytes.empty());
-    for (const std::string mode : {"stock", "cached"}) {
+    for (const std::string mode : {"stock", "cached", "default"}) {
       std::ifstream stock(dir / (mode + suffix), std::ios::binary);
       ASSERT_TRUE(stock.is_open());
       const std::string stock_bytes((std::istreambuf_iterator<char>(stock)),
@@ -665,6 +685,92 @@ TEST(StereoFusion, CliSerialDefaultQualityExactness) {
   RunCliSerialExactness(true);
 }
 #endif
+
+#if defined(__unix__) || defined(__APPLE__)
+TEST(StereoFusion, DefaultBackendSerialDefaultQualityExactness) {
+  const auto dir = CreateTestDir();
+  CreateFusionWorkspace(dir, true);
+  StereoFusionOptions options;
+  // Keep the qualified serial schedule explicit: the default thread count is
+  // intentionally unchanged and parallel fusion is not claimed byte-exact.
+  options.num_threads = 1;
+  const auto Run = [&](const std::string& name) {
+    StereoFusion fusion(options, dir, "COLMAP", "", "geometric");
+    fusion.Run();
+    EXPECT_FALSE(fusion.GetFusedPoints().empty());
+    WriteBinaryPlyPoints(dir / (name + ".ply"), fusion.GetFusedPoints());
+    WritePointsVisibility(dir / (name + ".vis"),
+                          fusion.GetFusedPointsVisibility());
+  };
+  Run("default");
+  options.use_mmap = true;
+  Run("mapped");
+  options.use_mmap = false;
+  Run("legacy");
+  for (const std::string suffix : {".ply", ".vis"}) {
+    const auto ReadBytes = [&](const std::string& name) {
+      std::ifstream stream(dir / (name + suffix), std::ios::binary);
+      EXPECT_TRUE(stream.is_open());
+      return std::string(std::istreambuf_iterator<char>(stream), {});
+    };
+    const auto default_bytes = ReadBytes("default");
+    EXPECT_FALSE(default_bytes.empty());
+    EXPECT_EQ(default_bytes, ReadBytes("mapped"));
+    EXPECT_EQ(default_bytes, ReadBytes("legacy"));
+  }
+}
+#endif
+
+TEST(StereoFusion, ResizingQualityPresetsRunWithLegacyBytes) {
+  const auto dir = CreateTestDir();
+  CreateFusionWorkspace(dir, true);
+  struct Preset {
+    void (OptionManager::*modify)();
+    int max_image_size;
+    int check_num_images;
+  };
+  for (const auto& preset :
+       {Preset{&OptionManager::ModifyForLowQuality, 1000, 25},
+        Preset{&OptionManager::ModifyForMediumQuality, 1600, 33},
+        Preset{&OptionManager::ModifyForHighQuality, 2400, 50}}) {
+    SCOPED_TRACE(preset.max_image_size);
+    OptionManager manager;
+    (manager.*preset.modify)();
+    auto options = *manager.stereo_fusion;
+    ASSERT_FALSE(options.use_mmap);
+    ASSERT_EQ(options.num_threads, -1);
+    // Serial is required only for byte comparison, not for preset admission.
+    options.num_threads = 1;
+    const auto Run = [&](const StereoFusionOptions& run_options,
+                         const std::string& name) {
+      StereoFusion fusion(run_options, dir, "COLMAP", "", "geometric");
+      fusion.Run();
+      EXPECT_FALSE(fusion.GetFusedPoints().empty());
+      WriteBinaryPlyPoints(dir / (name + ".ply"), fusion.GetFusedPoints());
+      WritePointsVisibility(dir / (name + ".vis"),
+                            fusion.GetFusedPointsVisibility());
+    };
+    Run(options, "preset");
+
+    // Independent legacy control retains the pre-mapped-default preset values.
+    StereoFusionOptions legacy;
+    legacy.use_mmap = false;
+    legacy.num_threads = 1;
+    legacy.max_image_size = preset.max_image_size;
+    legacy.check_num_images = preset.check_num_images;
+    Run(legacy, "legacy");
+    for (const std::string suffix : {".ply", ".vis"}) {
+      const auto ReadBytes = [&](const std::string& name) {
+        std::ifstream stream(dir / (name + suffix), std::ios::binary);
+        EXPECT_TRUE(stream.is_open());
+        return std::string(std::istreambuf_iterator<char>(stream), {});
+      };
+      const auto preset_bytes = ReadBytes("preset");
+      EXPECT_FALSE(preset_bytes.empty());
+      EXPECT_EQ(preset_bytes, ReadBytes("legacy"));
+    }
+  }
+}
 
 TEST(StereoFusion, StrictPreflightPrecedesDecoding) {
   const auto dir = CreateTestDir();
@@ -696,7 +802,15 @@ TEST(StereoFusion, StrictPreflightPrecedesDecoding) {
 
 TEST(StereoFusion, MappedOptions) {
   StereoFusionOptions options;
+#if defined(__unix__) || defined(__APPLE__)
+  EXPECT_TRUE(options.use_mmap);
+#else
   EXPECT_FALSE(options.use_mmap);
+#endif
+  EXPECT_EQ(options.num_threads, -1);
+  EXPECT_EQ(options.max_image_size, -1);
+  EXPECT_FALSE(options.use_cache);
+  EXPECT_TRUE(options.Check());
   options.use_mmap = true;
   EXPECT_TRUE(options.Check());
   options.max_image_size = 100;
@@ -707,6 +821,12 @@ TEST(StereoFusion, MappedOptions) {
   options.use_cache = false;
   StereoFusion fusion(options, "", "PMVS", "", "geometric");
   EXPECT_THROW(fusion.Run(), std::exception);
+
+  // Legacy/cache/resize remain explicit controls, not silent fallback.
+  options.use_mmap = false;
+  options.max_image_size = 100;
+  options.use_cache = true;
+  EXPECT_TRUE(options.Check());
 }
 
 TEST(ReadPointsVisibility, RoundTrip) {

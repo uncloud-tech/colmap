@@ -146,6 +146,8 @@ void OptionManager::ModifyForLowQuality() {
   patch_match_stereo->geom_consistency = false;
   stereo_fusion->check_num_images /= 2;
   stereo_fusion->max_image_size = 1000;
+  // Resizing requires the legacy fusion backend.
+  stereo_fusion->use_mmap = false;
 #endif
 }
 
@@ -172,6 +174,8 @@ void OptionManager::ModifyForMediumQuality() {
   patch_match_stereo->geom_consistency = false;
   stereo_fusion->check_num_images /= 1.5;
   stereo_fusion->max_image_size = 1600;
+  // Resizing requires the legacy fusion backend.
+  stereo_fusion->use_mmap = false;
 #endif
 }
 
@@ -188,6 +192,8 @@ void OptionManager::ModifyForHighQuality() {
 #if defined(COLMAP_MVS_ENABLED)
   patch_match_stereo->max_image_size = 2400;
   stereo_fusion->max_image_size = 2400;
+  // Resizing requires the legacy fusion backend.
+  stereo_fusion->use_mmap = false;
 #endif
 }
 

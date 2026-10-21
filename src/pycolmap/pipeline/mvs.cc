@@ -227,16 +227,18 @@ void BindMVS(py::module& m) {
                          &SFOpts::check_num_images,
                          "Number of overlapping images to transitively check "
                          "for fusing points.")
-          .def_readwrite(
-              "use_cache",
-              &SFOpts::use_cache,
-              "Flag indicating whether to use LRU cache or pre-load all data")
+          .def_readwrite("use_cache",
+                         &SFOpts::use_cache,
+                         "Use the legacy LRU cache (requires use_mmap=False).")
           .def_readwrite(
               "use_mmap",
               &SFOpts::use_mmap,
-              "Opt-in read-only memory mapping of full-resolution COLMAP maps. "
-              "Requires max_image_size=-1 and use_cache=False. "
-              "Input files must remain immutable until fusion returns. "
+              "Read-only full-resolution float32 COLMAP maps; default on "
+              "POSIX. "
+              "Requires immutable inputs, max_image_size=-1 and "
+              "use_cache=False. "
+              "Disable explicitly for legacy preloading, cache, resize or "
+              "PMVS. "
               "Only num_threads=1 is qualified for byte-exact stock output.")
           .def_readwrite("cache_size",
                          &SFOpts::cache_size,

@@ -50,13 +50,20 @@ struct StereoFusionOptions {
   // Number of overlapping images to transitively check for fusing points.
   int check_num_images = 50;
 
-  // Flag indicating whether to use LRU cache or pre-load all data
+  // Use the legacy LRU cache (requires use_mmap=false).
   bool use_cache = false;
 
   // Read-only full-resolution COLMAP maps; decode RGB serially once.
   // Input files must remain immutable until Run returns. Incompatible with
-  // cache. Only num_threads=1 is qualified for byte-exact stock output.
+  // cache, resizing, or PMVS. Only num_threads=1 is qualified for byte-exact
+  // stock output; the default thread count remains unchanged. Unsupported
+  // settings refuse rather than silently change backend or quality. Explicitly
+  // disable for legacy preloading/cache/resize/PMVS controls.
+#if defined(__unix__) || defined(__APPLE__)
+  bool use_mmap = true;
+#else
   bool use_mmap = false;
+#endif
 
   // Fail before processing if any configured bitmap/depth/normal is missing.
   // Set by strict optimized dispatch; legacy callers remain permissive.
