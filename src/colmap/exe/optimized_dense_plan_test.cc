@@ -6,6 +6,7 @@
 #include "colmap/util/testing.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -22,6 +23,7 @@
 #define COLMAP_DENSE_PLAN_NATIVE_TEST
 #include "colmap/exe/mvs.h"
 #include "colmap/mvs/patch_match.h"
+#include "colmap/mvs/optimized_photo_runner.h"
 #include "colmap/mvs/resident_contract.h"
 #include "colmap/sensor/bitmap.h"
 #include "colmap/util/logging.h"
@@ -168,6 +170,170 @@ TEST(OptimizedDensePlan, RealStrictStereoCliPreservesPhaseAwareFilter) {
       check(tile, true, lookahead, "GEO filter=true");
     }
   }
+}
+
+// Explicit opt-in because the surrounding native suite also runs on CPU build
+// hosts. No dispatch mocks: each successful arm runs the real stereo CLI/CUDA
+// solver and writes native depth/normal maps.
+TEST(OptimizedPhotoExecution, RealCliV2V3N1IdentityAndN2Interleaving) {
+  if (std::getenv("COLMAP_PHOTO_EXECUTION_TEST_GPU") == nullptr)
+    GTEST_SKIP() << "set COLMAP_PHOTO_EXECUTION_TEST_GPU=1 on a CUDA executor";
+  namespace fs = std::filesystem;
+  const auto root = CreateTestDir();
+  fs::create_directories(root / "sparse");
+  fs::create_directories(root / "images");
+  fs::create_directories(root / "stereo/depth_maps");
+  fs::create_directories(root / "stereo/normal_maps");
+  Write(root / "sparse/cameras.txt", "1 PINHOLE 16 12 10 10 8 6\n");
+  Write(root / "sparse/images.txt",
+        "1 1 0 0 0 0 0 0 1 a.png\n0 0 1\n"
+        "2 1 0 0 0 -1 0 0 1 b.png\n0 0 1\n"
+        "3 1 0 0 0 -2 0 0 1 c.png\n0 0 1\n");
+  Write(root / "sparse/points3D.txt", "1 0 0 5 128 128 128 0 1 0 2 0 3 0\n");
+  for (const char* name : {"a.png", "b.png", "c.png"}) {
+    Bitmap bitmap(16, 12, true);
+    bitmap.Fill(BitmapColor<uint8_t>(128));
+    ASSERT_TRUE(bitmap.Write(root / "images" / name));
+  }
+  const auto c0 = root / "a.cfg", c1 = root / "b.cfg";
+  Write(c0, "a.png\nb.png, c.png\n");
+  Write(c1, "b.png\na.png, c.png\n");
+  mvs::PatchMatchOptions options;
+  options.geom_consistency = false;
+  options.filter = false;
+  options.gpu_index = "0";
+  options.num_threads = 1;
+  options.num_samples = 2;
+  options.num_iterations = 1;
+  options.random_seed = 0;
+  options.depth_min = 0.1;
+  options.depth_max = 10;
+  options.cache_size = 0.001;
+  options.owned_distinct_source_cache = true;
+  options.owned_tex_lookahead = false;
+  Write(root / "all.cfg",
+        "a.png\nb.png, c.png\nb.png\na.png, c.png\nc.png\na.png, b.png\n");
+  mvs::PatchMatchController metadata(options,
+                                     root,
+                                     "COLMAP",
+                                     "option-all",
+                                     root / "all.cfg",
+                                     mvs::PatchMatchExecution::kStock);
+  const auto graph = metadata.ResolveDensePlanGraph();
+  const auto v2 = [&](const fs::path& config, size_t job) {
+    const auto& resolved = graph.photo.at(job);
+    std::string order = std::to_string(resolved.reference_image_idx) + " " +
+                        std::to_string(resolved.source_image_idxs.size());
+    for (const auto idx : resolved.source_image_idxs)
+      order += " " + std::to_string(idx);
+    std::string wire =
+        "COLMAP_OPTIMIZED_PHOTO_V2\n" +
+        ComputeSHA256(mvs::OptimizedPhotoOptions(options, root, config)) +
+        "\n16777216 16777216 16777216 16777216\n" + order + "\n7\n";
+    for (const auto& path : {config,
+                             root / "sparse/cameras.txt",
+                             root / "sparse/images.txt",
+                             root / "sparse/points3D.txt",
+                             root / "images/a.png",
+                             root / "images/b.png",
+                             root / "images/c.png"})
+      wire += ComputeSHA256(mvs::ReadOptimizedBytes(path)) + " " +
+              mvs::owned::Hex(fs::canonical(path).string()) + "\n";
+    return wire;
+  };
+  const auto w0 = v2(c0, 0), w1 = v2(c1, 1);
+  const auto v3 = [&](int k, int n, bool two) {
+    return "COLMAP_OPTIMIZED_PHOTO_V3\n" + std::to_string(k) + " " +
+           std::to_string(n) + (two ? " 2\n" : " 1\n") +
+           mvs::owned::Hex(c0.string()) + "\n" + mvs::owned::Hex(w0) + "\n" +
+           (two ? mvs::owned::Hex(c1.string()) + "\n" + mvs::owned::Hex(w1) +
+                      "\n"
+                : "");
+  };
+  int attempt = 0;
+  const auto run = [&](const std::string& wire, int n) {
+    const auto forecast = root / "launch";
+    Write(forecast, wire);
+    const auto receipt = root / ("receipt" + std::to_string(attempt++));
+    std::vector<std::string> args = {
+        "colmap",
+        "--workspace_path",
+        root.string(),
+        "--config_path",
+        c0.string(),
+        "--optimized_only",
+        "true",
+        "--owned_photo_forecast",
+        forecast.string(),
+        "--optimized_dispatch_receipt",
+        receipt.string(),
+        "--owned_run_max_concurrent_solvers",
+        std::to_string(n),
+        "--owned_run_host_budget_bytes",
+        "1073741824",
+        "--owned_run_device_budget_bytes",
+        "1073741824",
+        "--owned_run_timeout_seconds",
+        "60",
+        "--PatchMatchStereo.gpu_index",
+        "0",
+        "--PatchMatchStereo.num_threads",
+        "1",
+        "--PatchMatchStereo.geom_consistency",
+        "false",
+        "--PatchMatchStereo.filter",
+        "false",
+        "--PatchMatchStereo.num_samples",
+        "2",
+        "--PatchMatchStereo.num_iterations",
+        "1",
+        "--PatchMatchStereo.random_seed",
+        "0",
+        "--PatchMatchStereo.depth_min",
+        "0.1",
+        "--PatchMatchStereo.depth_max",
+        "10",
+        "--PatchMatchStereo.cache_size",
+        "0.001",
+        "--PatchMatchStereo.owned_distinct_source_cache",
+        "true",
+        "--PatchMatchStereo.owned_tex_lookahead",
+        "false"};
+    std::vector<char*> argv;
+    for (auto& arg : args) argv.push_back(arg.data());
+    const int result = RunPatchMatchStereoWithExecution(
+        argv.size(), argv.data(), mvs::PatchMatchExecution::kStock);
+    return std::make_pair(result, receipt);
+  };
+  EXPECT_NE(run(v3(1, 2, true), 2).first, 0);   // N > supplied k.
+  EXPECT_NE(run(v3(2, 2, false), 2).first, 0);  // N > job count.
+  EXPECT_NE(run(v3(2, 2, true), 1).first, 0);   // Exact CLI N binding.
+  const auto legacy = run(w0, 1);
+  ASSERT_EQ(legacy.first, 0);
+  const auto depth = root / "stereo/depth_maps/a.png.photometric.bin";
+  const auto normal = root / "stereo/normal_maps/a.png.photometric.bin";
+  const auto d0 = mvs::ReadOptimizedBytes(depth),
+             n0 = mvs::ReadOptimizedBytes(normal);
+  fs::remove(depth);
+  fs::remove(normal);
+  const auto single = run(v3(2, 1, false), 1);
+  ASSERT_EQ(single.first, 0);
+  EXPECT_EQ(d0, mvs::ReadOptimizedBytes(depth));
+  EXPECT_EQ(n0, mvs::ReadOptimizedBytes(normal));
+  EXPECT_EQ(mvs::ReadOptimizedBytes(legacy.second),
+            mvs::ReadOptimizedBytes(single.second));
+  fs::remove(depth);
+  fs::remove(normal);
+  const auto pair = run(v3(2, 2, true), 2);
+  ASSERT_EQ(pair.first, 0);
+  EXPECT_EQ(d0, mvs::ReadOptimizedBytes(depth));
+  EXPECT_EQ(n0, mvs::ReadOptimizedBytes(normal));
+  EXPECT_TRUE(
+      fs::is_regular_file(root / "stereo/depth_maps/b.png.photometric.bin"));
+  const auto receipt = mvs::ReadOptimizedBytes(pair.second);
+  EXPECT_NE(receipt.find("\"rolling_active_jobs\":2"), std::string::npos);
+  EXPECT_NE(receipt.find("\"max_concurrent_solvers\":2"), std::string::npos);
+  EXPECT_NE(receipt.find("\"owner_intervals\":[{"), std::string::npos);
 }
 
 // No solver, maps, or device calls: real controller + command graph fixture.

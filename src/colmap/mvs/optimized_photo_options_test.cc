@@ -30,6 +30,15 @@ int main() {
   assert(bytes.find("opt_string gpu_index 5 302c310a32\n") !=
          std::string::npos);
   assert(bytes == OptimizedPhotoOptions(options, root / ".", config));
+  // Preserve the accepted default V1 wire; only opt-in execution adds bindings.
+  assert(bytes.find("owned_cuda_graphs") == std::string::npos);
+  assert(bytes.find("owned_async_pool") == std::string::npos);
+  auto graph = options;
+  graph.owned_cuda_graphs = true;
+  const auto graph_bytes = OptimizedPhotoOptions(graph, root, config);
+  assert(graph_bytes != bytes);
+  assert(graph_bytes.find("opt_bool owned_cuda_graphs 1\n") !=
+         std::string::npos);
   // Every invocation option must affect the actual production binding.
   const std::function<void(PatchMatchOptions&)> changes[] = {
       [](auto& o) { ++o.max_image_size; },
@@ -42,6 +51,8 @@ int main() {
       [](auto& o) { ++o.sigma_spatial; },
       [](auto& o) { ++o.sigma_color; },
       [](auto& o) { ++o.num_samples; },
+      [](auto& o) { o.owned_cuda_graphs = true; },
+      [](auto& o) { o.owned_async_pool = true; },
       [](auto& o) {
         o.owned_distinct_source_cache = !o.owned_distinct_source_cache;
       },

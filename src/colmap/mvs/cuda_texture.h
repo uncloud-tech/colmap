@@ -48,7 +48,10 @@ class CudaArrayLayeredTexture {
       const cudaTextureDesc& texture_desc,
       const GpuMat<T>& mat,
       cudaStream_t stream);
-  void CopyFromGpuMat(const GpuMat<T>& mat, cudaStream_t stream);
+  // wait=false requires both owners to survive the enclosing stream drain.
+  void CopyFromGpuMat(const GpuMat<T>& mat,
+                      cudaStream_t stream,
+                      bool wait = true);
   std::unique_ptr<CudaArrayTextureView> CreateView(
       const cudaTextureDesc& desc) const {
     return std::make_unique<CudaArrayTextureView>(array_, desc);
@@ -160,8 +163,9 @@ CudaArrayLayeredTexture<T>::FromGpuMat(const cudaTextureDesc& texture_desc,
 }
 
 template <typename T>
-void CudaArrayLayeredTexture<T>::CopyFromGpuMat(
-    const GpuMat<T>& mat, const cudaStream_t stream) {
+void CudaArrayLayeredTexture<T>::CopyFromGpuMat(const GpuMat<T>& mat,
+                                                const cudaStream_t stream,
+                                                bool wait) {
   THROW_CHECK_EQ(mat.GetWidth(), width_);
   THROW_CHECK_EQ(mat.GetHeight(), height_);
   THROW_CHECK_EQ(mat.GetDepth(), depth_);
@@ -173,7 +177,7 @@ void CudaArrayLayeredTexture<T>::CopyFromGpuMat(
       (void*)mat.GetPtr(), mat.GetPitch(), mat.GetWidth(), mat.GetHeight());
   params.dstArray = array_;
   CUDA_SAFE_CALL(cudaMemcpy3DAsync(&params, stream));
-  completion.Wait();
+  completion.Wait(wait);
 }
 
 template <typename T>

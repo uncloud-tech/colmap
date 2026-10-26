@@ -13,6 +13,7 @@
 
 #if !defined(COLMAP_HIP_ENABLED)
 #include "colmap/mvs/owned_cuda_execution.h"
+#include "colmap/mvs/owned_async_pool.h"
 #endif
 
 #if defined(__CUDACC__) || defined(__HIPCC__)
@@ -129,18 +130,21 @@ class GpuMat {
   void Rotate(GpuMat<T>* output);
 
 #if !defined(COLMAP_HIP_ENABLED)
-  // Explicit-stream overloads preserve the original blocking host lifetimes.
+  GpuMat(size_t width, size_t height, size_t depth, owned::AsyncPool& pool);
+  // Explicit-stream overloads block by default. For fill/rotation only,
+  // wait=false requires all buffers to outlive the enclosing owner-stream
+  // drain.
   void CopyToDevice(const T* data, size_t pitch, cudaStream_t stream);
   void CopyToHost(T* data, size_t pitch, cudaStream_t stream) const;
   Mat<T> CopyToMat(cudaStream_t stream) const;
-  void FillWithScalar(T value, cudaStream_t stream);
+  void FillWithScalar(T value, cudaStream_t stream, bool wait = true);
   void FillWithRandomNumbers(T min_value,
                              T max_value,
                              const GpuMat<curandState>& random_state,
                              cudaStream_t stream);
-  void Rotate(GpuMat<T>* output, cudaStream_t stream);
+  void Rotate(GpuMat<T>* output, cudaStream_t stream, bool wait = true);
   // Rotate a disjoint, possibly packed input view into this pitched owner.
-  void RotateFrom(GpuMatView<T> input, cudaStream_t stream);
+  void RotateFrom(GpuMatView<T> input, cudaStream_t stream, bool wait = true);
 #endif
 
   void Read(const std::filesystem::path& path);
@@ -153,6 +157,9 @@ class GpuMat {
   const static size_t kBlockDimX = 32;
   const static size_t kBlockDimY = 16;
 
+#if !defined(COLMAP_HIP_ENABLED)
+  owned::AsyncPool* async_pool_ = nullptr;
+#endif
   T* array_ptr_;
 
   size_t pitch_;
@@ -182,10 +189,39 @@ GpuMat<T>::GpuMat(const size_t width, const size_t height, const size_t depth)
   ComputeCudaConfig();
 }
 
+#if !defined(COLMAP_HIP_ENABLED)
+template <typename T>
+GpuMat<T>::GpuMat(size_t width,
+                  size_t height,
+                  size_t depth,
+                  owned::AsyncPool& pool)
+    : async_pool_(&pool),
+      array_ptr_(nullptr),
+      width_(width),
+      height_(height),
+      depth_(depth) {
+  const auto max = std::numeric_limits<size_t>::max();
+  if (width > max / sizeof(T) || (depth && height > max / depth)) {
+    throw std::overflow_error("GpuMat dimensions overflow");
+  }
+  array_ptr_ = static_cast<T*>(
+      pool.Allocate(width * sizeof(T), height * depth, &pitch_));
+  ComputeCudaConfig();
+}
+#endif
+
 template <typename T>
 GpuMat<T>::~GpuMat() {
   // Errors during destruction would be invisible to callers anyway; explicitly
   // discard the return value so HIP's [[nodiscard]] cudaFree does not warn.
+#if !defined(COLMAP_HIP_ENABLED) && CUDART_VERSION >= 11020
+  if (async_pool_) {
+    if (cudaFreeAsync(array_ptr_, async_pool_->Stream()) != cudaSuccess) {
+      std::terminate();
+    }
+    return;
+  }
+#endif
   (void)cudaFree(array_ptr_);
 }
 
@@ -487,11 +523,13 @@ void GpuMat<T>::Rotate(GpuMat<T>* output) {
 
 #if !defined(COLMAP_HIP_ENABLED)
 template <typename T>
-void GpuMat<T>::FillWithScalar(const T value, const cudaStream_t stream) {
+void GpuMat<T>::FillWithScalar(const T value,
+                               const cudaStream_t stream,
+                               bool wait) {
   owned::ScopedStreamCompletion completion(stream);
   internal::FillWithScalarKernel<T><<<gridSize_, blockSize_, 0, stream>>>(
       View(), value);
-  completion.Wait();
+  completion.Wait(wait);
 }
 
 template <typename T>
@@ -509,7 +547,8 @@ void GpuMat<T>::FillWithRandomNumbers(
 
 template <typename T>
 void GpuMat<T>::RotateFrom(const GpuMatView<T> input,
-                         const cudaStream_t stream) {
+                           const cudaStream_t stream,
+                           bool wait) {
   THROW_CHECK(input.GetPtr() != GetPtr());
   THROW_CHECK_EQ(input.GetWidth(), GetHeight());
   THROW_CHECK_EQ(input.GetHeight(), GetWidth());
@@ -531,11 +570,13 @@ void GpuMat<T>::RotateFrom(const GpuMatView<T> input,
                input.GetWidth(), input.GetHeight(), input.GetPitch(),
                GetPitch(), stream);
   }
-  completion.Wait();
+  completion.Wait(wait);
 }
 
 template <typename T>
-void GpuMat<T>::Rotate(GpuMat<T>* output, const cudaStream_t stream) {
+void GpuMat<T>::Rotate(GpuMat<T>* output,
+                       const cudaStream_t stream,
+                       bool wait) {
   owned::ScopedStreamCompletion completion(stream);
   for (size_t slice = 0; slice < depth_; ++slice) {
     CudaRotate((T*)((char*)array_ptr_ + slice * pitch_ * GetHeight()),
@@ -543,7 +584,7 @@ void GpuMat<T>::Rotate(GpuMat<T>* output, const cudaStream_t stream) {
                     slice * output->pitch_ * output->GetHeight()),
                width_, height_, pitch_, output->pitch_, stream);
   }
-  completion.Wait();
+  completion.Wait(wait);
 }
 #endif  // !defined(COLMAP_HIP_ENABLED)
 

@@ -14,21 +14,28 @@
 #include "colmap/util/threading.h"
 #endif
 
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace colmap {
 namespace mvs {
 
+struct OptimizedConcurrencyObservation;
+struct PhotoPhaseV1Binding;
+struct NativeRunDeadline;
 class ConsistencyGraph;
 class PatchMatchCuda;
 class Workspace;
 struct OwnedBankContract;
 struct OwnedBankContractProblem;
 namespace owned {
+struct ByteCharge;
 class PairCoordinator;
+class GraphLaunchControl;
 class HostInputBank;
 class ResidentInputBank;
 struct BankJob;
@@ -87,7 +94,10 @@ class PatchMatch {
 
   // Experiment-only owned lifecycle. Prepare drains constructor work; solver
   // dispatch can then be coordinated without constructing another backend.
-  void PrepareOwned(int owned_tile_threads = 32);
+  void PrepareOwned(
+      int owned_tile_threads = 32,
+      std::shared_ptr<owned::GraphLaunchControl> graph_coordinator = {},
+      size_t graph_owner = 0);
   void RunPreparedOwned();
   // Failure-path completion proof while this instance still owns its buffers.
   void DrainOwned() noexcept;
@@ -152,12 +162,17 @@ class PatchMatchController : public BaseController {
   struct OwnedPairHooks {
     // Copied from the immutable batch configuration into each CUDA owner.
     int owned_tile_threads = 32;
+    std::shared_ptr<owned::GraphLaunchControl> graph_coordinator;
+    size_t graph_owner = 0;
+    std::function<void(size_t, const char*, uint64_t)> stage_timing;
     std::function<void(size_t, const PatchMatchOptions&, const PatchMatch::Problem&)> check_inputs;
     std::function<void(size_t, const PatchMatchOptions&, const PatchMatch::Problem&)> metadata;
     std::function<void(size_t, int, int)> sweep;
     std::function<void(size_t, const char*)> output_phase;
   };
   struct OwnedPreparedJob {
+    const PatchMatchController* prepared_by = nullptr;
+    size_t prepared_job = 0;
     std::unique_ptr<PatchMatch> patch_match;
     std::filesystem::path depth_map_path;
     std::filesystem::path normal_map_path;
@@ -175,6 +190,14 @@ class PatchMatchController : public BaseController {
   void RunOwnedPairJob(owned::PairCoordinator& coordinator,
                        size_t job,
                        const OwnedPairHooks& hooks);
+
+  // Caller holds the exclusive shared-controller selection boundary. All
+  // workspace/LRU access and config rebinding ends before this returns; the
+  // returned job owns its inputs independently of subsequent preparations.
+  std::unique_ptr<OwnedPreparedJob> PrepareSharedOwnedPhotoJob(
+      const std::filesystem::path& config,
+      size_t job,
+      const OwnedPairHooks& hooks);
 
   // Planned fresh-controller PHOTO / GEO graph before PHOTO maps exist.
   // This is NOT a bank contract or admission: actual GEO inputs/order must be
@@ -242,10 +265,28 @@ class PatchMatchController : public BaseController {
                                const OwnedPairHooks& hooks);
 
  private:
+  // Only the shared PHOTO wrapper may execute under an already-held lease.
+  friend OptimizedConcurrencyObservation RunOptimizedPhoto(
+      const PatchMatchOptions&,
+      const std::filesystem::path&,
+      const std::filesystem::path&,
+      const std::filesystem::path&,
+      owned::ByteCharge,
+      int,
+      std::optional<NativeRunDeadline>,
+      const std::string&,
+      const std::function<std::vector<PhotoPhaseV1Binding>(const std::string&)>&,
+      const std::function<void(const std::function<void(
+          size_t, const PatchMatch::Problem&)>&)>&);
+
+  // Execute an independently owned prepared engine under the caller's existing
+  // coordinator lease. The shared-controller PHOTO runner holds that lease
+  // across this call and retires the engine before releasing it.
   void ExecutePreparedOwnedPairJob(OwnedPreparedJob& prepared,
                                    owned::PairCoordinator& coordinator,
                                    size_t job,
                                    const OwnedPairHooks& hooks);
+
   // Shared invocation setup guards and single-traversal resolution loop.
   // Execution-specific guards live in the public entry points. When
   // `contract` is non-null, the enriched per-problem contract records are
@@ -274,7 +315,7 @@ class PatchMatchController : public BaseController {
   const std::filesystem::path workspace_path_;
   const std::string workspace_format_;
   const std::string pmvs_option_name_;
-  const std::filesystem::path config_path_;
+  std::filesystem::path config_path_;
 
   bool owned_pair_started_ = false;
   bool owned_bank_resolved_ = false;

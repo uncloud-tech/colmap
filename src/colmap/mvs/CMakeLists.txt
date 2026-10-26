@@ -30,6 +30,17 @@ add_custom_command(
 add_custom_target(resident_allocation_fingerprint
     DEPENDS "${RESIDENT_ALLOCATION_HEADER}")
 
+# Recompute PHOTO from committed HEAD on every build; refuse dirty closure
+# sources rather than compiling a stale provenance header. No pinned digest.
+set(PHOTO_PHASE_HEADER
+    "${CMAKE_CURRENT_BINARY_DIR}/colmap/mvs/generated/photo_phase_fingerprint.h")
+add_custom_target(photo_phase_fingerprint
+    COMMAND ${Python3_EXECUTABLE}
+            "${PROJECT_SOURCE_DIR}/scripts/resident/generate_photo_phase_fingerprint.py"
+            --repo-root "${PROJECT_SOURCE_DIR}" --output "${PHOTO_PHASE_HEADER}"
+    BYPRODUCTS "${PHOTO_PHASE_HEADER}"
+    VERBATIM)
+
 COLMAP_ADD_LIBRARY(
     NAME colmap_mvs
     SRCS
@@ -49,6 +60,7 @@ COLMAP_ADD_LIBRARY(
         normal_map.h normal_map.cc
         owned_input_bank.h owned_input_bank.cc
         owned_cohort.h
+        optimized_photo_delivery.h
         optimized_photo_options.h
         optimized_photo_paths.h
         owned_rotation_memory.h
@@ -86,7 +98,7 @@ endif()
 # Target commands AFTER the library target exists (Sol 3cdc fix 1).
 target_include_directories(colmap_mvs PUBLIC
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>")
-add_dependencies(colmap_mvs resident_allocation_fingerprint)
+add_dependencies(colmap_mvs resident_allocation_fingerprint photo_phase_fingerprint)
 
 COLMAP_ADD_TEST(
     NAME owned_prng_seed_test
@@ -247,6 +259,7 @@ if(TESTS_ENABLED)
 endif()
 
 if(CUDA_ENABLED)
+    find_package(Threads REQUIRED)
     COLMAP_ADD_LIBRARY(
         NAME colmap_mvs_cuda
         SRCS
@@ -258,6 +271,10 @@ if(CUDA_ENABLED)
             owned_prng.h owned_prng_seed.h owned_prng_boundary.h
             patch_match_calibration.h
             owned_input_bank.cu
+            owned_graph.h owned_graph.cu
+            owned_graph_topology.h
+            owned_graph_coordinator.h
+            owned_async_pool.h
             owned_cuda_execution.h
             owned_rotation_storage.h
             owned_selection_scratch.h
@@ -278,6 +295,7 @@ if(CUDA_ENABLED)
             colmap_util_cuda
             CUDA::cudart
             CUDA::curand
+            Threads::Threads
     )
 
     COLMAP_ADD_TEST(
@@ -506,12 +524,20 @@ endif()
 # Dependency-free optimized-dispatch contract executables also run without a
 # configured COLMAP tree using the commands in doc/optimized_dispatch.md.
 if(TESTS_ENABLED)
+    add_test(NAME "mvs/photo_phase_fingerprint_test"
+        COMMAND ${Python3_EXECUTABLE} -I
+            "${PROJECT_SOURCE_DIR}/scripts/resident/test_photo_phase_fingerprint.py")
     find_package(Threads REQUIRED)
     foreach(contract_test optimized_dispatch_test optimized_photo_forecast_test
+            optimized_photo_binding_test optimized_photo_dispatch_test
+            optimized_photo_delivery_test
             optimized_photo_options_test optimized_photo_paths_test
-            fusion_dependencies_test)
+            optimized_photo_prepared_test
+            optimized_photo_concurrency_test fusion_dependencies_test)
         add_executable(colmap_mvs_${contract_test} ${contract_test}.cc)
-        target_include_directories(colmap_mvs_${contract_test} PRIVATE "${PROJECT_SOURCE_DIR}/src")
+        target_include_directories(colmap_mvs_${contract_test} PRIVATE
+            "${PROJECT_SOURCE_DIR}/src" "${CMAKE_CURRENT_BINARY_DIR}")
+        add_dependencies(colmap_mvs_${contract_test} photo_phase_fingerprint)
         target_link_libraries(colmap_mvs_${contract_test} PRIVATE Threads::Threads)
         if(MSVC)
             target_compile_options(colmap_mvs_${contract_test} PRIVATE /UNDEBUG)
@@ -530,4 +556,26 @@ if(TESTS_ENABLED AND UNIX)
     target_compile_options(colmap_mvs_native_run_deadline_test PRIVATE -UNDEBUG)
     add_test(NAME "mvs/native_run_deadline_test" COMMAND colmap_mvs_native_run_deadline_test)
     set_tests_properties(mvs/native_run_deadline_test PROPERTIES TIMEOUT 15)
+endif()
+
+# Dependency-free topology/argument packing regression, including CUDA-off builds.
+if(TESTS_ENABLED)
+    add_executable(owned_graph_cpu_test owned_graph_test.cc)
+    target_include_directories(owned_graph_cpu_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+    target_compile_features(owned_graph_cpu_test PRIVATE cxx_std_17)
+    # Assertions are this small standalone fixture's test mechanism.
+    target_compile_options(owned_graph_cpu_test PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-UNDEBUG>
+        $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>)
+    add_test(NAME mvs/owned_graph_cpu_test COMMAND owned_graph_cpu_test)
+
+    add_executable(owned_graph_coordinator_cpu_test owned_graph_coordinator_test.cc)
+    target_include_directories(owned_graph_coordinator_cpu_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+    target_compile_features(owned_graph_coordinator_cpu_test PRIVATE cxx_std_17)
+    target_link_libraries(owned_graph_coordinator_cpu_test PRIVATE Threads::Threads)
+    target_compile_options(owned_graph_coordinator_cpu_test PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-UNDEBUG>
+        $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>)
+    add_test(NAME mvs/owned_graph_coordinator_cpu_test COMMAND owned_graph_coordinator_cpu_test)
+    set_tests_properties(mvs/owned_graph_coordinator_cpu_test PROPERTIES TIMEOUT 15)
 endif()

@@ -3,8 +3,10 @@
 #pragma once
 
 #include "colmap/mvs/fusion.h"
-#include "colmap/mvs/patch_match_options.h"
+#include "colmap/mvs/optimized_photo_delivery.h"
+#include "colmap/mvs/optimized_photo_input_probe.h"
 #include "colmap/mvs/patch_match_execution.h"
+#include "colmap/mvs/patch_match_options.h"
 #include "colmap/scene/reconstruction.h"
 
 #include <filesystem>
@@ -19,8 +21,17 @@ void RunPatchMatchStereoImpl(const std::filesystem::path& workspace_path,
                              const std::filesystem::path& config_path);
 
 // Shared parser/controller path for the optional one-reference experiment.
-int RunPatchMatchStereoWithExecution(int argc, char** argv,
-                                    mvs::PatchMatchExecution execution);
+// Ordinary CLI callers supply typed per-job bindings in the V3 wire.
+// Native RUNNER callers may supply staged-plan objects via runner_delivery.
+// phase_delivery remains the already-attested embedding seam; do not supply
+// both.
+int RunPatchMatchStereoWithExecution(
+    int argc,
+    char** argv,
+    mvs::PatchMatchExecution execution,
+    const mvs::TrustedPhotoPhaseV1Delivery& phase_delivery = {},
+    const mvs::OptimizedPhotoInputProbe& input_probe = {},
+    const mvs::PhotoPhaseV1RunnerDelivery& runner_delivery = {});
 void RunPatchMatchStereoImplWithExecution(
     const std::filesystem::path& workspace_path,
     const std::string& workspace_format,

@@ -22,6 +22,7 @@
 #include "colmap/util/threading.h"
 
 #include <algorithm>
+#include <chrono>
 #include <numeric>
 #include <set>
 #include <stdexcept>
@@ -229,13 +230,18 @@ void PatchMatch::Run() {
   patch_match_cuda_->Run();
 }
 
-void PatchMatch::PrepareOwned(const int owned_tile_threads) {
+void PatchMatch::PrepareOwned(
+    const int owned_tile_threads,
+    std::shared_ptr<owned::GraphLaunchControl> graph_coordinator,
+    size_t graph_owner) {
 #if !defined(COLMAP_HIP_ENABLED)
   THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
   THROW_CHECK(!owned_patch_match_cuda_) << "Owned instances prepare only once";
   Check();
   owned_patch_match_cuda_ =
       std::make_unique<owned::PatchMatchCuda>(options_, problem_, owned_tile_threads);
+  owned_patch_match_cuda_->SetGraphCoordinator(std::move(graph_coordinator),
+                                               graph_owner);
   LOG(INFO) << "PATCH_MATCH_BACKEND actual=owned_cuda reference="
             << problem_.ref_image_idx;
 #else
@@ -821,10 +827,21 @@ PatchMatchController::PrepareOwnedPairJob(const size_t job,
   }
 }
 
-void PatchMatchController::RunOwnedPairJob(
-    owned::PairCoordinator& coordinator,
+std::unique_ptr<PatchMatchController::OwnedPreparedJob>
+PatchMatchController::PrepareSharedOwnedPhotoJob(
+    const std::filesystem::path& config,
     const size_t job,
     const OwnedPairHooks& hooks) {
+  THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
+  THROW_CHECK(!options_.geom_consistency);
+  THROW_CHECK(!owned_pair_started_ && !owned_bank_resolved_);
+  config_path_ = config;
+  return PrepareOwnedPairJob(job, hooks);
+}
+
+void PatchMatchController::RunOwnedPairJob(owned::PairCoordinator& coordinator,
+                                           const size_t job,
+                                           const OwnedPairHooks& hooks) {
   THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
   THROW_CHECK(!owned_pair_started_);
   owned_pair_started_ = true;
@@ -878,12 +895,30 @@ void PatchMatchController::ExecutePreparedOwnedPairJob(
     if (hooks.metadata) {
       hooks.metadata(job, patch_match->GetOptions(), patch_match->GetProblem());
     }
-    patch_match->PrepareOwned(hooks.owned_tile_threads);
+    using Clock = std::chrono::steady_clock;
+    auto stage_start = Clock::now();
+    const auto record_stage = [&](const char* stage) {
+      const auto now = Clock::now();
+      if (hooks.stage_timing) {
+        hooks.stage_timing(
+            job,
+            stage,
+            std::chrono::duration_cast<std::chrono::microseconds>(now -
+                                                                  stage_start)
+                .count());
+      }
+      stage_start = now;
+    };
+    patch_match->PrepareOwned(
+        hooks.owned_tile_threads, hooks.graph_coordinator, hooks.graph_owner);
+    record_stage("cuda_prepare");
     patch_match->SetOwnedSweepObserver([&hooks, job](int iteration, int sweep) {
       if (hooks.sweep) hooks.sweep(job, iteration, sweep);
     });
     coordinator.ReadyAndWait(job);
+    record_stage("solver_wait");
     patch_match->RunPreparedOwned();
+    record_stage("solve");
     coordinator.SolverDone(job);
     coordinator.BeginOutput(job);
     if (hooks.output_phase) hooks.output_phase(job, "depth_begin");
@@ -1263,6 +1298,8 @@ void PatchMatchController::ProcessProblemInputs(
     prepared->patch_match =
         std::make_unique<PatchMatch>(patch_match_options, problem, execution_);
     prepared->patch_match->Check();
+    prepared->prepared_by = this;
+    prepared->prepared_job = job;
     return;
   }
 

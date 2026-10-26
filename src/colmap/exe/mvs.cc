@@ -399,7 +399,12 @@ int RunOwnedBankMetadataMode(
 #endif
 
 int RunPatchMatchStereoWithExecution(
-    int argc, char** argv, const mvs::PatchMatchExecution execution) {
+    int argc,
+    char** argv,
+    const mvs::PatchMatchExecution execution,
+    const mvs::TrustedPhotoPhaseV1Delivery& phase_delivery,
+    const mvs::OptimizedPhotoInputProbe& input_probe,
+    const mvs::PhotoPhaseV1RunnerDelivery& runner_delivery) {
   const auto phase_entry = mvs::NativeRunDeadline::Clock::now();
   std::optional<mvs::NativeRunDeadline> execution_deadline;
   std::unique_ptr<mvs::NativeRunDeadlineGuard> deadline_guard;
@@ -590,11 +595,18 @@ int RunPatchMatchStereoWithExecution(
                                    pm.write_consistency_graph,
                                    pm.allow_missing_files,
                                    pm.geom_consistency);
-      mvs::ValidateOptimizedStereoConcurrency(
-          pm.geom_consistency,
-          owned_run_max_concurrent_solvers,
-          !owned_run_forecast_path.empty(),
-          !owned_run_cohort_forecast_path.empty());
+      // GEO binds here; PHOTO binds supplied k, exact CLI N, job count and
+      // private top-N caps together when consuming its V2/V3 launch forecast.
+      mvs::OptimizedConcurrencyLimits concurrency;
+      concurrency.geom_consistency = pm.geom_consistency;
+      concurrency.concurrency = owned_run_max_concurrent_solvers;
+      concurrency.full_bank_forecast = !owned_run_forecast_path.empty();
+      concurrency.cohort_forecast = !owned_run_cohort_forecast_path.empty();
+      concurrency.photo_ceiling = mvs::kOptimizedPhotoQualifiedConcurrency;
+      if (pm.geom_consistency)
+        mvs::ValidateOptimizedStereoConcurrency(concurrency);
+      else
+        (void)mvs::ParseOptimizedConcurrency(concurrency.concurrency);
       mvs::ValidateOptimizedReceiptPath(optimized_dispatch_receipt);
       if (execution != mvs::PatchMatchExecution::kStock ||
           workspace_format != "COLMAP" || pm.max_image_size != -1 ||
@@ -639,24 +651,56 @@ int RunPatchMatchStereoWithExecution(
       if (config_path.empty())
         throw std::invalid_argument(
             "PHOTO requires a single-reference config_path");
-      mvs::RunOptimizedPhoto(*options.patch_match_stereo,
-                             workspace_path,
-                             config_path,
-                             owned_photo_forecast,
-                             {mvs::owned::ParseBytes(CanonicalCliUnsigned(
-                                  owned_run_host_budget_bytes, "host")),
-                              mvs::owned::ParseBytes(CanonicalCliUnsigned(
-                                  owned_run_device_budget_bytes, "device"))},
-                             owned_tile_threads,
-                             execution_deadline);
+      if (phase_delivery && runner_delivery)
+        throw std::invalid_argument("PHOTO conflicting delivery sources");
+      // Explicit in-process sources remain available to native callers. The
+      // ordinary CLI consumes the producer's typed binding sections in V3.
+      const mvs::owned::ByteCharge photo_capacity{
+          mvs::owned::ParseBytes(
+              CanonicalCliUnsigned(owned_run_host_budget_bytes, "host")),
+          mvs::owned::ParseBytes(
+              CanonicalCliUnsigned(owned_run_device_budget_bytes, "device"))};
+      const auto trusted_delivery =
+          runner_delivery
+              ? mvs::MakeTrustedPhotoPhaseV1Delivery(runner_delivery)
+          : phase_delivery ? phase_delivery
+                           : mvs::MakeWirePhotoPhaseV1Delivery(
+                                 config_path,
+                                 owned_run_max_concurrent_solvers,
+                                 photo_capacity,
+                                 [&](const std::filesystem::path& job_config) {
+                                   return mvs::OptimizedPhotoOptions(
+                                       *options.patch_match_stereo,
+                                       workspace_path,
+                                       job_config);
+                                 },
+                                 [](const std::string_view& bytes) {
+                                   return ComputeSHA256(bytes);
+                                 });
+      const auto photo_observation =
+          mvs::RunOptimizedPhoto(*options.patch_match_stereo,
+                                 workspace_path,
+                                 config_path,
+                                 owned_photo_forecast,
+                                 photo_capacity,
+                                 owned_tile_threads,
+                                 execution_deadline,
+                                 owned_run_max_concurrent_solvers,
+                                 trusted_delivery,
+                                 input_probe);
       deadline_guard->Check();
-      mvs::PublishOptimizedReceipt(optimized_dispatch_receipt,
-                                   mvs::OptimizedDispatchReceipt(
-                                       "photo", owned_tile_threads,
-                                       options.patch_match_stereo->num_samples,
-                                       true,
-                                       options.patch_match_stereo
-                                           ->owned_tex_lookahead));
+      // N1 preserves historical receipt bytes; N>1 uses real admitted/joined
+      // coordinator events, never requested concurrency as observed telemetry.
+      mvs::PublishOptimizedReceipt(
+          optimized_dispatch_receipt,
+          mvs::OptimizedDispatchReceipt(
+              "photo",
+              owned_tile_threads,
+              options.patch_match_stereo->num_samples,
+              true,
+              options.patch_match_stereo->owned_tex_lookahead,
+              photo_observation.admitted_n,
+              photo_observation.admitted_n > 1 ? &photo_observation : nullptr));
       return EXIT_SUCCESS;
 #else
       throw std::invalid_argument(

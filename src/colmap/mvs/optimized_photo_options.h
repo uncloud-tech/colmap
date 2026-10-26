@@ -60,6 +60,10 @@ inline std::string OptimizedPhotoOptions(const PatchMatchOptions& options,
   integer("num_samples", options.num_samples);
   boolean("owned_distinct_source_cache", options.owned_distinct_source_cache);
   boolean("owned_tex_lookahead", options.owned_tex_lookahead);
+  // Keep default V1 bytes stable, but never attest opt-in execution as thread
+  // mode or ordinary allocation. Graph/pool arms need their own producer wire.
+  if (options.owned_cuda_graphs) boolean("owned_cuda_graphs", true);
+  if (options.owned_async_pool) boolean("owned_async_pool", true);
   real("ncc_sigma", options.ncc_sigma);
   real("min_triangulation_angle", options.min_triangulation_angle);
   real("incident_angle_sigma", options.incident_angle_sigma);

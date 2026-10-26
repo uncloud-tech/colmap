@@ -134,6 +134,9 @@ class Json {
 // selected defaults, admission, effective dispatch or qualification. N>1 still
 // requires the exact full-bank forecast and runtime resource checks.
 // Unsupported builds/sample specializations have no concurrency capability.
+// The PHOTO ceiling stays 1 here until PHOTO N>1 is qualified
+// (kOptimizedPhotoQualifiedConcurrency): a launch-contract ceiling k is not
+// capability metadata and never raises this value.
 inline Json ConcurrencySupportJson(bool cuda, int samples) {
   if (!mvs::OptimizedStereoCacheSupported(cuda, 16, samples) &&
       !mvs::OptimizedStereoCacheSupported(cuda, 32, samples))

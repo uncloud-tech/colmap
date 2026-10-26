@@ -1650,8 +1650,9 @@ std::vector<int> PatchMatchCuda::GetConsistentImageIdxs() const {
 
 template <int kWindowSize, int kWindowStep, int kTileThreads>
 void PatchMatchCuda::RunWithWindowSizeAndStep() {
-  // Wait for all initializations to finish.
-  stream_->Synchronize();
+  const bool chained = options_.owned_cuda_graphs;
+  // In chained mode all initialization/sweep/rotation edges are stream order.
+  if (!chained) stream_->Synchronize();
 
   OwnedCudaTimer total_timer(stream_->Get());
   OwnedCudaTimer init_timer(stream_->Get());
@@ -1670,9 +1671,9 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
           poses_texture_[0]->GetObj(),
           options_.sigma_spatial,
           options_.sigma_color);
-  stream_->Synchronize();
+  if (!chained) stream_->Synchronize();
 
-  init_timer.Print("Initialization");
+  if (!chained) init_timer.Print("Initialization");
 
   const float total_num_steps = options_.num_iterations * 4;
 
@@ -1696,6 +1697,11 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
   sweep_options.filter_geom_consistency_max_cost =
       options_.filter_geom_consistency_max_cost;
 
+  // Four orientation/parity bindings, plus the final filter specialization.
+  std::unique_ptr<GraphBuilder> sweep_graphs[8];
+  // Declared after graph owners: exceptions drain this owner, never others,
+  // before any executable or binding can be destroyed.
+  ScopedStreamCompletion graph_completion(stream_->Get());
   for (int iter = 0; iter < options_.num_iterations; ++iter) {
     OwnedCudaTimer iter_timer(stream_->Get());
 
@@ -1711,44 +1717,75 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 
       const bool last_sweep = iter == options_.num_iterations - 1 && sweep == 3;
 
-#define CALL_SWEEP_IMPL(cache, lookahead)                        \
-  SweepFromTopToBottom<kWindowSize,                       \
-                       kWindowStep,                       \
-                       kTileThreads,                      \
-                       kGeomConsistencyTerm,              \
-                       kFilterPhotoConsistency,           \
-                       kFilterGeomConsistency, cache, lookahead>     \
-      <<<sweep_grid_size_, sweep_block_size_, 0, stream_->Get()>>>(          \
-          CurrentCalibration(), global_workspace_->View(),                      \
-          SweepPrngView(),                        \
-          cost_map_->View(),                              \
-          depth_map_->View(),                             \
-          normal_map_->View(),                            \
-          consistency_mask_ ? consistency_mask_->View() : GpuMatView<uint8_t>{}, \
-          SelectionView(),                               \
-          prev_sel_prob_map_->View(),                     \
-          ref_image_texture_->GetObj(),                   \
-          ref_image_->sum_image->View(),                  \
-          ref_image_->squared_sum_image->View(),          \
-          SourceImagesTexture(),                         \
-          SourceLayers(),                                \
-          SourceDepthTexture(),                          \
-          poses_texture_[rotation_in_half_pi_]->GetObj(), \
-          sweep_options);
+#define CALL_SWEEP_IMPL(cache, lookahead)                                    \
+  auto launch_sweep = [&](auto... args) {                                    \
+    if (options_.owned_cuda_graphs) {                                        \
+      const int index = sweep + (last_sweep && options_.filter ? 4 : 0);     \
+      if (!sweep_graphs[index])                                              \
+        sweep_graphs[index] = std::make_unique<GraphBuilder>();              \
+      sweep_graphs[index]->LaunchOrSubmit(                                   \
+          SweepFromTopToBottom<kWindowSize,                                  \
+                               kWindowStep,                                  \
+                               kTileThreads,                                 \
+                               kGeomConsistencyTerm,                         \
+                               kFilterPhotoConsistency,                      \
+                               kFilterGeomConsistency,                       \
+                               cache,                                        \
+                               lookahead>,                                   \
+          sweep_grid_size_,                                                  \
+          sweep_block_size_,                                                 \
+          stream_->Get(),                                                    \
+          false, /* direct final-filter node, no conditional rebuild */      \
+          graph_coordinator_.get(),                                          \
+          graph_owner_,                                                      \
+          args...);                                                          \
+    } else {                                                                 \
+      SweepFromTopToBottom<kWindowSize,                                      \
+                           kWindowStep,                                      \
+                           kTileThreads,                                     \
+                           kGeomConsistencyTerm,                             \
+                           kFilterPhotoConsistency,                          \
+                           kFilterGeomConsistency,                           \
+                           cache,                                            \
+                           lookahead>                                        \
+          <<<sweep_grid_size_, sweep_block_size_, 0, stream_->Get()>>>(      \
+              args...);                                                      \
+    }                                                                        \
+  };                                                                         \
+  launch_sweep(                                                              \
+      CurrentCalibration(),                                                  \
+      global_workspace_->View(),                                             \
+      SweepPrngView(),                                                       \
+      cost_map_->View(),                                                     \
+      depth_map_->View(),                                                    \
+      normal_map_->View(),                                                   \
+      consistency_mask_ ? consistency_mask_->View() : GpuMatView<uint8_t>{}, \
+      SelectionView(),                                                       \
+      prev_sel_prob_map_->View(),                                            \
+      ref_image_texture_->GetObj(),                                          \
+      ref_image_->sum_image->View(),                                         \
+      ref_image_->squared_sum_image->View(),                                 \
+      SourceImagesTexture(),                                                 \
+      SourceLayers(),                                                        \
+      SourceDepthTexture(),                                                  \
+      poses_texture_[rotation_in_half_pi_]->GetObj(),                        \
+      sweep_options);
 
 // Shared production dispatch: 16/32-thread tiles, at most 15 samples (not
 // sources). Lookahead is only active in the cache lane. Integral constants
 // select real kernel specializations for every photo/geo/filter combination.
-#define CALL_SWEEP_FUNC \
-  DispatchOwnedSourceCache<kTileThreads>( \
-      options_.owned_distinct_source_cache, options_.owned_tex_lookahead, \
-      options_.num_samples, [&](auto cache, auto lookahead) { \
+#define CALL_SWEEP_FUNC                                                     \
+  DispatchOwnedSourceCache<kTileThreads>(                                   \
+      options_.owned_distinct_source_cache,                                 \
+      options_.owned_tex_lookahead,                                         \
+      options_.num_samples,                                                 \
+      [&](auto cache, auto lookahead) {                                     \
         CALL_SWEEP_IMPL(decltype(cache)::value, decltype(lookahead)::value) \
       });
 
       if (last_sweep) {
         if (options_.filter) {
-          consistency_mask_->FillWithScalar(0, stream_->Get());
+          consistency_mask_->FillWithScalar(0, stream_->Get(), !chained);
         }
         if (options_.geom_consistency) {
           const bool kGeomConsistencyTerm = true;
@@ -1788,20 +1825,35 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 #undef CALL_SWEEP_FUNC
 #undef CALL_SWEEP_IMPL
 
-      stream_->Synchronize();
+      if (!chained) stream_->Synchronize();
 
       Rotate();
 
-      sweep_timer.Print(" Sweep " + std::to_string(sweep + 1));
+      if (!chained) sweep_timer.Print(" Sweep " + std::to_string(sweep + 1));
       if (sweep_observer_) {
+        // Diagnostic observers may read intermediate maps. Preserve that
+        // contract; observer-enabled timings are not chained throughput runs.
+        if (chained) stream_->Synchronize();
         sweep_observer_(iter + 1, sweep + 1);
       }
     }
 
-    iter_timer.Print("Iteration " + std::to_string(iter + 1));
+    if (!chained) iter_timer.Print("Iteration " + std::to_string(iter + 1));
   }
 
-  total_timer.Print("Total");
+  graph_completion.Wait(chained);
+  if (!chained) total_timer.Print("Total");
+  if (chained) {
+    size_t instances = 0, updates = 0, launches = 0;
+    for (const auto& graph : sweep_graphs) {
+      if (!graph) continue;
+      instances += graph->Instantiations();
+      updates += graph->Updates();
+      launches += graph->Launches();
+    }
+    LOG(INFO) << "PHOTO_GRAPH mode=chain instantiations=" << instances
+              << " updates=" << updates << " launches=" << launches;
+  }
 }
 
 void PatchMatchCuda::ComputeCudaConfig() {
@@ -1824,10 +1876,11 @@ void PatchMatchCuda::ComputeCudaConfig() {
 
 void PatchMatchCuda::BindRefImageTexture() {
   ref_image_texture_ = ref_image_textures_[rotation_in_half_pi_ % 2].get();
-  // The pre-Rotate owner synchronization completes all previous readers.
-  // Rotated-image writes precede this copy on the same stream; the helper
-  // explicitly waits for completion, including the final rotation's refresh.
-  ref_image_texture_->CopyFromGpuMat(*ref_image_->image, stream_->Get());
+  // Prior readers, rotated-image writes, this copy and later texture reads
+  // are ordered on the same owner stream. Only graph mode defers the fence
+  // to owner completion; both persistent textures survive that fence.
+  ref_image_texture_->CopyFromGpuMat(
+      *ref_image_->image, stream_->Get(), !options_.owned_cuda_graphs);
 }
 
 void PatchMatchCuda::InitRefImage() {
@@ -2220,8 +2273,14 @@ void PatchMatchCuda::InitWorkspaceMemory() {
       ref_width_, ref_height_, problem_.src_image_idxs.size()));
 
   const int ref_max_dim = std::max(ref_width_, ref_height_);
-  global_workspace_ = std::make_unique<GpuMat<float>>(
-      ref_max_dim, problem_.src_image_idxs.size(), 2);
+  if (options_.owned_async_pool) {
+    workspace_pool_ = std::make_unique<AsyncPool>(stream_->Get());
+    global_workspace_ = std::make_unique<GpuMat<float>>(
+        ref_max_dim, problem_.src_image_idxs.size(), 2, *workspace_pool_);
+  } else {
+    global_workspace_ = std::make_unique<GpuMat<float>>(
+        ref_max_dim, problem_.src_image_idxs.size(), 2);
+  }
 
   ComputeCudaConfig();
 
@@ -2312,33 +2371,37 @@ void PatchMatchCuda::EmitRotationAllocations() {
 }
 
 void PatchMatchCuda::Rotate() {
+  const bool wait = !options_.owned_cuda_graphs;
   rotation_in_half_pi_ = (rotation_in_half_pi_ + 1) % 4;
 
   // RNG states stay in canonical perimeter coordinates; only SweepPrngView's
   // orientation changes. Corners retain updates from both incident boundaries.
 
-  depth_map_->Rotate(depth_map_.Alternate(), stream_->Get());
+  depth_map_->Rotate(depth_map_.Alternate(), stream_->Get(), wait);
   depth_map_.Flip();
 
   RotateNormalMap<<<elem_wise_grid_size_, elem_wise_block_size_, 0, stream_->Get()>>>(
       normal_map_->View());
-  normal_map_->Rotate(normal_map_.Alternate(), stream_->Get());
+  normal_map_->Rotate(normal_map_.Alternate(), stream_->Get(), wait);
   normal_map_.Flip();
 
-  ref_image_->image->Rotate(ref_image_.Alternate()->image.get(), stream_->Get());
-  ref_image_->sum_image->Rotate(ref_image_.Alternate()->sum_image.get(), stream_->Get());
+  ref_image_->image->Rotate(
+      ref_image_.Alternate()->image.get(), stream_->Get(), wait);
+  ref_image_->sum_image->Rotate(
+      ref_image_.Alternate()->sum_image.get(), stream_->Get(), wait);
   ref_image_->squared_sum_image->Rotate(
-      ref_image_.Alternate()->squared_sum_image.get(), stream_->Get());
+      ref_image_.Alternate()->squared_sum_image.get(), stream_->Get(), wait);
   ref_image_.Flip();
   BindRefImageTexture();
 
-  // Rotate all scratch slices into a distinct persistent owner and wait for
-  // completion before its packed storage is reinterpreted by the next sweep.
+  // Rotate scratch slices into a distinct persistent owner. Stream ordering
+  // protects packed storage before the next sweep (thread mode also waits).
   // Previous probabilities have not flipped yet and identify the source shape.
-  prev_sel_prob_map_.Alternate()->RotateFrom(SelectionView(), stream_->Get());
+  prev_sel_prob_map_.Alternate()->RotateFrom(
+      SelectionView(), stream_->Get(), wait);
   prev_sel_prob_map_.Flip();
 
-  cost_map_->Rotate(cost_map_.Alternate(), stream_->Get());
+  cost_map_->Rotate(cost_map_.Alternate(), stream_->Get(), wait);
   cost_map_.Flip();
 
   // The next launch snapshots the new orientation; no module write.

@@ -34,8 +34,10 @@ class ScopedStreamCompletion {
   }
   ScopedStreamCompletion(const ScopedStreamCompletion&) = delete;
   ScopedStreamCompletion& operator=(const ScopedStreamCompletion&) = delete;
-  void Wait() {
-    CUDA_SAFE_CALL(cudaStreamSynchronize(stream_));
+  // wait=false transfers completion to the enclosing owner stream lifetime.
+  // On enqueue failure the destructor still fences before buffers unwind.
+  void Wait(bool wait = true) {
+    if (wait) CUDA_SAFE_CALL(cudaStreamSynchronize(stream_));
     pending_ = false;
     CUDA_CHECK();
   }

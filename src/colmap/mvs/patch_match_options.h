@@ -57,6 +57,13 @@ struct PatchMatchOptions {
   // Maximum image size in either dimension.
   int max_image_size = -1;
 
+  // Experimental owned CUDA path only; stock/HIP paths do not use these.
+  // Graph captures only the fused sweep, not rotations or host observers.
+  // Chained independent owner streams; no cross-owner submission barrier.
+  bool owned_cuda_graphs = false;
+  // Pool spike covers the transient sweep workspace only.
+  bool owned_async_pool = false;
+
   // Benchmark-only coordinate seed; -1 preserves historical initialization.
   // >= 0 uses (seed, current row, current col), not a reconstruction guarantee.
   int random_seed = -1;

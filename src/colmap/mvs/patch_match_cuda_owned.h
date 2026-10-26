@@ -4,6 +4,8 @@
 
 #if !defined(COLMAP_HIP_ENABLED)
 #include "colmap/mvs/owned_cuda_execution.h"
+#include "colmap/mvs/owned_graph.h"
+#include "colmap/mvs/owned_async_pool.h"
 #include "colmap/mvs/owned_tile.h"
 #include "colmap/mvs/owned_rotation_storage.h"
 #include "colmap/mvs/owned_selection_scratch.h"
@@ -51,6 +53,11 @@ class PatchMatchCuda {
 
   ~PatchMatchCuda();
 
+  void SetGraphCoordinator(std::shared_ptr<GraphLaunchControl> coordinator,
+                           size_t owner) {
+    graph_coordinator_ = std::move(coordinator);
+    graph_owner_ = owner;
+  }
   void Run();
   void DrainForCleanup() noexcept {
     if (stream_) {
@@ -95,6 +102,8 @@ class PatchMatchCuda {
 
   // Created after device selection; drained before resources, destroyed last.
   std::unique_ptr<OwnedCudaStream> stream_;
+  // Destroyed after GpuMats and before the owner stream.
+  std::unique_ptr<AsyncPool> workspace_pool_;
 
   // Dimensions for sweeping from top to bottom, i.e. one thread per column.
   dim3 sweep_block_size_;
@@ -186,6 +195,8 @@ class PatchMatchCuda {
   std::unique_ptr<GpuMat<float>> global_workspace_;
   // Host-only telemetry; never passed to a kernel or active in the ONE path.
   std::function<void(int, int)> sweep_observer_;
+  std::shared_ptr<GraphLaunchControl> graph_coordinator_;
+  size_t graph_owner_ = 0;
 };
 
 }  // namespace owned

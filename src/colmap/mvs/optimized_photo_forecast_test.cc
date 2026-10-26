@@ -9,6 +9,95 @@ int main() {
   const std::string digest(64, 'a');
   const auto bytes = "COLMAP_OPTIMIZED_PHOTO_V2\n" + digest +
                      "\n1 2 3 4\n0 2 4 2\n1\n" + digest + " 2f61\n";
+  const auto batch = ParseOptimizedPhotoLaunch(
+      "COLMAP_OPTIMIZED_PHOTO_V3\n2 2 2\n" + owned::Hex("/c0") + "\n" +
+          owned::Hex(bytes) + "\n" + owned::Hex("/c1") + "\n" +
+          owned::Hex(std::string("COLMAP_OPTIMIZED_PHOTO_V2\n") + digest +
+                     "\n1 2 3 4\n1 2 4 2\n1\n" + digest + " 2f61\n") +
+          "\n",
+      "/unused",
+      "2",
+      {20, 20});
+  assert(batch.admitted_n == 2 && batch.jobs.size() == 2);
+  const auto launch_bytes =
+      "COLMAP_OPTIMIZED_PHOTO_V3\n2 2 2\n" + owned::Hex("/c0") + "\n" +
+      owned::Hex(bytes) + "\n" + owned::Hex("/c1") + "\n" +
+      owned::Hex(std::string("COLMAP_OPTIMIZED_PHOTO_V2\n") + digest +
+                 "\n1 2 3 4\n1 2 4 2\n1\n" + digest + " 2f61\n") +
+      "\n";
+  // V3 extends the existing wire with verbatim typed per-job objects.
+  const auto binding = [&](int ref) {
+    return "[BINDING]\nprofile=photo-phase-v1\nlineage_sha=" +
+           std::string(40, 'b') + "\nfingerprint=" + digest +
+           "\noptions_sha256=" + digest +
+           "\nprocess=1 2\nprivate_charge=3 4\nreference_image_idx=" +
+           std::to_string(ref) +
+           "\nsource_image_idxs=4 2\nsource_commit=" + std::string(40, 'c') +
+           "\n[END]\n";
+  };
+  const auto bound = ParseOptimizedPhotoLaunch(
+      launch_bytes + binding(0) + binding(1), "/c0", "2", {20, 20});
+  assert(bound.bindings.size() == 2);
+  assert(bound.bindings[1].reference_image_idx == 1);
+  assert(bound.bindings[0].source_commit == std::string(40, 'c'));
+  // Binding cardinality follows scheduled jobs, independently of ceiling k.
+  auto third_forecast = bytes;
+  third_forecast.replace(third_forecast.find("\n0 2 4 2\n"), 9, "\n3 2 4 2\n");
+  auto three_jobs = launch_bytes;
+  three_jobs.replace(three_jobs.find("2 2 2"), 5, "2 2 3");
+  three_jobs += owned::Hex("/c3") + "\n" + owned::Hex(third_forecast) + "\n";
+  const auto three_bindings = binding(0) + binding(1) + binding(3);
+  const auto fewer_owners = ParseOptimizedPhotoLaunch(
+      three_jobs + three_bindings, "/c0", "2", {20, 20});
+  assert(fewer_owners.admitted_n == 2);
+  assert(fewer_owners.jobs.size() == 3 && fewer_owners.bindings.size() == 3);
+  auto larger_ceiling = launch_bytes;
+  larger_ceiling.replace(larger_ceiling.find("2 2 2"), 5, "3 2 2");
+  const auto fewer_jobs = ParseOptimizedPhotoLaunch(
+      larger_ceiling + binding(0) + binding(1), "/c0", "2", {20, 20});
+  assert(fewer_jobs.admitted_n == 2);
+  assert(fewer_jobs.jobs.size() == 2 && fewer_jobs.bindings.size() == 2);
+  const auto refuses_named = [&](const std::string& text,
+                                 const std::string& diagnostic) {
+    bool refused = false;
+    try {
+      ParseOptimizedPhotoLaunch(text, "/c0", "2", {20, 20});
+    } catch (const std::invalid_argument& e) {
+      refused = std::string(e.what()).find(diagnostic) != std::string::npos;
+    }
+    assert(refused);
+  };
+  // Matching k is neither necessary (above) nor sufficient (below).
+  refuses_named(three_jobs + binding(0) + binding(1),
+                "PHOTO binding section count mismatch");
+  refuses_named(larger_ceiling + three_bindings,
+                "PHOTO binding section count mismatch");
+  auto insufficient_ceiling = three_jobs;
+  insufficient_ceiling.replace(insufficient_ceiling.find("2 2 3"), 5, "1 2 3");
+  refuses_named(insufficient_ceiling + three_bindings,
+                "exceeds the supplied launch-contract ceiling k=1");
+  const auto rejects =
+      [&](std::string text, std::string n, owned::ByteCharge caps) {
+        bool refused = false;
+        try {
+          ParseOptimizedPhotoLaunch(text, "/c0", n, caps);
+        } catch (const std::exception&) {
+          refused = true;
+        }
+        assert(refused);
+      };
+  rejects(launch_bytes, "3", {20, 20});  // EXACT CLI binding, never clamp.
+  rejects(launch_bytes, "2", {6, 20});  // Host top-N, not just one fitting job.
+  rejects(launch_bytes, "2", {20, 9});  // Device top-N independently.
+  rejects(launch_bytes + "\n", "2", {20, 20});
+  auto over_k = launch_bytes;
+  over_k.replace(over_k.find("2 2 2"), 5, "1 2 2");
+  rejects(over_k, "2", {20, 20});
+  rejects("COLMAP_OPTIMIZED_PHOTO_V3\n2 2 1\n" + owned::Hex("/c0") + "\n" +
+              owned::Hex(bytes) + "\n",
+          "2",
+          {20, 20});
+  rejects(bytes, "2", {20, 20});  // V2 cannot authorize concurrency.
   auto wire = ParseOptimizedPhotoForecast(bytes);
   assert(wire.process.host == 1 && wire.private_charge.device == 4);
   assert(wire.files.at("/a") == digest);

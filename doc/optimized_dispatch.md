@@ -65,6 +65,23 @@ Project-file overrides cannot be combined with these modes.
   retirement. This is optimized **lifecycle/storage**, retaining ordinary inner
   arithmetic; cache/lookahead select the compiled tile16 or tile32 specialization.
   This is not evidence of faster PHOTO or byte-exactness on any untested hardware.
+* PHOTO concurrency: `--owned_run_max_concurrent_solvers N` admits `N1..Nk`
+  **in-process** on ONE shared controller instance (rolling scheduler reuse).
+  `k` is supplied by the launch contract from the photo forecast vs actual caps
+  and is bound exactly here; this product never computes or estimates `k`, and
+  the GEO `(73+12s)a/(50+21s)a` terms are not reused for PHOTO. An `N` above the
+  supplied `k`, above the compiled rolling ceiling (5), or above the number of
+  distinct scheduled references **refuses** and is never clamped down. Cohort
+  PHOTO `N>1` refuses. Capability metadata keeps claiming PHOTO concurrency 1
+  (`compiled_supported_not_qualified`) until PHOTO `N>1` is actually qualified;
+  a supplied ceiling is launch admission, not capability.
+  Production V3 execution additionally requires a delivered `PhotoPhaseV1Binding`
+  (profile/source identity, exact launch bytes, k and caps); absent delivery
+  refuses before owner allocation. The current CLI has no delivery adapter yet,
+  so V3 execution remains unavailable, including V3 N1. V2 N1 is unchanged.
+  `ParseOptimizedPhotoLaunch` alone is only the synthetic wire qualification seam.
+  See `qualification/photo-concurrency-slice3/ownerhost-prefire.md` for the
+  adapter contract, CPU lifecycle harness and deferred UID0/GPU commands.
 
 ### Read-only planned native graph
 
@@ -192,6 +209,19 @@ encoded-file hash scratch and overhead. Forecaster applies the single margin and
 external admission/headroom controls. Native floors are necessary, not physical
 fit certification. Positive integers do not supply missing qualification.
 
+PHOTO host-charge provenance (producer documentation must use these labels):
+
+| Term | Provenance |
+| --- | --- |
+| `2q` retained grayscale allowance | **CONSERVATIVE PRODUCER POLICY**, not proof of two simultaneously live source-derived banks. |
+| `24a` host scratch allowance | **CONSERVATIVE PRODUCER POLICY**, not a source-derived second normal-map allocation. |
+
+Here `a` is the reference pixel count and `q` the retained grayscale pixel sum.
+`normal_map.cc:23-34` moves the downloaded map buffer: no second full copy
+exists on this output path. Retain the conservative charge unchanged; do not
+cite the moving constructor as evidence for `24a`. These labels do not change
+admission, the single 3% forecast margin, or actual resource caps.
+
 ## Fusion command
 
 ```
@@ -230,6 +260,34 @@ Fusion:
 {"schema_version":1,"phase":"fusion","backend":"cpu","tile":null,"cache":false,"lookahead":null,"lifetime":"mapped_inputs","fusion_mode":"mmap"}
 ```
 
+PHOTO `N>1` receipts add the in-process concurrency telemetry, and only there
+(N1 bytes are unchanged, GEO N2..N5 bytes are unchanged):
+
+```json
+{"schema_version":1,"phase":"photo","backend":"owned_cuda","tile":16,"cache":true,"lookahead":true,"lifetime":"preallocated_rotation","fusion_mode":null,"max_concurrent_solvers":2,"rolling_active_jobs":2,"requested_n":2,"admitted_n":2,"observed_n":2,"owner_intervals":[{"begin_us":0,"end_us":41},{"begin_us":3,"end_us":44}]}
+```
+
+`rolling_active_jobs` is bound **exactly** to the CLI value; a receipt whose
+requested/admitted N diverges refuses rather than records the difference.
+`observed_n` and `owner_intervals` are descriptive telemetry from the real
+coordinator event stream (`admitted` opens an interval, `owner_joined` closes
+it), never a physical-overlap, resource-fit or performance claim. There is one
+interval per admitted owner generation, so N owners over M scheduled references
+report M intervals; N1 reports none and keeps its historical bytes.
+
+### Shared controller selection state under N
+
+N in-process owners share one controller, so its rolling distinct-source
+selection state is the only thing that can be shared (the compiled cache itself
+is per-launch device state; no shared grayscale bank exists for PHOTO, so each
+owner carries private input decode charges). The raw shared LRU is **not**
+proven race safe: two owners' distinct references interleaved through one
+unpartitioned cache change both slot streams, which the standalone test shows
+deterministically. Selection state is therefore owner-private and reachable
+only under an exclusive boundary lease (`owned_selection_boundary.h`), and one
+controller instance serves exactly N single-use generations. A future N>1
+backend that shares selection state must acquire the same boundary.
+
 `cache` means distinct-source sweep cache for stereo and LRU input caching for
 fusion. `lookahead` means texture lookahead, not the resident normal producer.
 Stereo receipts report the actual selected lookahead boolean (false or true),
@@ -249,13 +307,15 @@ g++ -std=c++17 -DOPTIMIZED_DENSE_PLAN_STANDALONE_TEST -Isrc \
 ./plan_io_test
 g++ -std=c++17 -pthread -Isrc src/colmap/mvs/optimized_photo_forecast_test.cc -o photo_forecast_test
 ./photo_forecast_test
+g++ -std=c++17 -pthread -Isrc src/colmap/mvs/optimized_photo_concurrency_test.cc -o photo_concurrency_test
+./photo_concurrency_test
 # Also compile/run optimized_photo_options_test.cc, optimized_photo_paths_test.cc,
 # and fusion_dependencies_test.cc with the same -std=c++17 -Isrc flags.
 ```
 
-Also registered as `mvs/optimized_dispatch_test` and
-`mvs/optimized_photo_forecast_test` (plus the three additional seams above) in
-CTest. `exe/resident_cli_runner_test` includes successful production PHOTO
+Also registered as `mvs/optimized_dispatch_test`,
+`mvs/optimized_photo_forecast_test` and `mvs/optimized_photo_concurrency_test`
+(plus the three additional seams above) in CTest. `exe/resident_cli_runner_test` includes successful production PHOTO
 options export on CUDA/HIP dense-library builds, requiring no GPU execution.
 `mvs/fusion_test` exercises the real `COLMAP_BINARY` CLI: missing bitmap/depth/
 normal must refuse with no output/receipt, a complete strict invocation succeeds,

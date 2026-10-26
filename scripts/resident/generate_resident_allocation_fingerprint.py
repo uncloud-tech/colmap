@@ -163,6 +163,7 @@ CLOSURE = (
     'src/colmap/mvs/optimized_photo_forecast.h',
     'src/colmap/mvs/optimized_photo_options.h',
     'src/colmap/mvs/optimized_photo_paths.h',
+    'src/colmap/mvs/optimized_photo_reservation.h',
     'src/colmap/mvs/optimized_photo_runner.h',
     'src/colmap/mvs/owned_pair_image.h',
     'src/colmap/exe/mvs.cc',
@@ -170,6 +171,12 @@ CLOSURE = (
     'src/colmap/exe/optimized_dense_plan.cc',
     'src/colmap/exe/optimized_dense_plan_io.h',
     'src/colmap/exe/optimized_dense_plan_options.h',
+    'src/colmap/mvs/owned_graph.h',
+    'src/colmap/mvs/owned_graph.cu',
+    'src/colmap/mvs/owned_graph_topology.h',
+    'src/colmap/mvs/owned_graph_coordinator.h',
+    'src/colmap/mvs/owned_async_pool.h',
+    'src/colmap/mvs/owned_selection_boundary.h',
     'scripts/resident/generate_resident_allocation_fingerprint.py',
 )
 

@@ -1084,6 +1084,10 @@ void OptionManager::AddPatchMatchStereoOptions() {
                    &patch_match_stereo->allow_missing_files);
   AddDefaultOption("PatchMatchStereo.write_consistency_graph",
                    &patch_match_stereo->write_consistency_graph);
+  AddDefaultOption("PatchMatchStereo.owned_cuda_graphs",
+                   &patch_match_stereo->owned_cuda_graphs);
+  AddDefaultOption("PatchMatchStereo.owned_async_pool",
+                   &patch_match_stereo->owned_async_pool);
   AddDefaultOption("PatchMatchStereo.random_seed",
                    &patch_match_stereo->random_seed);
   AddDefaultOption("PatchMatchStereo.num_threads",

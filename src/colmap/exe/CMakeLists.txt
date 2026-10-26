@@ -103,6 +103,16 @@ if(TESTS_ENABLED AND MVS_ENABLED AND CUDA_ENABLED AND NOT HIP_ENABLED)
     target_link_libraries(colmap_exe_optimized_dense_plan_test colmap_mvs_cuda)
 endif()
 
+# Requires native CUDA linkage, but executes only CPU admission/input checks.
+# Unlike the numerical fixture this test needs no GPU or opt-in environment.
+if(UNIX AND MVS_ENABLED AND CUDA_ENABLED AND DOWNLOAD_ENABLED AND NOT HIP_ENABLED)
+    COLMAP_ADD_TEST(
+        NAME optimized_photo_entry_test
+        SRCS optimized_photo_entry_test.cc
+        LINK_LIBS colmap_exe colmap_mvs_cuda
+    )
+endif()
+
 COLMAP_ADD_TEST(
     NAME photo_directory_summary_test
     SRCS photo_directory_summary_test.cc
