@@ -56,6 +56,12 @@ jobs:
       CUDA_PATCH_VERSION: 0
 
     steps:
+      - name: Preserve committed source bytes
+        shell: pwsh
+        run: |
+          # This ephemeral runner must not convert fingerprinted sources to CRLF.
+          git config --global core.autocrlf false
+
       - uses: actions/checkout@v7
         with:
           # Native source fingerprints verify the committed lineage.
