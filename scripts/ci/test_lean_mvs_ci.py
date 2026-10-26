@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Public CI event/security contract; no third-party test dependencies."""
 
+import os
+import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -71,10 +74,50 @@ class LeanMvsCiTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Invalid format base", result.stderr)
 
+    def test_format_propagates_diff_failure(self):
+        real_git = shutil.which("git")
+        self.assertIsNotNone(real_git)
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            directory = Path(directory)
+            validation_log = directory / "validated"
+            commands = {
+                "git": (
+                    "#!/bin/sh\n"
+                    'if [ "$1" = diff ]; then\n'
+                    '  echo "Synthetic diff failure" >&2\n'
+                    "  exit 42\n"
+                    "fi\n"
+                    'if [ "$1" = rev-parse ]; then\n'
+                    '  echo base-valid >> "$VALIDATION_LOG"\n'
+                    "fi\n"
+                    'exec "$REAL_GIT" "$@"\n'
+                ),
+                "ruff": "#!/bin/sh\necho 'ruff 0.15.20'\n",
+                "clang-format": (
+                    "#!/bin/sh\necho 'clang-format version 22.1.5'\n"
+                ),
+            }
+            for name, content in commands.items():
+                command = directory / name
+                command.write_text(content)
+                command.chmod(0o755)
+            result = subprocess.run(
+                ["bash", str(ROOT / "scripts/ci/check_mvs_format.sh"), "HEAD"],
+                text=True,
+                capture_output=True,
+                env={
+                    **os.environ,
+                    "PATH": str(directory) + os.pathsep + os.environ["PATH"],
+                    "REAL_GIT": real_git,
+                    "VALIDATION_LOG": str(validation_log),
+                },
+            )
+            self.assertIn("base-valid", validation_log.read_text())
+        self.assertEqual(result.returncode, 42)
+        self.assertIn("Synthetic diff failure", result.stderr)
+
     def test_cpu_runner_refuses_missing_contract_before_compiling(self):
         # Exercise the helper's real public CLI against an incomplete checkout.
-        import tempfile
-
         with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             result = subprocess.run(
                 ["bash", str(ROOT / "scripts/ci/run_mvs_cpu.sh"), directory],

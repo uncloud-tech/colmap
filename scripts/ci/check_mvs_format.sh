@@ -12,6 +12,15 @@ fi
 [[ $(clang-format --version) == *'version 22.1.5'* ]]
 cpp=()
 python=()
+files=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-$PWD}}/mvs-format.XXXXXX")
+trap 'rm -f -- "$files"' EXIT
+if git diff --name-only -z --diff-filter=ACMR "$base" HEAD > "$files"; then
+  :
+else
+  status=$?
+  echo "Cannot discover files to format" >&2
+  exit "$status"
+fi
 # Git validates the base above. A file list preserves whitespace and cannot
 # become shell source. Only existing files are selected (deletions excluded).
 while IFS= read -r -d '' file; do
@@ -22,7 +31,7 @@ while IFS= read -r -d '' file; do
         *.cc|*.h|*.hpp|*.cpp|*.cu) cpp+=("$file") ;;
       esac ;;
   esac
-done < <(git diff --name-only -z --diff-filter=ACMR "$base" HEAD)
+done < "$files"
 printf 'Format base: %s; C++ files: %s; Python files: %s\n' \
   "$base" "${#cpp[@]}" "${#python[@]}"
 if ((${#cpp[@]})); then
