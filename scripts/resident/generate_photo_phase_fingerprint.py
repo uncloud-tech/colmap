@@ -37,6 +37,7 @@ CLOSURE = (
     'src/colmap/mvs/owned_async_pool.h',
     'src/colmap/mvs/gpu_mat.h',
     'src/colmap/mvs/owned_selection_boundary.h',
+    'src/colmap/mvs/owned_source_cache.h',
     'src/colmap/mvs/patch_match.h',
     'src/colmap/mvs/patch_match.cc',
     'src/colmap/mvs/patch_match_cuda_owned.h',

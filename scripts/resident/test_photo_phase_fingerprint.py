@@ -26,6 +26,7 @@ class PhotoFingerprintTest(unittest.TestCase):
             'src/colmap/mvs/owned_async_pool.h',
             'src/colmap/mvs/gpu_mat.h',
             'src/colmap/mvs/owned_selection_boundary.h',
+            'src/colmap/mvs/owned_source_cache.h',
             'src/colmap/mvs/patch_match.h',
             'src/colmap/mvs/patch_match.cc',
             'src/colmap/mvs/patch_match_cuda_owned.h',
@@ -50,6 +51,9 @@ class PhotoFingerprintTest(unittest.TestCase):
                 target = root / path
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(b'TEST-EVIDENCE\n')
+            # The production lookup header must be checked even when only
+            # that header changes; its implementation is compiled by the TU.
+            (root / 'src/colmap/mvs/owned_source_cache.h').write_bytes(b'TEST-EVIDENCE\n')
             git('add', 'src')
             git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
                 'commit', '-qm', 'fixture')
@@ -64,7 +68,6 @@ class PhotoFingerprintTest(unittest.TestCase):
             encoded = b''.join(path.encode() + b'\0TEST-EVIDENCE\n\n'
                                for path in generator.CLOSURE)
             self.assertIn(hashlib.sha256(encoded).hexdigest(), output.read_text())
-            self.assertEqual(len(generator.CLOSURE), 24)
             self.assertIn(f'kPhotoPhaseV1SourceCommit[] = "{lineage}"',
                           output.read_text())
             # Non-closure commits still require a new per-build attestation.
@@ -79,10 +82,11 @@ class PhotoFingerprintTest(unittest.TestCase):
             self.assertNotEqual(first, output.read_text())
             self.assertIn(f'"{lineage}";', output.read_text())
             original = output.read_text()
-            source = root / 'src/colmap/mvs/owned_graph_coordinator.h'
+            source = root / 'src/colmap/mvs/owned_source_cache.h'
             source.write_bytes(b'changed\n')
             with self.assertRaisesRegex(ValueError, 'differs from committed'):
                 generator.generate(root, output)
+            self.assertEqual(len(generator.CLOSURE), 25)
             git('add', 'src')
             git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
                 'commit', '-qm', 'new closure')
