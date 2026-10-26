@@ -57,6 +57,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Native source fingerprints verify the committed lineage.
+          fetch-depth: 0
 
       # We define the vcpkg binary sources using separate variables for read and
       # write operations:

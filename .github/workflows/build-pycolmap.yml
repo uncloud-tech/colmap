@@ -65,6 +65,9 @@ jobs:
           swap-storage: true
 
       - uses: actions/checkout@v7
+        with:
+          # Native source fingerprints verify the committed lineage.
+          fetch-depth: 0
 
       - name: Restore compiler cache
         uses: ./.github/actions/compiler-cache

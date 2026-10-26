@@ -117,6 +117,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Native source fingerprints verify the committed lineage.
+          fetch-depth: 0
 
       - name: Check code format
         if: matrix.config.checkCodeFormat
