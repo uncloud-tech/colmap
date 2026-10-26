@@ -6,6 +6,7 @@
 #include "colmap/mvs/patch_match_cuda_owned.cu"
 #undef COLMAP_OWNED_CACHE_TRACE_TEST
 
+#include <cstdint>
 #include <cstring>
 #include <vector>
 
@@ -52,13 +53,30 @@ void CheckRotation(size_t width, size_t height, bool wait) {
     reference.Set(p, std::make_unique<PitchedNormal>(w, h, p ? 31 : 17));
   }
   std::vector<float> original(width * height * 3);
-  const float values[] = {0.0f, -0.0f, 0.25f, -0.5f, 1.0f, -1.0f};
+  // Include both zero signs, infinities, subnormals and signed quiet/signaling
+  // NaN payloads. Use memcpy so the host never performs floating-point math on
+  // these patterns. Most pixels are coordinate/plane-specific finite values.
+  const uint32_t patterns[] = {0x00000000u,
+                               0x80000000u,
+                               0x7f800000u,
+                               0xff800000u,
+                               0x00000001u,
+                               0x80000001u,
+                               0x7fc12345u,
+                               0xffc54321u,
+                               0x7f812345u,
+                               0xff854321u};
   for (size_t s = 0; s < 3; ++s) {
     for (size_t i = 0; i < width * height; ++i) {
       // Match the all-zero invalid normal produced by filtering. In particular
       // do not canonicalize the signed zero created by the subsequent negation.
-      original[s * width * height + i] =
-          i % 7 == 0 ? 0.0f : values[(s * width * height + i) % 6];
+      const size_t index = s * width * height + i;
+      const uint32_t bits =
+          i % 7 == 0
+              ? 0u
+              : (i % 3 == 0 ? patterns[(i / 3 + s) % 10]
+                            : 0x3f000000u + static_cast<uint32_t>(index));
+      std::memcpy(&original[index], &bits, sizeof(bits));
     }
   }
   std::vector<float> initial[2][2];
@@ -102,8 +120,8 @@ void CheckRotation(size_t width, size_t height, bool wait) {
                                    input->Bytes(),
                                    cudaMemcpyDeviceToHost,
                                    stream.Get()));
-    RotateNormalMap<<<grid, block, 0, stream.Get()>>>(input->View(),
-                                                      output->View());
+    // Exercise exactly the production launch geometry, including partial tiles.
+    LaunchNormalMapRotation(input->View(), output->View(), stream.Get());
     CUDA_SAFE_CALL(cudaMemcpyAsync(after[turn].data(),
                                    input->ptr,
                                    input->Bytes(),
@@ -171,8 +189,19 @@ void CheckRotation(size_t width, size_t height, bool wait) {
 }
 
 TEST(OwnedNormalRotation, PitchedTwoPassBitwiseReference) {
-  const std::pair<size_t, size_t> shapes[] = {
-      {35, 19}, {3, 7}, {1, 9}, {9, 1}, {1, 1}};
+  const std::pair<size_t, size_t> shapes[] = {{65, 97},
+                                              {97, 65},
+                                              {31, 33},
+                                              {33, 31},
+                                              {32, 32},
+                                              {64, 64},
+                                              {35, 19},
+                                              {3, 7},
+                                              {1, 65},
+                                              {65, 1},
+                                              {1, 9},
+                                              {9, 1},
+                                              {1, 1}};
   for (const auto& shape : shapes) {
     for (bool wait : {false, true}) {
       SCOPED_TRACE(::testing::Message()
