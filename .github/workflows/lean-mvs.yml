@@ -59,6 +59,9 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Trust only the checked-out workspace in this container
+        # Checkout's temporary global config does not persist into run steps.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Install headless build dependencies
         run: |
           apt-get install -y --no-install-recommends \

@@ -61,6 +61,55 @@ class LeanMvsCiTest(unittest.TestCase):
             text,
         )
 
+    def test_container_trust_is_limited_to_checked_out_workspace(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            directory = Path(directory)
+            workspace = directory / "workspace"
+            other = directory / "other"
+            env = {
+                **os.environ,
+                "GIT_CONFIG_GLOBAL": str(directory / "gitconfig"),
+                "GIT_CONFIG_NOSYSTEM": "1",
+            }
+            for repository in (workspace, other):
+                subprocess.run(
+                    ["git", "init", "-q", str(repository)],
+                    env=env,
+                    check=True,
+                )
+            env["GIT_TEST_ASSUME_DIFFERENT_OWNER"] = "1"
+            env["GITHUB_WORKSPACE"] = str(workspace)
+
+            def inspect(repository):
+                return subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(repository),
+                        "rev-parse",
+                        "--show-toplevel",
+                    ],
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                )
+
+            self.assertNotEqual(inspect(workspace).returncode, 0)
+            command = (
+                'git config --global --add safe.directory "$GITHUB_WORKSPACE"'
+            )
+            workflow = (ROOT / ".github/workflows/lean-mvs.yml").read_text()
+            self.assertIn(command, workflow)
+            subprocess.run(["bash", "-c", command], env=env, check=True)
+            self.assertEqual(inspect(workspace).returncode, 0)
+            self.assertNotEqual(inspect(other).returncode, 0)
+            trusted = subprocess.check_output(
+                ["git", "config", "--global", "--get-all", "safe.directory"],
+                env=env,
+                text=True,
+            )
+            self.assertEqual(trusted.splitlines(), [str(workspace)])
+
     def test_format_refuses_invalid_base(self):
         result = subprocess.run(
             [
