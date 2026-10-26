@@ -23,6 +23,7 @@ CLOSURE = (
     "src/colmap/mvs/optimized_photo_runner.h",
     "src/colmap/mvs/owned_rotation_storage.h",
     "src/colmap/mvs/owned_selection_scratch.h",
+    "src/colmap/mvs/owned_source_cache.h",
     "src/colmap/mvs/owned_prng_boundary.h",
     "src/colmap/mvs/owned_prng.h",
     "src/colmap/mvs/patch_match_cuda_owned.cu",
