@@ -502,8 +502,6 @@ TEST_F(ResidentCohortWireTest, ProcessOnceParityParseRuleAndOneSidedReviewedR) {
   // preflight_max) must shift coherently and parse.
   {
     std::string one_sided = assert_wire_;
-    const uint64_t estimate_host = 3749;
-    const uint64_t reviewed_host = 4000;
     const auto replace_first = [&](const std::string& needle,
                                    const std::string& update) {
       const size_t at = one_sided.find(needle);

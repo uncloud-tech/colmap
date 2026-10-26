@@ -62,14 +62,14 @@ struct RotationSlotLayout {
 
 struct OwnedRotationLayout {
   size_t width, height, sources, logical_bytes;
-  std::vector<RotationSlotLayout> slots;
+  std::vector<RotationSlotLayout> slot_layouts;
 
   const RotationSlotLayout& At(RotationRole role, unsigned parity) const {
     RotationRoleName(role);
     if (parity > 1 || (role == RotationRole::kWorkspace && parity != 0)) {
       throw std::invalid_argument("Invalid rotation parity");
     }
-    for (const auto& slot : slots) {
+    for (const auto& slot : slot_layouts) {
       if (slot.role == role && slot.parity == parity) return slot;
     }
     throw std::out_of_range("Missing rotation slot");
@@ -153,7 +153,7 @@ inline OwnedRotationLayout BuildOwnedRotationLayout(size_t width,
   detail::CheckDimension(height);
   detail::CheckDimension(sources);
   OwnedRotationLayout layout{width, height, sources, 0, {}};
-  layout.slots.reserve(21);
+  layout.slot_layouts.reserve(21);
   for (unsigned role_index = 0; role_index <= 10; ++role_index) {
     const auto role = static_cast<RotationRole>(role_index);
     const bool workspace = role == RotationRole::kWorkspace;
@@ -174,7 +174,7 @@ inline OwnedRotationLayout BuildOwnedRotationLayout(size_t width,
       detail::ValidateSlot(slot);
       layout.logical_bytes =
           detail::CheckedAdd(layout.logical_bytes, slot.requested_span_bytes);
-      layout.slots.push_back(slot);
+      layout.slot_layouts.push_back(slot);
     }
   }
   return layout;

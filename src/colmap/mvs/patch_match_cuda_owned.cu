@@ -2456,7 +2456,7 @@ void PatchMatchCuda::EmitRotationAllocations() {
          << " phase=" << record.lifetime_phase;
     LOG(INFO) << line.str();
   };
-  for (const auto& slot : rotation_layout_.slots) {
+  for (const auto& slot : rotation_layout_.slot_layouts) {
     const auto p = slot.parity;
     switch (slot.role) {
       case RotationRole::kPrng:

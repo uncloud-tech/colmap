@@ -70,17 +70,6 @@ int RunArgsExpectingError(const std::vector<std::string>& args,
   return exit_code;
 }
 
-int RunArgs(const std::vector<std::string>& args) {
-  std::vector<char*> argv;
-  for (auto& arg : args) {
-    argv.push_back(const_cast<char*>(arg.c_str()));
-  }
-  argv.push_back(nullptr);
-  return RunPatchMatchStereoWithExecution(static_cast<int>(argv.size() - 1),
-                                          argv.data(),
-                                          mvs::PatchMatchExecution::kStock);
-}
-
 class ResidentCliCohortTest : public ::testing::Test {
  protected:
   void SetUp() override {

@@ -203,7 +203,7 @@ class RotationReuse(unittest.TestCase):
         records = body(
             self.cu, "void PatchMatchCuda::EmitRotationAllocations()"
         )
-        self.assertIn("rotation_layout_.slots", records)
+        self.assertIn("rotation_layout_.slot_layouts", records)
         self.assertIn(
             "MakeRotationAllocationRecord(slot, mat.GetPitch())", records
         )

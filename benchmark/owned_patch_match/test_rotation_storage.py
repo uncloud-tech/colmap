@@ -79,7 +79,7 @@ CPP = (
     "      : backend(b), layout(BuildOwnedRotationLayout(w, h, s)"
     ") {\n"
     "    try {\n"
-    "      for (const auto& slot : layout.slots) {\n"
+    "      for (const auto& slot : layout.slot_layouts) {\n"
     "        int index = backend.attempts++;\n"
     "        if (index == backend.fail_at) throw std::runtime_err"
     'or("allocation");\n'
@@ -122,7 +122,7 @@ CPP = (
     "void LayoutChecks() {\n"
     "  auto l = BuildOwnedRotationLayout(3, 5, 4);\n"
     "  assert(l.width == 3 && l.height == 5 && l.sources == 4);\n"
-    "  assert(l.slots.size() == 21);\n"
+    "  assert(l.slot_layouts.size() == 21);\n"
     "  assert(l.logical_bytes == 15 * (146 + 26 * 4) + 8 * 5 * 4)"
     ";\n"
     "  const std::array<size_t, 11> depths{1,1,3,1,1,1,4,4,4,4,2}"
@@ -141,7 +141,7 @@ CPP = (
     "\n"
     "    for (unsigned p = 0; p < (role == 10 ? 1u : 2u); ++p) {\n"
     "      const auto& s = l.At(r, p);\n"
-    "      assert(&s == &l.slots[index++]);\n"
+    "      assert(&s == &l.slot_layouts[index++]);\n"
     "      assert(s.role == r && s.parity == p);\n"
     "      assert(s.width == (role == 10 ? 5u : (p ? 5u : 3u)));\n"
     "      assert(s.height == (role == 10 ? 4u : (p ? 3u : 5u)));"
@@ -402,6 +402,8 @@ class RotationStorageTest(unittest.TestCase):
                     str(root),
                     "-I",
                     str(ROOT),
+                    "-I",
+                    str(ROOT / "src"),
                     str(source),
                     "-o",
                     str(binary),
@@ -421,6 +423,18 @@ class RotationStorageTest(unittest.TestCase):
 
     def test_actual_helper(self):
         result = self.compile_run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_qt_slots_macro(self):
+        # Qt's keyword macro must not erase names in the actual public headers.
+        cpp = (
+            "#define slots\n"
+            '#include "colmap/mvs/owned_pair_coordinator.h"\n'
+            '#include "colmap/mvs/owned_rotation_memory.h"\n'
+            + CPP
+            + "\n#ifndef slots\n#error Qt slots macro was removed\n#endif\n"
+        )
+        result = self.compile_run(cpp=cpp)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_negative_helper_mutants(self):

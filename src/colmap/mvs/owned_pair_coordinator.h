@@ -164,27 +164,28 @@ class PairCoordinator {
   // Finish.
   PairCoordinator(ByteCharge capacity,
                   ByteCharge process_charge,
-                  std::array<ByteCharge, 3> slots,
+                  std::array<ByteCharge, 3> slot_charges,
                   std::vector<ByteCharge> forecasts,
                   std::chrono::milliseconds timeout,
                   std::function<void(const PairEvent&)> sink = {})
-      : PairCoordinator(PairDispatch::kPair,
-                        capacity,
-                        process_charge,
-                        std::vector<ByteCharge>(slots.begin(), slots.end()),
-                        timeout,
-                        std::move(sink),
-                        EarlyGeometryPermits::kOn,
-                        3,
-                        true) {
+      : PairCoordinator(
+            PairDispatch::kPair,
+            capacity,
+            process_charge,
+            std::vector<ByteCharge>(slot_charges.begin(), slot_charges.end()),
+            timeout,
+            std::move(sink),
+            EarlyGeometryPermits::kOn,
+            3,
+            true) {
     if (forecasts.size() < 3) {
       throw std::invalid_argument("rolling needs >=3 jobs");
     }
     for (const auto& forecast : forecasts) {
       if (!forecast.host || !forecast.device ||
-          std::none_of(slots.begin(), slots.end(), [&](ByteCharge slot) {
-            return Fits(forecast, slot);
-          })) {
+          std::none_of(slot_charges.begin(),
+                       slot_charges.end(),
+                       [&](ByteCharge slot) { return Fits(forecast, slot); })) {
         throw std::invalid_argument(
             "rolling forecast cannot fit any full slot");
       }
@@ -192,7 +193,7 @@ class PairCoordinator {
     rolling_ = true;
     count_ = forecasts.size();
     forecasts_ = std::move(forecasts);
-    slots_.assign(slots.begin(), slots.end());
+    slots_.assign(slot_charges.begin(), slot_charges.end());
     slot_owner_.assign(3, kNoJob);
     job_slot_.assign(count_, kNoJob);
     state_.assign(count_, JobState::kReserved);

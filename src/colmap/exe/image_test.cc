@@ -9,6 +9,7 @@
 #include "colmap/util/file.h"
 #include "colmap/util/testing.h"
 
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -60,7 +61,9 @@ std::map<std::string, std::string> ImageTreeSnapshot(
     }
     content +=
         "\nmtime=" +
-        std::to_string(entry.last_write_time().time_since_epoch().count());
+        std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           entry.last_write_time().time_since_epoch())
+                           .count());
     result.emplace(entry.path().lexically_relative(root).string(), content);
   }
   return result;
