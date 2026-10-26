@@ -5,9 +5,8 @@
 // open image headers via OpenImageIO); it is compiled only where that
 // library is available and is never stubbed into place.
 
-#include "colmap/mvs/resident_cohort_wire.h"
-
 #include "colmap/mvs/owned_resident_minima.h"
+#include "colmap/mvs/resident_cohort_wire.h"
 #include "colmap/util/logging.h"
 
 #include <algorithm>
@@ -29,7 +28,8 @@ using owned::CheckedAdd;
 // timestamps refuses.
 void CheckSliceIdentitiesUnchanged(
     const std::vector<owned::BankJobIdentities>& invocation_identities,
-    size_t first_original_ordinal, size_t count) {
+    size_t first_original_ordinal,
+    size_t count) {
   for (size_t k = 0; k < count; ++k) {
     const auto& snapshot = invocation_identities.at(first_original_ordinal + k);
     for (const auto& layer : snapshot) {
@@ -93,9 +93,10 @@ void VerifyResidentCohortForecastNativeFloors(
   // canonical composition with the native singleton floor bank charge.
   for (size_t j = 0; j < invocation_jobs.size(); ++j) {
     CheckSliceIdentitiesUnchanged(invocation_identities, j, 1);
-    const SingletonFloors floors = ComputeSingletonFloors(
-        invocation_jobs.at(j), static_cast<size_t>(wire.max_future),
-        wire.unclassified_allowance_bytes);
+    const SingletonFloors floors =
+        ComputeSingletonFloors(invocation_jobs.at(j),
+                               static_cast<size_t>(wire.max_future),
+                               wire.unclassified_allowance_bytes);
     CheckSliceIdentitiesUnchanged(invocation_identities, j, 1);
     // The member's own cohort carries the whole-invocation basis in its
     // queue (parser gate); the singleton hypothesis uses the declared
@@ -114,17 +115,14 @@ void VerifyResidentCohortForecastNativeFloors(
           "cohort native floors: no wire member for invocation ordinal " +
           std::to_string(j));
     }();
-    const uint64_t singleton_ledger_host = [
-        =,
-        &wire] {
+    const uint64_t singleton_ledger_host = [=, &wire] {
       uint64_t sum = wire.global_snapshot_plan_host_bytes;
       sum = CheckedAdd(sum, wire.summary.process_once_host_bytes);
       sum = CheckedAdd(sum, floors.bank_host_floor);
       sum = CheckedAdd(sum, floors.normal_charge_floor);
       return CheckedAdd(sum, member.private_host_bytes);
     }();
-    const uint64_t singleton_ledger_device = [
-        =] {
+    const uint64_t singleton_ledger_device = [=] {
       uint64_t sum = wire.summary.process_once_device_bytes;
       sum = CheckedAdd(sum, floors.bank_device_floor);
       return CheckedAdd(sum, member.private_device_bytes);
@@ -153,26 +151,24 @@ void VerifyResidentCohortForecastNativeFloors(
           invocation_jobs.at(member.member_ordinal));  // original order
     }
     size_t cohort_first = cohort.members.front().member_ordinal;
-    CheckSliceIdentitiesUnchanged(invocation_identities, cohort_first,
-                                  cohort_jobs.size());
+    CheckSliceIdentitiesUnchanged(
+        invocation_identities, cohort_first, cohort_jobs.size());
     const owned::BankRawLimits raw =
         owned::HostInputBank::RawEstimate(cohort_jobs);
     const owned::NormalAllowance normal =
         owned::HostInputBank::EstimateNormalAllowance(
             cohort_jobs, static_cast<size_t>(wire.max_future));
-    CheckSliceIdentitiesUnchanged(invocation_identities, cohort_first,
-                                  cohort_jobs.size());
+    CheckSliceIdentitiesUnchanged(
+        invocation_identities, cohort_first, cohort_jobs.size());
     // The allowance folds into the raw BEFORE the single canonical margin,
     // exactly once (compose-once rule; never re-margined).
-    const uint64_t bank_host_floor = owned::MarginBytes(
-        CheckedAdd(raw.bounded_host_raw_bytes,
-                   wire.unclassified_allowance_bytes));
+    const uint64_t bank_host_floor = owned::MarginBytes(CheckedAdd(
+        raw.bounded_host_raw_bytes, wire.unclassified_allowance_bytes));
     THROW_CHECK_GE(cohort.bank_charge_host_bytes, bank_host_floor)
         << "cohort " << cohort.ordinal
         << " bank host charge is below the native allowance-composed raw "
         << "minimum for this cohort slice";
-    const uint64_t bank_device_floor =
-        owned::MarginBytes(raw.device_raw_bytes);
+    const uint64_t bank_device_floor = owned::MarginBytes(raw.device_raw_bytes);
     THROW_CHECK_GE(cohort.bank_charge_device_bytes, bank_device_floor)
         << "cohort " << cohort.ordinal
         << " bank device charge is below the native raw minimum for this "
@@ -197,9 +193,11 @@ void VerifyResidentCohortForecastNativeFloors(
     for (size_t m = 0; m < cohort.members.size(); ++m) {
       const owned::BankJob& job = cohort_jobs.at(m);
       const auto& reference = job.images.at(job.reference_image_idx);
-      const auto private_minimum = owned::ResidentPrivateLogicalMinimum(
-          reference.GetWidth(), reference.GetHeight(),
-          job.source_image_idxs.size(), /*include_owner_normal=*/true);
+      const auto private_minimum =
+          owned::ResidentPrivateLogicalMinimum(reference.GetWidth(),
+                                               reference.GetHeight(),
+                                               job.source_image_idxs.size(),
+                                               /*include_owner_normal=*/true);
       THROW_CHECK_GE(cohort.members.at(m).private_host_bytes,
                      private_minimum.host)
           << "cohort " << cohort.ordinal << " member " << m

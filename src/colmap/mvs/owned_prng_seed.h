@@ -26,8 +26,8 @@ COLMAP_OWNED_PRNG_HD inline uint64_t Mix(const uint64_t value) {
 
 // Coordinates are those of the current (possibly rotated) reference map.
 COLMAP_OWNED_PRNG_HD inline uint64_t PixelSeed(const int64_t seed,
-                                             const int64_t row,
-                                             const int64_t col) {
+                                               const int64_t row,
+                                               const int64_t col) {
   const uint64_t coordinate =
       (static_cast<uint64_t>(static_cast<uint32_t>(col)) << 32) ^
       static_cast<uint64_t>(static_cast<uint32_t>(row));

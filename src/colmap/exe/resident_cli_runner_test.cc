@@ -26,10 +26,9 @@ int RunArgs(const std::vector<std::string>& args) {
     argv.push_back(const_cast<char*>(arg.c_str()));
   }
   argv.push_back(nullptr);
-  return RunPatchMatchStereoWithExecution(
-      static_cast<int>(argv.size() - 1),
-      argv.data(),
-      mvs::PatchMatchExecution::kStock);
+  return RunPatchMatchStereoWithExecution(static_cast<int>(argv.size() - 1),
+                                          argv.data(),
+                                          mvs::PatchMatchExecution::kStock);
 }
 
 class ResidentCliRunnerTest : public ::testing::Test {
@@ -43,8 +42,10 @@ class ResidentCliRunnerTest : public ::testing::Test {
 
   std::vector<std::string> BaseArgs() const {
     return {"colmap",
-            "--workspace_path", workspace_.string(),
-            "--PatchMatchStereo.gpu_index", "0"};
+            "--workspace_path",
+            workspace_.string(),
+            "--PatchMatchStereo.gpu_index",
+            "0"};
   }
 
   std::filesystem::path workspace_;
@@ -225,7 +226,8 @@ TEST_F(ResidentCliRunnerTest, ConcurrentCliRequiresCanonicalUnsigned) {
     const auto diagnostic = ::testing::internal::GetCapturedStderr();
     EXPECT_EQ(result, EXIT_FAILURE) << concurrency;
     EXPECT_NE(diagnostic.find("canonical unsigned decimal literal"),
-              std::string::npos) << diagnostic;
+              std::string::npos)
+        << diagnostic;
     EXPECT_FALSE(std::filesystem::exists(workspace_ / "stereo"));
   }
 }

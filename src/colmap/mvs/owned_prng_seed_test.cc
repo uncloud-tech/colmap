@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "colmap/mvs/owned_prng_seed.h"
+
 #include "colmap/mvs/patch_match_options.h"
 
 #include <algorithm>

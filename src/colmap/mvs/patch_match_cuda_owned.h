@@ -3,15 +3,6 @@
 #pragma once
 
 #if !defined(COLMAP_HIP_ENABLED)
-#include "colmap/mvs/owned_cuda_execution.h"
-#include "colmap/mvs/owned_graph.h"
-#include "colmap/mvs/owned_async_pool.h"
-#include "colmap/mvs/owned_tile.h"
-#include "colmap/mvs/owned_rotation_storage.h"
-#include "colmap/mvs/owned_selection_scratch.h"
-#include "colmap/mvs/owned_prng_boundary.h"
-#include "colmap/mvs/patch_match_calibration.h"
-
 #include "colmap/mvs/cuda_texture.h"
 #include "colmap/mvs/depth_map.h"
 #include "colmap/mvs/gpu_mat.h"
@@ -19,7 +10,15 @@
 #include "colmap/mvs/gpu_mat_ref_image.h"
 #include "colmap/mvs/image.h"
 #include "colmap/mvs/normal_map.h"
+#include "colmap/mvs/owned_async_pool.h"
+#include "colmap/mvs/owned_cuda_execution.h"
+#include "colmap/mvs/owned_graph.h"
+#include "colmap/mvs/owned_prng_boundary.h"
+#include "colmap/mvs/owned_rotation_storage.h"
+#include "colmap/mvs/owned_selection_scratch.h"
+#include "colmap/mvs/owned_tile.h"
 #include "colmap/mvs/patch_match.h"
+#include "colmap/mvs/patch_match_calibration.h"
 #include "colmap/util/cuda_to_hip.h"
 
 #include <functional>
@@ -32,7 +31,8 @@ namespace mvs {
 namespace owned {
 
 // Device allocation adapter for the CUDA-independent scratch owner. No stream
-// is retained here: PatchMatchCuda fences before members unwind or are destroyed.
+// is retained here: PatchMatchCuda fences before members unwind or are
+// destroyed.
 class CudaSelectionStorage {
  public:
   explicit CudaSelectionStorage(size_t bytes);
@@ -79,7 +79,7 @@ class PatchMatchCuda {
 
   ReferenceCalibration CurrentCalibration() const {
     return SnapshotReferenceCalibration(ref_K_host_[rotation_in_half_pi_],
-                                         ref_inv_K_host_[rotation_in_half_pi_]);
+                                        ref_inv_K_host_[rotation_in_half_pi_]);
   }
 
   void ComputeCudaConfig();
@@ -133,11 +133,14 @@ class PatchMatchCuda {
   cudaTextureObject_t borrowed_src_depth_ = 0;
   std::unique_ptr<GpuMat<int>> source_layers_;
   cudaTextureObject_t SourceImagesTexture() const {
-    return problem_.resident_bank ? borrowed_src_images_ : src_images_texture_->GetObj();
+    return problem_.resident_bank ? borrowed_src_images_
+                                  : src_images_texture_->GetObj();
   }
   cudaTextureObject_t SourceDepthTexture() const {
-    return problem_.resident_bank ? borrowed_src_depth_ :
-        (src_depth_maps_texture_ ? src_depth_maps_texture_->GetObj() : 0);
+    return problem_.resident_bank
+               ? borrowed_src_depth_
+               : (src_depth_maps_texture_ ? src_depth_maps_texture_->GetObj()
+                                          : 0);
   }
   const int* SourceLayers() const {
     return source_layers_ ? source_layers_->GetPtr() : nullptr;

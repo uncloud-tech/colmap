@@ -6,8 +6,9 @@
 // no payloads, no CUDA, no coordinator, no wire. All expected arithmetic
 // values below are independently derived literals, never recomputed through
 // the code under test.
-#include "colmap/mvs/owned_cohort.h"
 #include "colmap/mvs/resident_cohorts.h"
+
+#include "colmap/mvs/owned_cohort.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -52,8 +53,8 @@ ByteCharge TestCapacityScalar() { return {2300, 1500}; }
 // Test bank estimator with the union semantics tabulated above.
 owned::CohortBankEstimator TestEstimator() {
   return [](size_t first, size_t count) -> ByteCharge {
-    static const ByteCharge kSingleton[3] = {{800, 300}, {700, 250},
-                                             {900, 400}};
+    static const ByteCharge kSingleton[3] = {
+        {800, 300}, {700, 250}, {900, 400}};
     static const ByteCharge kUnions[2] = {{1100, 420}, {1400, 600}};
     // (11,15) union is only needed by planners that pack that slice; the
     // greedy FIFO packing never forms it in the scenarios below.
@@ -100,8 +101,11 @@ std::vector<owned::BankJobIdentities> TestIdentities(size_t count) {
 
 TEST(ResidentCohortBoundary, ValidatesRealPlannerPlanToTypedBoundary) {
   const auto selection = TestSelection();
-  const auto plan = owned::PlanCohorts(selection, TestForecasts(), TestTerms(),
-                                       TestCapacityScalar(), TestEstimator());
+  const auto plan = owned::PlanCohorts(selection,
+                                       TestForecasts(),
+                                       TestTerms(),
+                                       TestCapacityScalar(),
+                                       TestEstimator());
   // The scenario must produce the expected two FIFO cohorts {7,11}, {15}.
   ASSERT_EQ(plan.cohorts.size(), 2u);
   EXPECT_EQ(plan.cohorts[0].first, 0u);
@@ -109,8 +113,11 @@ TEST(ResidentCohortBoundary, ValidatesRealPlannerPlanToTypedBoundary) {
   EXPECT_EQ(plan.job_count, 3u);
 
   const resident::ValidatedCohortPlan validated =
-      resident::ValidateCohortPlan(plan, selection, TestForecasts(),
-                                   TestTerms(), TestCapacityScalar(),
+      resident::ValidateCohortPlan(plan,
+                                   selection,
+                                   TestForecasts(),
+                                   TestTerms(),
+                                   TestCapacityScalar(),
                                    /*max_concurrent_solvers=*/2,
                                    TestEstimator(),
                                    TestIdentities(selection.size()));
@@ -182,9 +189,14 @@ TEST(ResidentCohortBoundary, ValidatesRealPlannerPlanToTypedBoundary) {
   // mutations after validation cannot touch the retained copy.
   auto mutated_identities = TestIdentities(selection.size());
   const resident::ValidatedCohortPlan retained =
-      resident::ValidateCohortPlan(plan, selection, TestForecasts(),
-                                   TestTerms(), TestCapacityScalar(), 2,
-                                   TestEstimator(), mutated_identities);
+      resident::ValidateCohortPlan(plan,
+                                   selection,
+                                   TestForecasts(),
+                                   TestTerms(),
+                                   TestCapacityScalar(),
+                                   2,
+                                   TestEstimator(),
+                                   mutated_identities);
   mutated_identities[1][0].image.path = "recaptured-after-validation.bin";
   mutated_identities[2].clear();
   ASSERT_EQ(retained.InvocationIdentities().size(), 3u);
@@ -205,14 +217,18 @@ TEST(ResidentCohortBoundary, ReviewedReservationPolicyLedgerEvidence) {
   CohortTerms terms = TestTerms();
   terms.reviewed_bank = {2000, 1400};
   const ByteCharge capacity{3600, 2600};
-  const auto plan = owned::PlanCohorts(selection, TestForecasts(), terms,
-                                       capacity, TestEstimator());
+  const auto plan = owned::PlanCohorts(
+      selection, TestForecasts(), terms, capacity, TestEstimator());
   ASSERT_EQ(plan.cohorts.size(), 1u);
   ASSERT_EQ(plan.cohorts[0].original_jobs.size(), 3u);
 
   const resident::ValidatedCohortPlan validated =
-      resident::ValidateCohortPlan(plan, selection, TestForecasts(), terms,
-                                   capacity, /*max_concurrent_solvers=*/2,
+      resident::ValidateCohortPlan(plan,
+                                   selection,
+                                   TestForecasts(),
+                                   terms,
+                                   capacity,
+                                   /*max_concurrent_solvers=*/2,
                                    TestEstimator(),
                                    TestIdentities(selection.size()));
   EXPECT_FALSE(validated.ExecutionAuthorized());
@@ -248,8 +264,8 @@ TEST(ResidentCohortBoundary, UnfundedAdmittedConcurrencyRefusedHard) {
   const std::vector<ByteCharge> forecasts{{300, 300}, {300, 300}};
   CohortTerms terms;
   terms.process = {500, 300};
-  terms.queue_transient = {0, 0};   // explicit zero queue allowance
-  terms.unclassified = {0, 0};      // canonical: allowance-inclusive bank only
+  terms.queue_transient = {0, 0};  // explicit zero queue allowance
+  terms.unclassified = {0, 0};     // canonical: allowance-inclusive bank only
   terms.reviewed_bank = {0, 0};
   const ByteCharge capacity{2800, 1400};
   const auto estimator = [](size_t first, size_t count) -> ByteCharge {
@@ -260,16 +276,22 @@ TEST(ResidentCohortBoundary, UnfundedAdmittedConcurrencyRefusedHard) {
     if (first == 0 && count == 2) return {1800, 800};
     throw std::invalid_argument("test estimator: untabulated slice");
   };
-  const auto plan = owned::PlanCohorts(selection, forecasts, terms, capacity,
-                                       estimator);
+  const auto plan =
+      owned::PlanCohorts(selection, forecasts, terms, capacity, estimator);
   ASSERT_EQ(plan.cohorts.size(), 1u);
   // The unfunded concurrency is refused with the exact ledger literals
   // (canonical composition: 1800+500+600 = 2900 host; 800+300+600 = 1700
   // device; the former unclassified term is gone from the enforced
   // ledger).
   try {
-    resident::ValidateCohortPlan(plan, selection, forecasts, terms, capacity, 2,
-                                 estimator, TestIdentities(selection.size()));
+    resident::ValidateCohortPlan(plan,
+                                 selection,
+                                 forecasts,
+                                 terms,
+                                 capacity,
+                                 2,
+                                 estimator,
+                                 TestIdentities(selection.size()));
     FAIL() << "an unfunded cohort ledger must refuse";
   } catch (const std::invalid_argument& error) {
     const std::string message = error.what();
@@ -296,22 +318,37 @@ TEST(ResidentCohortBoundary, UnfundedConcurrencyRefusedPerSide) {
     if (first == 0 && count == 2) return {1800, 800};
     throw std::invalid_argument("test estimator: untabulated slice");
   };
-  const auto plan = owned::PlanCohorts(selection, forecasts, terms,
-                                       ByteCharge{2800, 1400}, estimator);
+  const auto plan = owned::PlanCohorts(
+      selection, forecasts, terms, ByteCharge{2800, 1400}, estimator);
   // Host-only failure: device cap raised, host cap unchanged.
-  EXPECT_THROW(resident::ValidateCohortPlan(
-                   plan, selection, forecasts, terms, ByteCharge{2800, 1800},
-                   2, estimator, TestIdentities(2)),
+  EXPECT_THROW(resident::ValidateCohortPlan(plan,
+                                            selection,
+                                            forecasts,
+                                            terms,
+                                            ByteCharge{2800, 1800},
+                                            2,
+                                            estimator,
+                                            TestIdentities(2)),
                std::invalid_argument);
   // Device-only failure: host cap raised, device cap unchanged.
-  EXPECT_THROW(resident::ValidateCohortPlan(
-                   plan, selection, forecasts, terms, ByteCharge{3050, 1400},
-                   2, estimator, TestIdentities(2)),
+  EXPECT_THROW(resident::ValidateCohortPlan(plan,
+                                            selection,
+                                            forecasts,
+                                            terms,
+                                            ByteCharge{3050, 1400},
+                                            2,
+                                            estimator,
+                                            TestIdentities(2)),
                std::invalid_argument);
   // EXACT-cap acceptance on both sides (equality fits).
   const resident::ValidatedCohortPlan exact_cap =
-      resident::ValidateCohortPlan(plan, selection, forecasts, terms,
-                                   ByteCharge{2900, 1700}, 2, estimator,
+      resident::ValidateCohortPlan(plan,
+                                   selection,
+                                   forecasts,
+                                   terms,
+                                   ByteCharge{2900, 1700},
+                                   2,
+                                   estimator,
                                    TestIdentities(2));
   EXPECT_EQ(exact_cap.Cohorts()[0].ledger.host, 2900u);
   EXPECT_EQ(exact_cap.Cohorts()[0].ledger.device, 1700u);
@@ -337,8 +374,8 @@ TEST(ResidentCohortBoundary, NonAdjacentLargestKReserveFitsExactCap) {
     // Independent union semantics: singleton banks (300,300),(350,300),
     // (300,300); pair union (3,4): (350,450); union (3..5) all three:
     // (800,700).
-    static const ByteCharge kSingleton[3] = {{300, 300}, {350, 300},
-                                             {300, 300}};
+    static const ByteCharge kSingleton[3] = {
+        {300, 300}, {350, 300}, {300, 300}};
     if (count == 1) return kSingleton[first];
     if (first == 0 && count == 2) return {350, 450};
     if (first == 0 && count == 3) return {800, 700};
@@ -350,9 +387,14 @@ TEST(ResidentCohortBoundary, NonAdjacentLargestKReserveFitsExactCap) {
   ASSERT_EQ(plan.cohorts[0].original_jobs.size(), 3u);
 
   const resident::ValidatedCohortPlan validated =
-      resident::ValidateCohortPlan(plan, selection, forecasts, terms,
-                                   capacity, /*max_concurrent_solvers=*/2,
-                                   estimator, TestIdentities(3));
+      resident::ValidateCohortPlan(plan,
+                                   selection,
+                                   forecasts,
+                                   terms,
+                                   capacity,
+                                   /*max_concurrent_solvers=*/2,
+                                   estimator,
+                                   TestIdentities(3));
   EXPECT_EQ(validated.Cohorts()[0].active_jobs, 2u);
   EXPECT_EQ(validated.Cohorts()[0].rolling_reserve.host, 200u);
   EXPECT_EQ(validated.Cohorts()[0].rolling_reserve.device, 100u);
@@ -383,8 +425,13 @@ TEST(ResidentCohortBoundary, LargestKSumOverflowRefused) {
   const auto plan =
       owned::PlanCohorts(selection, forecasts, terms, capacity, estimator);
   ASSERT_EQ(plan.cohorts.size(), 1u);
-  EXPECT_THROW(resident::ValidateCohortPlan(plan, selection, forecasts, terms,
-                                            capacity, 2, estimator,
+  EXPECT_THROW(resident::ValidateCohortPlan(plan,
+                                            selection,
+                                            forecasts,
+                                            terms,
+                                            capacity,
+                                            2,
+                                            estimator,
                                             TestIdentities(2)),
                std::overflow_error);
   // Device-only overflow: same shape, both privates carry huge DEVICE sides.
@@ -394,9 +441,14 @@ TEST(ResidentCohortBoundary, LargestKSumOverflowRefused) {
   const auto device_plan =
       owned::PlanCohorts(selection, device_huge, terms, capacity, estimator);
   ASSERT_EQ(device_plan.cohorts.size(), 1u);
-  EXPECT_THROW(resident::ValidateCohortPlan(device_plan, selection,
-                                            device_huge, terms, capacity, 2,
-                                            estimator, TestIdentities(2)),
+  EXPECT_THROW(resident::ValidateCohortPlan(device_plan,
+                                            selection,
+                                            device_huge,
+                                            terms,
+                                            capacity,
+                                            2,
+                                            estimator,
+                                            TestIdentities(2)),
                std::overflow_error);
 }
 
@@ -421,9 +473,14 @@ TEST(ResidentCohortBoundary, LargestKSumIgnoresIrrelevantOverflowingMembers) {
   ASSERT_EQ(plan.cohorts.size(), 1u);
   ASSERT_EQ(plan.cohorts[0].original_jobs.size(), 4u);
   const resident::ValidatedCohortPlan validated =
-      resident::ValidateCohortPlan(plan, selection, forecasts, terms,
-                                   capacity, /*max_concurrent_solvers=*/1,
-                                   estimator, TestIdentities(4));
+      resident::ValidateCohortPlan(plan,
+                                   selection,
+                                   forecasts,
+                                   terms,
+                                   capacity,
+                                   /*max_concurrent_solvers=*/1,
+                                   estimator,
+                                   TestIdentities(4));
   EXPECT_EQ(validated.Cohorts()[0].active_jobs, 1u);
   EXPECT_EQ(validated.Cohorts()[0].rolling_reserve.host,
             5000000000000000000ULL);
@@ -437,12 +494,18 @@ TEST(ResidentCohortBoundary, LargerConcurrencyThanCohortSumsFullSlice) {
   // capped by the member count (min(k, count)); cohort 0 {7,11} keeps its
   // largest-2 SUM (550,350), cohort 1 stays the singleton (400,300).
   const auto selection = TestSelection();
-  const auto plan = owned::PlanCohorts(selection, TestForecasts(), TestTerms(),
-                                       TestCapacityScalar(), TestEstimator());
+  const auto plan = owned::PlanCohorts(selection,
+                                       TestForecasts(),
+                                       TestTerms(),
+                                       TestCapacityScalar(),
+                                       TestEstimator());
   ASSERT_EQ(plan.cohorts.size(), 2u);
   const resident::ValidatedCohortPlan validated =
-      resident::ValidateCohortPlan(plan, selection, TestForecasts(),
-                                   TestTerms(), TestCapacityScalar(),
+      resident::ValidateCohortPlan(plan,
+                                   selection,
+                                   TestForecasts(),
+                                   TestTerms(),
+                                   TestCapacityScalar(),
                                    /*max_concurrent_solvers=*/5,
                                    TestEstimator(),
                                    TestIdentities(selection.size()));
@@ -476,14 +539,18 @@ TEST(ResidentCohortBoundary, NonCanonicalFixedTermsRefuseExplicitly) {
   // explicit composition checks must fire BEFORE provenance/planner work
   // (the frozen all-or-neither planner itself cannot even build a record
   // under a one-sided reservation).
-  const auto canonical_plan =
-      owned::PlanCohorts(selection, TestForecasts(), TestTerms(), capacity,
-                         TestEstimator());
+  const auto canonical_plan = owned::PlanCohorts(
+      selection, TestForecasts(), TestTerms(), capacity, TestEstimator());
   auto assert_refused = [&](CohortTerms terms, const std::string& needle) {
     try {
-      resident::ValidateCohortPlan(
-          canonical_plan, selection, TestForecasts(), terms, capacity, 2,
-          TestEstimator(), TestIdentities(3));
+      resident::ValidateCohortPlan(canonical_plan,
+                                   selection,
+                                   TestForecasts(),
+                                   terms,
+                                   capacity,
+                                   2,
+                                   TestEstimator(),
+                                   TestIdentities(3));
       FAIL() << "must refuse: " << needle;
     } catch (const std::invalid_argument& error) {
       EXPECT_NE(std::string(error.what()).find(needle), std::string::npos)
@@ -512,11 +579,18 @@ TEST(ResidentCohortBoundary, NonCanonicalFixedTermsRefuseExplicitly) {
   const ByteCharge reviewed_capacity{3600, 2600};
   CohortTerms reviewed = TestTerms();
   reviewed.reviewed_bank = {2000, 1400};
-  resident::ValidateCohortPlan(
-      owned::PlanCohorts(selection, TestForecasts(), reviewed,
-                         reviewed_capacity, TestEstimator()),
-      selection, TestForecasts(), reviewed, reviewed_capacity, 2,
-      TestEstimator(), TestIdentities(3));
+  resident::ValidateCohortPlan(owned::PlanCohorts(selection,
+                                                  TestForecasts(),
+                                                  reviewed,
+                                                  reviewed_capacity,
+                                                  TestEstimator()),
+                               selection,
+                               TestForecasts(),
+                               reviewed,
+                               reviewed_capacity,
+                               2,
+                               TestEstimator(),
+                               TestIdentities(3));
 }
 
 // Refusal harness: every case below submits a plan record (or input) that
@@ -527,14 +601,21 @@ class ResidentCohortBoundaryRefusal : public ::testing::Test {
  protected:
   void SetUp() override {
     const auto selection = TestSelection();
-    plan_ = owned::PlanCohorts(selection, TestForecasts(), TestTerms(),
-                               TestCapacityScalar(), TestEstimator());
+    plan_ = owned::PlanCohorts(selection,
+                               TestForecasts(),
+                               TestTerms(),
+                               TestCapacityScalar(),
+                               TestEstimator());
   }
   void ExpectRefused(const owned::CohortPlan& tampered) const {
     EXPECT_THROW(
-        resident::ValidateCohortPlan(tampered, TestSelection(),
-                                     TestForecasts(), TestTerms(),
-                                     TestCapacityScalar(), 2, TestEstimator(),
+        resident::ValidateCohortPlan(tampered,
+                                     TestSelection(),
+                                     TestForecasts(),
+                                     TestTerms(),
+                                     TestCapacityScalar(),
+                                     2,
+                                     TestEstimator(),
                                      TestIdentities(TestSelection().size())),
         std::invalid_argument)
         << "a plan the real planner did not produce must refuse, exactly";
@@ -608,11 +689,16 @@ TEST_F(ResidentCohortBoundaryRefusal, BankAboveReviewedReservationRefused) {
   tampered.cohorts[0].bank_estimate = {1300, 420};
   CohortTerms terms = TestTerms();
   terms.reviewed_bank = {1000, 400};
-  EXPECT_THROW(resident::ValidateCohortPlan(
-                   tampered, TestSelection(), TestForecasts(), terms,
-                   TestCapacityScalar(), 2, TestEstimator(),
-                   TestIdentities(TestSelection().size())),
-               std::invalid_argument);
+  EXPECT_THROW(
+      resident::ValidateCohortPlan(tampered,
+                                   TestSelection(),
+                                   TestForecasts(),
+                                   terms,
+                                   TestCapacityScalar(),
+                                   2,
+                                   TestEstimator(),
+                                   TestIdentities(TestSelection().size())),
+      std::invalid_argument);
 }
 
 TEST_F(ResidentCohortBoundaryRefusal, PlanFromDifferentInputsRefused) {
@@ -621,10 +707,14 @@ TEST_F(ResidentCohortBoundaryRefusal, PlanFromDifferentInputsRefused) {
   // fabricated preflight provenance. The shrunk budget fails inside the
   // real planner's own preflight first (runtime_error); the boundary never
   // reaches an equality-confirmed acceptance for stale records.
-  EXPECT_THROW(resident::ValidateCohortPlan(
-                   plan_, TestSelection(), TestForecasts(), TestTerms(),
-                   ByteCharge{2000, 1000}, 2, TestEstimator(),
-                   TestIdentities(3)),
+  EXPECT_THROW(resident::ValidateCohortPlan(plan_,
+                                            TestSelection(),
+                                            TestForecasts(),
+                                            TestTerms(),
+                                            ByteCharge{2000, 1000},
+                                            2,
+                                            TestEstimator(),
+                                            TestIdentities(3)),
                std::runtime_error);
   // A record produced under ANY other planning inputs but structurally
   // valid under the current preflight still refuses via provenance
@@ -635,18 +725,26 @@ TEST_F(ResidentCohortBoundaryRefusal, PlanFromDifferentInputsRefused) {
   stale_but_valid.cohorts.resize(1);
   stale_but_valid.cohorts[0] = plan_.cohorts[1];
   stale_but_valid.cohorts.push_back(plan_.cohorts[0]);
-  EXPECT_THROW(resident::ValidateCohortPlan(
-                   stale_but_valid, TestSelection(), TestForecasts(),
-                   TestTerms(), TestCapacityScalar(), 2, TestEstimator(),
-                   TestIdentities(3)),
+  EXPECT_THROW(resident::ValidateCohortPlan(stale_but_valid,
+                                            TestSelection(),
+                                            TestForecasts(),
+                                            TestTerms(),
+                                            TestCapacityScalar(),
+                                            2,
+                                            TestEstimator(),
+                                            TestIdentities(3)),
                std::invalid_argument);
 }
 
 TEST_F(ResidentCohortBoundaryRefusal, MissingEstimatorRefused) {
-  EXPECT_THROW(resident::ValidateCohortPlan(
-                   plan_, TestSelection(), TestForecasts(), TestTerms(),
-                   TestCapacityScalar(), 2, /*bank_estimator=*/{},
-                   TestIdentities(3)),
+  EXPECT_THROW(resident::ValidateCohortPlan(plan_,
+                                            TestSelection(),
+                                            TestForecasts(),
+                                            TestTerms(),
+                                            TestCapacityScalar(),
+                                            2,
+                                            /*bank_estimator=*/{},
+                                            TestIdentities(3)),
                std::invalid_argument);
 }
 
@@ -656,46 +754,67 @@ TEST(ResidentCohortBoundary, IncompleteExplicitInputsRefused) {
   const auto terms = TestTerms();
   const auto capacity = TestCapacityScalar();
   const auto identities = TestIdentities(selection.size());
-  const auto plan = owned::PlanCohorts(selection, forecast, terms, capacity,
-                                       TestEstimator());
+  const auto plan =
+      owned::PlanCohorts(selection, forecast, terms, capacity, TestEstimator());
   ASSERT_EQ(plan.cohorts.size(), 2u);
 
   // Zero private forecast sides.
   auto zero_host = forecast;
   zero_host[1] = {0, 150};
-  EXPECT_THROW(resident::ValidateCohortPlan(plan, selection, zero_host, terms,
-                                            capacity, 2, TestEstimator(),
+  EXPECT_THROW(resident::ValidateCohortPlan(plan,
+                                            selection,
+                                            zero_host,
+                                            terms,
+                                            capacity,
+                                            2,
+                                            TestEstimator(),
                                             identities),
                std::invalid_argument);
   auto zero_device = forecast;
   zero_device[2] = {400, 0};
-  EXPECT_THROW(resident::ValidateCohortPlan(plan, selection, zero_device,
-                                            terms, capacity, 2,
-                                            TestEstimator(), identities),
+  EXPECT_THROW(resident::ValidateCohortPlan(plan,
+                                            selection,
+                                            zero_device,
+                                            terms,
+                                            capacity,
+                                            2,
+                                            TestEstimator(),
+                                            identities),
                std::invalid_argument);
 
   // Forecast count mismatch.
   auto short_forecasts = forecast;
   short_forecasts.pop_back();
-  EXPECT_THROW(resident::ValidateCohortPlan(plan, selection, short_forecasts,
-                                            terms, capacity, 2,
-                                            TestEstimator(), identities),
+  EXPECT_THROW(resident::ValidateCohortPlan(plan,
+                                            selection,
+                                            short_forecasts,
+                                            terms,
+                                            capacity,
+                                            2,
+                                            TestEstimator(),
+                                            identities),
                std::invalid_argument);
 
   // Non-strict FIFO selection identity order is refused (planner and
   // boundary alike: the identity is the immutable FIFO order).
   auto reordered = selection;
   std::swap(reordered[0], reordered[1]);
-  EXPECT_THROW(owned::PlanCohorts(reordered, forecast, terms, capacity,
-                                  TestEstimator()),
-               std::invalid_argument);
+  EXPECT_THROW(
+      owned::PlanCohorts(reordered, forecast, terms, capacity, TestEstimator()),
+      std::invalid_argument);
 
   // Missing or count-mismatched ORIGINAL identity snapshot.
-  EXPECT_THROW(resident::ValidateCohortPlan(plan, selection, forecast, terms,
-                                            capacity, 2, TestEstimator(), {}),
-               std::invalid_argument);
-  EXPECT_THROW(resident::ValidateCohortPlan(plan, selection, forecast, terms,
-                                            capacity, 2, TestEstimator(),
+  EXPECT_THROW(
+      resident::ValidateCohortPlan(
+          plan, selection, forecast, terms, capacity, 2, TestEstimator(), {}),
+      std::invalid_argument);
+  EXPECT_THROW(resident::ValidateCohortPlan(plan,
+                                            selection,
+                                            forecast,
+                                            terms,
+                                            capacity,
+                                            2,
+                                            TestEstimator(),
                                             TestIdentities(2)),
                std::invalid_argument);
 
@@ -703,28 +822,48 @@ TEST(ResidentCohortBoundary, IncompleteExplicitInputsRefused) {
   // reference input identity).
   auto empty_problem = TestIdentities(selection.size());
   empty_problem[2].clear();
-  EXPECT_THROW(resident::ValidateCohortPlan(plan, selection, forecast, terms,
-                                            capacity, 2, TestEstimator(),
+  EXPECT_THROW(resident::ValidateCohortPlan(plan,
+                                            selection,
+                                            forecast,
+                                            terms,
+                                            capacity,
+                                            2,
+                                            TestEstimator(),
                                             empty_problem),
                std::invalid_argument);
 
   // Zero capacity side.
-  EXPECT_THROW(resident::ValidateCohortPlan(plan, selection, forecast, terms,
-                                            ByteCharge{2300, 0}, 2,
-                                            TestEstimator(), identities),
+  EXPECT_THROW(resident::ValidateCohortPlan(plan,
+                                            selection,
+                                            forecast,
+                                            terms,
+                                            ByteCharge{2300, 0},
+                                            2,
+                                            TestEstimator(),
+                                            identities),
                std::invalid_argument);
 
   // Zero process side.
   CohortTerms zero_process = terms;
   zero_process.process = {500, 0};
-  EXPECT_THROW(resident::ValidateCohortPlan(plan, selection, forecast,
-                                            zero_process, capacity, 2,
-                                            TestEstimator(), identities),
+  EXPECT_THROW(resident::ValidateCohortPlan(plan,
+                                            selection,
+                                            forecast,
+                                            zero_process,
+                                            capacity,
+                                            2,
+                                            TestEstimator(),
+                                            identities),
                std::invalid_argument);
 
   // Zero declared concurrency.
-  EXPECT_THROW(resident::ValidateCohortPlan(plan, selection, forecast, terms,
-                                            capacity, 0, TestEstimator(),
+  EXPECT_THROW(resident::ValidateCohortPlan(plan,
+                                            selection,
+                                            forecast,
+                                            terms,
+                                            capacity,
+                                            0,
+                                            TestEstimator(),
                                             identities),
                std::invalid_argument);
 }

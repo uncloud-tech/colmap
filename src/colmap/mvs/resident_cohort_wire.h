@@ -175,8 +175,8 @@ struct CohortForecastWire {
 // version negotiation, no unknown keys, truncated/empty/padded lines and
 // trailing content refuse). Reuses the shared strict forecast-wire
 // lexical primitives (moved verbatim from the full-bank parser).
-CohortForecastWire ParseResidentCohortForecast(
-    const std::string& bytes, ResidentSha256Fn sha = nullptr);
+CohortForecastWire ParseResidentCohortForecast(const std::string& bytes,
+                                               ResidentSha256Fn sha = nullptr);
 
 // Binding gate: the wire must describe EXACTLY this whole invocation.
 //  - `sha` is REQUIRED (the nullptr hash-optional parser path is never an
@@ -251,7 +251,8 @@ void VerifyResidentCohortForecastNativeFloors(
     const CohortForecastWire& wire,
     const std::vector<owned::BankJob>& invocation_jobs,
     const std::vector<owned::BankJobIdentities>& invocation_identities,
-    uint64_t host_budget_bytes, uint64_t device_budget_bytes);
+    uint64_t host_budget_bytes,
+    uint64_t device_budget_bytes);
 
 }  // namespace cohort
 }  // namespace mvs

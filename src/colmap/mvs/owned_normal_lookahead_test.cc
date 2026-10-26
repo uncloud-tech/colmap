@@ -7,13 +7,14 @@
 // reads, and exactly-once charge release. No CUDA is involved anywhere.
 
 #include "colmap/mvs/owned_normal_lookahead.h"
+
 #include "colmap/mvs/owned_pair_run.h"
 
 #include <algorithm>
 #include <atomic>
-#include <future>
 #include <chrono>
 #include <cstdint>
+#include <future>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -70,12 +71,9 @@ struct Journal {
 };
 
 TEST(NormalLookahead, ConstructorsValidateLimits) {
-  EXPECT_THROW(NormalLookahead({0}, 0, 1),
-               std::invalid_argument);
-  EXPECT_THROW(NormalLookahead({0}, 3, 1),
-               std::invalid_argument);
-  EXPECT_THROW(NormalLookahead({}, 2, 1),
-               std::invalid_argument);
+  EXPECT_THROW(NormalLookahead({0}, 0, 1), std::invalid_argument);
+  EXPECT_THROW(NormalLookahead({0}, 3, 1), std::invalid_argument);
+  EXPECT_THROW(NormalLookahead({}, 2, 1), std::invalid_argument);
   NormalLookahead ok({0, 1}, 1, 1);
   EXPECT_EQ(ok.MaxFuture(), 1);
 }
@@ -84,9 +82,8 @@ TEST(NormalLookahead, ConsumeBeforeStartAndOutOfBoundsRejected) {
   // max_future 2 lets the unconsumed pair produce fully without consumers.
   NormalLookahead lookahead({0, 1}, 2, 8);
   EXPECT_THROW(lookahead.Consume(0), std::logic_error);
-  lookahead.Start([](size_t layer, const std::atomic<bool>&) {
-    return MakeNormal(layer);
-  });
+  lookahead.Start(
+      [](size_t layer, const std::atomic<bool>&) { return MakeNormal(layer); });
   EXPECT_THROW(lookahead.Consume(2), std::invalid_argument);
   lookahead.Join();
   EXPECT_EQ(lookahead.Consume(0).Get(0, 0), 0);
@@ -98,9 +95,10 @@ TEST(NormalLookahead, FifoOrderTailAndExactlyOneLoadPerGeneration) {
   for (auto& load : loads) load.store(0);
   std::atomic<int> total{0};
   Journal journal;
-  NormalLookahead lookahead({4, 3, 2, 1, 0}, 2, 16, [&](const char* event, size_t, uint64_t r) {
-                              journal.Record(event, r);
-                            });
+  NormalLookahead lookahead(
+      {4, 3, 2, 1, 0}, 2, 16, [&](const char* event, size_t, uint64_t r) {
+        journal.Record(event, r);
+      });
   lookahead.Start([&](size_t layer, const std::atomic<bool>&) {
     ++loads[layer];
     ++total;
@@ -112,8 +110,7 @@ TEST(NormalLookahead, FifoOrderTailAndExactlyOneLoadPerGeneration) {
   const int expected_layer[5] = {4, 3, 2, 1, 0};
   for (size_t generation = 0; generation < 5; ++generation) {
     NormalMap normal = lookahead.Consume(generation);
-    EXPECT_EQ(normal.Get(0, 0),
-              static_cast<float>(expected_layer[generation]));
+    EXPECT_EQ(normal.Get(0, 0), static_cast<float>(expected_layer[generation]));
   }
   lookahead.Join();
   EXPECT_EQ(total.load(), 5);
@@ -137,8 +134,8 @@ TEST(NormalLookahead, ReadyUnconsumedBuffersStayBounded) {
     return MakeNormal(layer);
   });
   const auto observed = [](const std::atomic<int>& value, int target) {
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::milliseconds(1000);
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
     while (value.load() < target) {
       if (std::chrono::steady_clock::now() > deadline) return false;
       std::this_thread::yield();
@@ -162,9 +159,8 @@ TEST(NormalLookahead, ReadyUnconsumedBuffersStayBounded) {
 
 TEST(NormalLookahead, OutOfOrderConsumeHonorsSingleHandoffPerGeneration) {
   NormalLookahead lookahead({0, 1, 2}, 2, 8);
-  lookahead.Start([](size_t layer, const std::atomic<bool>&) {
-    return MakeNormal(layer);
-  });
+  lookahead.Start(
+      [](size_t layer, const std::atomic<bool>&) { return MakeNormal(layer); });
   // Each admitted owner consumes exactly its own generation; ownership of the
   // unique buffer transfers out of the producer queue. Consuming gen 1 first
   // also frees the bounded slot that lets the producer finish the tail.
@@ -212,13 +208,13 @@ TEST(NormalLookahead, CancelJoinsInFlightReadBeforeRelease) {
   std::atomic<int> started{0};
   std::atomic<int> completed{0};
   Journal journal;
-  NormalLookahead lookahead({0, 1, 2}, 2, 8,
-                            [&](const char* event, size_t, uint64_t r) {
-                              journal.Record(event, r);
-                            });
+  NormalLookahead lookahead(
+      {0, 1, 2}, 2, 8, [&](const char* event, size_t, uint64_t r) {
+        journal.Record(event, r);
+      });
   lookahead.Start([&](size_t layer, const std::atomic<bool>& cancelled) {
-    return GatedNormal(started, completed, layer, cancelled,
-                       std::chrono::milliseconds(2000));
+    return GatedNormal(
+        started, completed, layer, cancelled, std::chrono::milliseconds(2000));
   });
   while (started.load() < 1) std::this_thread::yield();
   lookahead.CancelAndJoin();
@@ -253,7 +249,8 @@ TEST(NormalLookahead, HealthyConsumerDelayBeyondAnyTimeoutStillSucceeds) {
     ++loads;
     return MakeNormal(layer);
   });
-  const auto observed = [](const std::atomic<int>& value, int target,
+  const auto observed = [](const std::atomic<int>& value,
+                           int target,
                            std::chrono::milliseconds budget) {
     const auto deadline = std::chrono::steady_clock::now() + budget;
     while (value.load() < target) {
@@ -279,15 +276,16 @@ TEST(NormalLookahead, OwnerFailureBeforeConsumeCancelsPromptly) {
   // consumer and producer promptly — no five-minute timeout path.
   std::atomic<int> loads{0};
   Journal journal;
-  NormalLookahead lookahead({0, 1, 2}, 1, 8,
-                            [&](const char* event, size_t, uint64_t r) {
-                              journal.Record(event, r);
-                            });
+  NormalLookahead lookahead(
+      {0, 1, 2}, 1, 8, [&](const char* event, size_t, uint64_t r) {
+        journal.Record(event, r);
+      });
   lookahead.Start([&](size_t layer, const std::atomic<bool>&) {
     ++loads;
     return MakeNormal(layer);
   });
-  const auto observed = [](const std::atomic<int>& value, int target,
+  const auto observed = [](const std::atomic<int>& value,
+                           int target,
                            std::chrono::milliseconds budget) {
     const auto deadline = std::chrono::steady_clock::now() + budget;
     while (value.load() < target) {
@@ -298,7 +296,8 @@ TEST(NormalLookahead, OwnerFailureBeforeConsumeCancelsPromptly) {
   };
   ASSERT_TRUE(observed(loads, 1, std::chrono::seconds(2)));
   // Generation-1 owner blocked in Consume while the producer waits for space.
-  auto consumer = std::async(std::launch::async, [&] { return lookahead.Consume(1); });
+  auto consumer =
+      std::async(std::launch::async, [&] { return lookahead.Consume(1); });
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
   EXPECT_EQ(loads.load(), 1);
   // Simulated owner-failure hook: prompt, non-joining cancellation.
@@ -326,7 +325,10 @@ TEST(NormalLookahead, DestructorDrainsProducerWithoutLeak) {
   {
     NormalLookahead lookahead({0, 1}, 1, 8);
     lookahead.Start([&](size_t layer, const std::atomic<bool>& cancelled) {
-      return GatedNormal(started, completed, layer, cancelled,
+      return GatedNormal(started,
+                         completed,
+                         layer,
+                         cancelled,
                          std::chrono::milliseconds(2000));
     });
     while (started.load() < 1) std::this_thread::yield();

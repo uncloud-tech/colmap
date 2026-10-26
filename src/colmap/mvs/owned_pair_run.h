@@ -26,7 +26,9 @@ struct PairOwnerNoopCleanup {
 // unconsumed inputs when an owner never starts or fails before RunJob consumes
 // them. Both must finish before retirement. CUDA cleanup uncertainty must not
 // return normally. Observer is telemetry, never an ownership-cleanup callback.
-template <class RunJob, class Observer, class ThreadFactory = PairThreadFactory,
+template <class RunJob,
+          class Observer,
+          class ThreadFactory = PairThreadFactory,
           class Cleanup = PairOwnerNoopCleanup>
 void RunPairOwners(PairCoordinator& coordinator,
                    RunJob run_job,
@@ -87,10 +89,14 @@ void RunPairOwners(PairCoordinator& coordinator,
 
 // Bounded FIFO postjoin turnover. Job indices are immutable generation tokens;
 // no callback ever resolves a mutable slot to discover its job identity.
-template <class RunJob, class Observer, class ThreadFactory = PairThreadFactory,
+template <class RunJob,
+          class Observer,
+          class ThreadFactory = PairThreadFactory,
           class Cleanup = PairOwnerNoopCleanup>
-void RunRollingOwners(PairCoordinator& coordinator, RunJob run_job,
-                      Observer observer, ThreadFactory create_thread = {},
+void RunRollingOwners(PairCoordinator& coordinator,
+                      RunJob run_job,
+                      Observer observer,
+                      ThreadFactory create_thread = {},
                       Cleanup cleanup = {}) {
   if (!coordinator.Rolling()) throw std::logic_error("not a rolling feed");
   const size_t batch = std::numeric_limits<size_t>::max();
@@ -138,7 +144,8 @@ void RunRollingOwners(PairCoordinator& coordinator, RunJob run_job,
         }
       }
     } catch (...) {
-      // Admission telemetry can throw after atomic assignment but before return.
+      // Admission telemetry can throw after atomic assignment but before
+      // return.
       coordinator.Cancel(batch, std::current_exception());
       const size_t count = coordinator.AdmittedCount();
       if (count) retire(count - 1);

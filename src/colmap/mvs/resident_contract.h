@@ -88,8 +88,7 @@ OwnedBankContract MakeOwnedBankContract(
 // names come from the model in native form. CPU-only: stat reads plus
 // header-only map reads, no payload decode.
 OwnedBankContractProblem CaptureOwnedBankContractProblem(
-    const owned::BankJob& job,
-    const std::vector<std::string>& image_names);
+    const owned::BankJob& job, const std::vector<std::string>& image_names);
 
 // Deterministic canonical serialization (versioned line protocol):
 // every string/path as (byte length, hex bytes), every float/double as its

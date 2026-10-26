@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
-#include "colmap/mvs/owned_input_bank.h"
-
 #include "colmap/mvs/cuda_texture.h"
 #include "colmap/mvs/owned_cuda_execution.h"
+#include "colmap/mvs/owned_input_bank.h"
 
 #include <algorithm>
 #include <limits>
@@ -49,10 +48,14 @@ struct ResidentInputBank::Impl {
     try {
       grayscale = std::make_unique<CudaArrayLayeredTexture<uint8_t>>(
           TextureDescription(cudaFilterModeLinear, cudaReadModeNormalizedFloat),
-          width, height, host.Layers().size());
+          width,
+          height,
+          host.Layers().size());
       depth = std::make_unique<CudaArrayLayeredTexture<float>>(
           TextureDescription(cudaFilterModePoint, cudaReadModeElementType),
-          width, height, host.Layers().size());
+          width,
+          height,
+          host.Layers().size());
       reference_grayscale = grayscale->CreateView(
           TextureDescription(cudaFilterModePoint, cudaReadModeNormalizedFloat));
       // Bound staging to one padded layer of each type. Every copy fences
@@ -75,9 +78,10 @@ struct ResidentInputBank::Impl {
         std::fill(gray_layer.begin(), gray_layer.end(), uint8_t{0});
         std::fill(depth_layer.begin(), depth_layer.end(), 0.0f);
         for (size_t row = 0; row < h; ++row) {
-          std::copy_n(gray.data() + row * w, w,
-                      gray_layer.data() + row * width);
-          std::copy_n(layer.depth.GetPtr() + row * w, w,
+          std::copy_n(
+              gray.data() + row * w, w, gray_layer.data() + row * width);
+          std::copy_n(layer.depth.GetPtr() + row * w,
+                      w,
                       depth_layer.data() + row * width);
         }
         grayscale->CopyLayerFromHost(i, gray_layer.data(), stream->Get());
@@ -97,11 +101,13 @@ struct ResidentInputBank::Impl {
   }
 };
 
-ResidentInputBank::ResidentInputBank(const HostInputBank& host, int device_index)
+ResidentInputBank::ResidentInputBank(const HostInputBank& host,
+                                     int device_index)
     : impl_(std::make_unique<Impl>(host, device_index)) {}
 ResidentInputBank::~ResidentInputBank() = default;
 ResidentInputBank::ResidentInputBank(ResidentInputBank&&) noexcept = default;
-ResidentInputBank& ResidentInputBank::operator=(ResidentInputBank&&) noexcept = default;
+ResidentInputBank& ResidentInputBank::operator=(ResidentInputBank&&) noexcept =
+    default;
 size_t ResidentInputBank::Width() const { return impl_->width; }
 size_t ResidentInputBank::Height() const { return impl_->height; }
 size_t ResidentInputBank::NumLayers() const { return impl_->dimensions.size(); }
@@ -112,7 +118,9 @@ uint64_t ResidentInputBank::GrayscaleTexture() const {
 uint64_t ResidentInputBank::ReferenceGrayscaleTexture() const {
   return impl_->reference_grayscale->GetObj();
 }
-uint64_t ResidentInputBank::DepthTexture() const { return impl_->depth->GetObj(); }
+uint64_t ResidentInputBank::DepthTexture() const {
+  return impl_->depth->GetObj();
+}
 size_t ResidentInputBank::LayerWidth(size_t layer) const {
   return impl_->dimensions.at(layer).first;
 }

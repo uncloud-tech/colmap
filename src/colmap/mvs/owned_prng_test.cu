@@ -19,11 +19,13 @@ __global__ void ReferenceSeedKernel(GpuMatView<curandState> output, int seed) {
   const size_t row = blockIdx.y * blockDim.y + threadIdx.y;
   const size_t col = blockIdx.x * blockDim.x + threadIdx.x;
   const size_t block = blockIdx.y * gridDim.x + blockIdx.x;
-  const size_t id = block * blockDim.y * blockDim.x +
-                    threadIdx.y * blockDim.x + threadIdx.x;
+  const size_t id =
+      block * blockDim.y * blockDim.x + threadIdx.y * blockDim.x + threadIdx.x;
   if (col < output.GetWidth() && row < output.GetHeight()) {
     curand_init(seed < 0 ? id : owned::prng_seed::PixelSeed(seed, row, col),
-                0, 0, &output.GetRef(row, col));
+                0,
+                0,
+                &output.GetRef(row, col));
   }
 }
 
@@ -77,8 +79,8 @@ TEST(OwnedPrng, StreamGeometryAndRetainedRotationReinitialize) {
   }
   for (int seed : {-1, 7}) {
     auto even = owned::MakeOwnedPrng(37, 19, stream, seed);
-    auto odd = std::make_unique<GpuMatPRNG>(
-        19, 37, GpuMatPRNG::UninitializedTag{});
+    auto odd =
+        std::make_unique<GpuMatPRNG>(19, 37, GpuMatPRNG::UninitializedTag{});
     auto reference = owned::MakeOwnedPrng(37, 19, stream, seed);
     GpuMatPRNG* current = even.get();
     GpuMatPRNG* alternate = odd.get();

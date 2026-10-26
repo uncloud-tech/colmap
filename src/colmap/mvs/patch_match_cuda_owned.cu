@@ -9,12 +9,12 @@
 
 #define _USE_MATH_DEFINES
 
-#include "colmap/mvs/patch_match_cuda_owned.h"
 #include "colmap/mvs/owned_input_bank.h"
 #include "colmap/mvs/owned_prng.h"
 #include "colmap/mvs/owned_prng_seed.h"
 #include "colmap/mvs/owned_source_cache.h"
 #include "colmap/mvs/owned_texture_row_batch.h"
+#include "colmap/mvs/patch_match_cuda_owned.h"
 #include "colmap/mvs/patch_match_execution.h"
 #include "colmap/util/cuda.h"
 #include "colmap/util/cudacc.h"
@@ -71,10 +71,12 @@ __device__ inline float GenerateRandomDepth(const float depth_min,
   return curand_uniform(rand_state) * (depth_max - depth_min) + depth_min;
 }
 
-__device__ inline void GenerateRandomNormal(const ReferenceCalibration& calibration, const int row,
-                                            const int col,
-                                            curandState* rand_state,
-                                            float normal[3]) {
+__device__ inline void GenerateRandomNormal(
+    const ReferenceCalibration& calibration,
+    const int row,
+    const int col,
+    curandState* rand_state,
+    float normal[3]) {
   // Unbiased sampling of normal, according to George Marsaglia, "Choosing a
   // Point from the Surface of a Sphere", 1972.
   float v1 = 0.0f;
@@ -110,7 +112,8 @@ __device__ inline float PerturbDepth(const float perturbation,
   return GenerateRandomDepth(depth_min, depth_max, rand_state);
 }
 
-__device__ inline void PerturbNormal(const ReferenceCalibration& calibration, const int row,
+__device__ inline void PerturbNormal(const ReferenceCalibration& calibration,
+                                     const int row,
                                      const int col,
                                      const float perturbation,
                                      const float normal[3],
@@ -152,7 +155,8 @@ __device__ inline void PerturbNormal(const ReferenceCalibration& calibration, co
   if (DotProduct3(perturbed_normal, view_ray) >= 0.0f) {
     const int kMaxNumTrials = 3;
     if (num_trials < kMaxNumTrials) {
-      PerturbNormal(calibration, row,
+      PerturbNormal(calibration,
+                    row,
                     col,
                     0.5f * perturbation,
                     normal,
@@ -175,10 +179,12 @@ __device__ inline void PerturbNormal(const ReferenceCalibration& calibration, co
   perturbed_normal[2] *= inv_norm;
 }
 
-__device__ inline void ComputePointAtDepth(const ReferenceCalibration& calibration, const float row,
-                                           const float col,
-                                           const float depth,
-                                           float point[3]) {
+__device__ inline void ComputePointAtDepth(
+    const ReferenceCalibration& calibration,
+    const float row,
+    const float col,
+    const float depth,
+    float point[3]) {
   point[0] = depth * (calibration.inv_K[0] * col + calibration.inv_K[1]);
   point[1] = depth * (calibration.inv_K[2] * row + calibration.inv_K[3]);
   point[2] = depth;
@@ -187,12 +193,14 @@ __device__ inline void ComputePointAtDepth(const ReferenceCalibration& calibrati
 // Transfer depth on plane from viewing ray at row1 to row2. The returned
 // depth is the intersection of the viewing ray through row2 with the plane
 // at row1 defined by the given depth and normal.
-__device__ inline float PropagateDepth(const ReferenceCalibration& calibration, const float depth1,
+__device__ inline float PropagateDepth(const ReferenceCalibration& calibration,
+                                       const float depth1,
                                        const float normal1[3],
                                        const float row1,
                                        const float row2) {
   // Point along first viewing ray.
-  const float x1 = depth1 * (calibration.inv_K[2] * row1 + calibration.inv_K[3]);
+  const float x1 =
+      depth1 * (calibration.inv_K[2] * row1 + calibration.inv_K[3]);
   const float y1 = depth1;
   // Point on plane defined by point along first viewing ray and plane normal1.
   const float x2 = x1 + normal1[2];
@@ -248,7 +256,8 @@ __device__ inline void ComputeViewingAngles(
       -DotProduct3(SX, point) * RX_inv_norm * SX_inv_norm;
 }
 
-__device__ inline void ComposeHomography(const ReferenceCalibration& calibration,
+__device__ inline void ComposeHomography(
+    const ReferenceCalibration& calibration,
     const cudaTextureObject_t poses_texture,
     const int image_idx,
     const int row,
@@ -277,7 +286,8 @@ __device__ inline void ComposeHomography(const ReferenceCalibration& calibration
   // Distance to the plane.
   const float dist =
       depth * (normal[0] * (calibration.inv_K[0] * col + calibration.inv_K[1]) +
-               normal[1] * (calibration.inv_K[2] * row + calibration.inv_K[3]) + normal[2]);
+               normal[1] * (calibration.inv_K[2] * row + calibration.inv_K[3]) +
+               normal[2]);
   const float inv_dist = 1.0f / dist;
 
   const float inv_dist_N0 = inv_dist * normal[0];
@@ -286,29 +296,30 @@ __device__ inline void ComposeHomography(const ReferenceCalibration& calibration
 
   // Homography as H = K * (R - T * n' / d) * Kref^-1.
   H[0] = calibration.inv_K[0] * (K[0] * (R[0] + inv_dist_N0 * T[0]) +
-                         K[1] * (R[6] + inv_dist_N0 * T[2]));
+                                 K[1] * (R[6] + inv_dist_N0 * T[2]));
   H[1] = calibration.inv_K[2] * (K[0] * (R[1] + inv_dist_N1 * T[0]) +
-                         K[1] * (R[7] + inv_dist_N1 * T[2]));
+                                 K[1] * (R[7] + inv_dist_N1 * T[2]));
   H[2] = K[0] * (R[2] + inv_dist_N2 * T[0]) +
          K[1] * (R[8] + inv_dist_N2 * T[2]) +
          calibration.inv_K[1] * (K[0] * (R[0] + inv_dist_N0 * T[0]) +
-                         K[1] * (R[6] + inv_dist_N0 * T[2])) +
+                                 K[1] * (R[6] + inv_dist_N0 * T[2])) +
          calibration.inv_K[3] * (K[0] * (R[1] + inv_dist_N1 * T[0]) +
-                         K[1] * (R[7] + inv_dist_N1 * T[2]));
+                                 K[1] * (R[7] + inv_dist_N1 * T[2]));
   H[3] = calibration.inv_K[0] * (K[2] * (R[3] + inv_dist_N0 * T[1]) +
-                         K[3] * (R[6] + inv_dist_N0 * T[2]));
+                                 K[3] * (R[6] + inv_dist_N0 * T[2]));
   H[4] = calibration.inv_K[2] * (K[2] * (R[4] + inv_dist_N1 * T[1]) +
-                         K[3] * (R[7] + inv_dist_N1 * T[2]));
+                                 K[3] * (R[7] + inv_dist_N1 * T[2]));
   H[5] = K[2] * (R[5] + inv_dist_N2 * T[1]) +
          K[3] * (R[8] + inv_dist_N2 * T[2]) +
          calibration.inv_K[1] * (K[2] * (R[3] + inv_dist_N0 * T[1]) +
-                         K[3] * (R[6] + inv_dist_N0 * T[2])) +
+                                 K[3] * (R[6] + inv_dist_N0 * T[2])) +
          calibration.inv_K[3] * (K[2] * (R[4] + inv_dist_N1 * T[1]) +
-                         K[3] * (R[7] + inv_dist_N1 * T[2]));
+                                 K[3] * (R[7] + inv_dist_N1 * T[2]));
   H[6] = calibration.inv_K[0] * (R[6] + inv_dist_N0 * T[2]);
   H[7] = calibration.inv_K[2] * (R[7] + inv_dist_N1 * T[2]);
   H[8] = R[8] + calibration.inv_K[1] * (R[6] + inv_dist_N0 * T[2]) +
-         calibration.inv_K[3] * (R[7] + inv_dist_N1 * T[2]) + inv_dist_N2 * T[2];
+         calibration.inv_K[3] * (R[7] + inv_dist_N1 * T[2]) +
+         inv_dist_N2 * T[2];
 }
 
 // Each thread in the current warp / thread block reads in 3 columns of the
@@ -347,9 +358,8 @@ struct LocalRefImage {
     const int thread_block_first_id = blockDim.x * blockIdx.x;
 
     const int local_col_start = thread_id;
-    const int global_col_start = thread_block_first_id -
-                                 kThreadBlockRadius * kTileThreads +
-                                 thread_id;
+    const int global_col_start =
+        thread_block_first_id - kThreadBlockRadius * kTileThreads + thread_id;
 
     if (row == 0) {
       int global_row = row - kWindowRadius;
@@ -426,7 +436,9 @@ __device__ inline float SampleLayeredBilinear(const cudaTextureObject_t texture,
 
 // The return values is 1 - NCC, so the range is [0, 2], the smaller the
 // value, the better the color consistency.
-template <int kWindowSize, int kWindowStep, int kTileThreads,
+template <int kWindowSize,
+          int kWindowStep,
+          int kTileThreads,
           bool kTexLookahead = false>
 struct PhotoConsistencyCostComputer {
   const static int kWindowRadius = kWindowSize / 2;
@@ -481,7 +493,13 @@ struct PhotoConsistencyCostComputer {
     }
     float tform[9];
     ComposeHomography(calibration,
-        poses_texture_, src_image_idx, row, col, depth, normal, tform);
+                      poses_texture_,
+                      src_image_idx,
+                      row,
+                      col,
+                      depth,
+                      normal,
+                      tform);
 
     float tform_step[8];
     for (int i = 0; i < 8; ++i) {
@@ -503,9 +521,8 @@ struct PhotoConsistencyCostComputer {
     int ref_image_base_idx = ref_image_idx;
 
     const float ref_center_color =
-        local_ref_image
-            .data[ref_image_idx + kWindowRadius * 3 * kTileThreads +
-                  kWindowRadius];
+        local_ref_image.data[ref_image_idx + kWindowRadius * 3 * kTileThreads +
+                             kWindowRadius];
     const float ref_color_sum = local_ref_sum;
     const float ref_color_squared_sum = local_ref_squared_sum;
     float src_color_sum = 0.0f;
@@ -521,11 +538,15 @@ struct PhotoConsistencyCostComputer {
         const float ref_color = local_ref_image.data[ref_image_idx];
 #if defined(__GFX9__)
         const float src_color = SampleLayeredBilinear(
-            src_images_texture_, norm_col_src, norm_row_src,
+            src_images_texture_,
+            norm_col_src,
+            norm_row_src,
             source_layers_ ? source_layers_[src_image_idx] : src_image_idx);
 #else
         const float src_color = tex2DLayered<float>(
-            src_images_texture_, norm_col_src, norm_row_src,
+            src_images_texture_,
+            norm_col_src,
+            norm_row_src,
             source_layers_ ? source_layers_[src_image_idx] : src_image_idx);
 #endif
 
@@ -596,12 +617,19 @@ struct PhotoConsistencyCostComputer {
   // before consuming it in the original ordered weight/moment recurrence.
   // The batch exposes the full row's request independence without
   // crossing row/candidate boundaries or changing coordinate recurrences.
-  // This is a codegen intervention, not an established speedup: native SASS must
-  // confirm request grouping/no spills, followed by exact-map and timing gates.
+  // This is a codegen intervention, not an established speedup: native SASS
+  // must confirm request grouping/no spills, followed by exact-map and timing
+  // gates.
   __device__ inline float ComputeLookahead() const {
     float tform[9];
     ComposeHomography(calibration,
-        poses_texture_, src_image_idx, row, col, depth, normal, tform);
+                      poses_texture_,
+                      src_image_idx,
+                      row,
+                      col,
+                      depth,
+                      normal,
+                      tform);
 
     float tform_step[8];
     for (int i = 0; i < 8; ++i) {
@@ -623,9 +651,8 @@ struct PhotoConsistencyCostComputer {
     int ref_image_base_idx = ref_image_idx;
 
     const float ref_center_color =
-        local_ref_image
-            .data[ref_image_idx + kWindowRadius * 3 * kTileThreads +
-                  kWindowRadius];
+        local_ref_image.data[ref_image_idx + kWindowRadius * 3 * kTileThreads +
+                             kWindowRadius];
     const float ref_color_sum = local_ref_sum;
     const float ref_color_squared_sum = local_ref_squared_sum;
     float src_color_sum = 0.0f;
@@ -641,11 +668,15 @@ struct PhotoConsistencyCostComputer {
             const float norm_row_src = inv_z * row_src + 0.5f;
 #if defined(__GFX9__)
             const float src_color = SampleLayeredBilinear(
-                src_images_texture_, norm_col_src, norm_row_src,
+                src_images_texture_,
+                norm_col_src,
+                norm_row_src,
                 source_layers_ ? source_layers_[src_image_idx] : src_image_idx);
 #else
             const float src_color = tex2DLayered<float>(
-                src_images_texture_, norm_col_src, norm_row_src,
+                src_images_texture_,
+                norm_col_src,
+                norm_row_src,
                 source_layers_ ? source_layers_[src_image_idx] : src_image_idx);
 #endif
             // Preserve stepwise rounding, including the absence of an unused
@@ -709,7 +740,8 @@ struct PhotoConsistencyCostComputer {
   }
 };
 
-__device__ inline float ComputeGeomConsistencyCost(const ReferenceCalibration& calibration,
+__device__ inline float ComputeGeomConsistencyCost(
+    const ReferenceCalibration& calibration,
     const cudaTextureObject_t poses_texture,
     const cudaTextureObject_t src_depth_maps_texture,
     const int* source_layers,
@@ -744,9 +776,11 @@ __device__ inline float ComputeGeomConsistencyCost(const ReferenceCalibration& c
                        P[6] * forward_point[2] + P[7]);
 
   // Extract depth in source image.
-  const float src_depth = tex2DLayered<float>(
-      src_depth_maps_texture, src_col + 0.5f, src_row + 0.5f,
-      source_layers ? source_layers[image_idx] : image_idx);
+  const float src_depth =
+      tex2DLayered<float>(src_depth_maps_texture,
+                          src_col + 0.5f,
+                          src_row + 0.5f,
+                          source_layers ? source_layers[image_idx] : image_idx);
 
   // Projection outside of source image.
   if (src_depth == 0.0f) {
@@ -766,11 +800,11 @@ __device__ inline float ComputeGeomConsistencyCost(const ReferenceCalibration& c
 
   // Project world point back to reference image.
   const float backward_col =
-      inv_backward_point_z *
-      (calibration.K[0] * backward_point_x + calibration.K[1] * backward_point_z);
+      inv_backward_point_z * (calibration.K[0] * backward_point_x +
+                              calibration.K[1] * backward_point_z);
   const float backward_row =
-      inv_backward_point_z *
-      (calibration.K[2] * backward_point_y + calibration.K[3] * backward_point_z);
+      inv_backward_point_z * (calibration.K[2] * backward_point_y +
+                              calibration.K[3] * backward_point_z);
 
   // Return truncated reprojection error between original observation and
   // the forward-backward projected observation.
@@ -945,7 +979,8 @@ class LikelihoodComputer {
 };
 
 // Generate random normals for each pixel in the normal map.
-__global__ void InitNormalMap(const ReferenceCalibration calibration, GpuMatView<float> normal_map,
+__global__ void InitNormalMap(const ReferenceCalibration calibration,
+                              GpuMatView<float> normal_map,
                               GpuMatView<curandState> rand_state_map) {
   const int row = blockDim.y * blockIdx.y + threadIdx.y;
   const int col = blockDim.x * blockIdx.x + threadIdx.x;
@@ -974,7 +1009,8 @@ __global__ void RotateNormalMap(GpuMatView<float> normal_map) {
 }
 
 template <int kWindowSize, int kWindowStep, int kTileThreads>
-__global__ void ComputeInitialCost(const ReferenceCalibration calibration,
+__global__ void ComputeInitialCost(
+    const ReferenceCalibration calibration,
     GpuMatView<float> cost_map,
     const GpuMatView<float> depth_map,
     const GpuMatView<float> normal_map,
@@ -990,7 +1026,8 @@ __global__ void ComputeInitialCost(const ReferenceCalibration calibration,
 
   typedef PhotoConsistencyCostComputer<kWindowSize, kWindowStep, kTileThreads>
       PhotoConsistencyCostComputerType;
-  PhotoConsistencyCostComputerType pcc_computer(calibration, ref_image_texture,
+  PhotoConsistencyCostComputerType pcc_computer(calibration,
+                                                ref_image_texture,
                                                 src_images_texture,
                                                 source_layers,
                                                 poses_texture,
@@ -1061,12 +1098,17 @@ struct CacheTrace {
   int height;
   int samples;
 
-  __device__ void Record(int row, int col, int sample, int source,
-                         int winner, const float* costs) const {
-    if (row < 0 || row >= height || col < 0 || col >= width ||
-        sample < 0 || sample > samples) return;
-    const size_t index = (static_cast<size_t>(row) * width + col) *
-                            (samples + 1) + sample;
+  __device__ void Record(int row,
+                         int col,
+                         int sample,
+                         int source,
+                         int winner,
+                         const float* costs) const {
+    if (row < 0 || row >= height || col < 0 || col >= width || sample < 0 ||
+        sample > samples)
+      return;
+    const size_t index =
+        (static_cast<size_t>(row) * width + col) * (samples + 1) + sample;
     if (!records || index >= capacity) return;
     // One column owner, one row/sample write; final winner uses extra slot.
     CacheTraceRecord& record = records[index];
@@ -1086,7 +1128,8 @@ template <int kWindowSize,
           bool kFilterGeomConsistency = false,
           bool kDistinctSourceCache = false,
           bool kTexLookahead = false>
-__global__ void SweepFromTopToBottom(const ReferenceCalibration calibration,
+__global__ void SweepFromTopToBottom(
+    const ReferenceCalibration calibration,
     GpuMatView<float> global_workspace,
     PrngBoundaryView<curandState> rand_state_map,
     GpuMatView<float> cost_map,
@@ -1104,9 +1147,10 @@ __global__ void SweepFromTopToBottom(const ReferenceCalibration calibration,
     const cudaTextureObject_t poses_texture,
     const SweepOptions options
 #if defined(COLMAP_OWNED_CACHE_TRACE_TEST)
-    , const CacheTrace trace
+    ,
+    const CacheTrace trace
 #endif
-    ) {
+) {
   const int col = blockDim.x * blockIdx.x + threadIdx.x;
   using SourceCache = OwnedSourceCache<kTileThreads>;
   static_assert(!kDistinctSourceCache || SourceCache::kSupported,
@@ -1153,10 +1197,13 @@ __global__ void SweepFromTopToBottom(const ReferenceCalibration calibration,
   // Estimate parameters for remaining rows and compute selection probabilities.
   //////////////////////////////////////////////////////////////////////////////
 
-  typedef PhotoConsistencyCostComputer<kWindowSize, kWindowStep, kTileThreads,
+  typedef PhotoConsistencyCostComputer<kWindowSize,
+                                       kWindowStep,
+                                       kTileThreads,
                                        kTexLookahead>
       PhotoConsistencyCostComputerType;
-  PhotoConsistencyCostComputerType pcc_computer(calibration, ref_image_texture,
+  PhotoConsistencyCostComputerType pcc_computer(calibration,
+                                                ref_image_texture,
                                                 src_images_texture,
                                                 source_layers,
                                                 poses_texture,
@@ -1208,7 +1255,10 @@ __global__ void SweepFromTopToBottom(const ReferenceCalibration calibration,
     // the depth of very oblique structures, i.e. pixels whose normal direction
     // is significantly different from their viewing direction.
     prev_param_state.depth = PropagateDepth(calibration,
-        prev_param_state.depth, prev_param_state.normal, row - 1, row);
+                                            prev_param_state.depth,
+                                            prev_param_state.normal,
+                                            row - 1,
+                                            row);
 
     // Read parameters for current pixel from previous sweep.
     curr_param_state.depth = depth_map.Get(row, col);
@@ -1217,7 +1267,8 @@ __global__ void SweepFromTopToBottom(const ReferenceCalibration calibration,
     // Generate random parameters.
     rand_param_state.depth =
         PerturbDepth(options.perturbation, curr_param_state.depth, &rand_state);
-    PerturbNormal(calibration, row,
+    PerturbNormal(calibration,
+                  row,
                   col,
                   options.perturbation * M_PI,
                   curr_param_state.normal,
@@ -1253,7 +1304,8 @@ __global__ void SweepFromTopToBottom(const ReferenceCalibration calibration,
           likelihood_computer.ComputeIncProb(cos_incident_angle);
 
       float H[9];
-      ComposeHomography(calibration, poses_texture,
+      ComposeHomography(calibration,
+                        poses_texture,
                         image_idx,
                         row,
                         col,
@@ -1305,128 +1357,138 @@ __global__ void SweepFromTopToBottom(const ReferenceCalibration calibration,
       __shared__ typename SourceCache::Values cache_values;
       __shared__ typename SourceCache::Sources cache_sources;
       int cache_size = 0;
-    for (int sample = 0; sample < options.num_samples; ++sample) {
-      const float rand_prob = curand_uniform(&rand_state) - FLT_EPSILON;
+      for (int sample = 0; sample < options.num_samples; ++sample) {
+        const float rand_prob = curand_uniform(&rand_state) - FLT_EPSILON;
 
-      pcc_computer.src_image_idx = -1;
-      for (int image_idx = 0; image_idx < cost_map.GetDepth(); ++image_idx) {
-        const float prob = sampling_probs[image_idx];
-        if (prob > rand_prob) {
-          pcc_computer.src_image_idx = image_idx;
-          break;
+        pcc_computer.src_image_idx = -1;
+        for (int image_idx = 0; image_idx < cost_map.GetDepth(); ++image_idx) {
+          const float prob = sampling_probs[image_idx];
+          if (prob > rand_prob) {
+            pcc_computer.src_image_idx = image_idx;
+            break;
+          }
         }
-      }
 
-      if (pcc_computer.src_image_idx == -1) {
+        if (pcc_computer.src_image_idx == -1) {
 #if defined(COLMAP_OWNED_CACHE_TRACE_TEST)
-        trace.Record(row, col, sample, -1, -1, costs);
+          trace.Record(row, col, sample, -1, -1, costs);
 #endif
-        continue;
-      }
+          continue;
+        }
 
-      int slot = 0;
-      for (; slot < cache_size; ++slot) {
-        if (cache_sources[slot][threadIdx.x] == pcc_computer.src_image_idx) break;
-      }
-      const bool first = slot == cache_size;
-      if (first) {
-        cache_sources[slot][threadIdx.x] = pcc_computer.src_image_idx;
-        ++cache_size;
-      }
+        int slot = 0;
+        for (; slot < cache_size; ++slot) {
+          if (cache_sources[slot][threadIdx.x] == pcc_computer.src_image_idx)
+            break;
+        }
+        const bool first = slot == cache_size;
+        if (first) {
+          cache_sources[slot][threadIdx.x] = pcc_computer.src_image_idx;
+          ++cache_size;
+        }
 
-      costs[0] += cost_map.Get(row, col, pcc_computer.src_image_idx);
-      if (kGeomConsistencyTerm) {
-        if (first) cache_values[4][slot][threadIdx.x] =
-            ComputeGeomConsistencyCost(calibration, poses_texture,
-                                       src_depth_maps_texture, source_layers,
-                                       row,
-                                       col,
-                                       depths[0],
-                                       pcc_computer.src_image_idx,
-                                       options.geom_consistency_max_cost);
-        costs[0] +=
-            options.geom_consistency_regularizer *
-            cache_values[4][slot][threadIdx.x];
-      }
-
-      for (int i = 1; i < kNumCosts; ++i) {
-        pcc_computer.depth = depths[i];
-        pcc_computer.normal = normals[i];
-        if (first) cache_values[i - 1][slot][threadIdx.x] = pcc_computer.Compute();
-        costs[i] += cache_values[i - 1][slot][threadIdx.x];
+        costs[0] += cost_map.Get(row, col, pcc_computer.src_image_idx);
         if (kGeomConsistencyTerm) {
-          // Geometry depends on depth, not normal: roles 0/3 and 2/4 share.
-          const int role = i == 3 ? 0 : (i == 4 ? 2 : i);
-          if (first && i < 3) cache_values[4 + role][slot][threadIdx.x] =
-              ComputeGeomConsistencyCost(calibration, poses_texture,
-                                         src_depth_maps_texture, source_layers,
-                                         row,
-                                         col,
-                                         depths[i],
-                                         pcc_computer.src_image_idx,
-                                         options.geom_consistency_max_cost);
-          costs[i] +=
-              options.geom_consistency_regularizer *
-              cache_values[4 + role][slot][threadIdx.x];
+          if (first)
+            cache_values[4][slot][threadIdx.x] =
+                ComputeGeomConsistencyCost(calibration,
+                                           poses_texture,
+                                           src_depth_maps_texture,
+                                           source_layers,
+                                           row,
+                                           col,
+                                           depths[0],
+                                           pcc_computer.src_image_idx,
+                                           options.geom_consistency_max_cost);
+          costs[0] += options.geom_consistency_regularizer *
+                      cache_values[4][slot][threadIdx.x];
         }
-      }
+
+        for (int i = 1; i < kNumCosts; ++i) {
+          pcc_computer.depth = depths[i];
+          pcc_computer.normal = normals[i];
+          if (first)
+            cache_values[i - 1][slot][threadIdx.x] = pcc_computer.Compute();
+          costs[i] += cache_values[i - 1][slot][threadIdx.x];
+          if (kGeomConsistencyTerm) {
+            // Geometry depends on depth, not normal: roles 0/3 and 2/4 share.
+            const int role = i == 3 ? 0 : (i == 4 ? 2 : i);
+            if (first && i < 3)
+              cache_values[4 + role][slot][threadIdx.x] =
+                  ComputeGeomConsistencyCost(calibration,
+                                             poses_texture,
+                                             src_depth_maps_texture,
+                                             source_layers,
+                                             row,
+                                             col,
+                                             depths[i],
+                                             pcc_computer.src_image_idx,
+                                             options.geom_consistency_max_cost);
+            costs[i] += options.geom_consistency_regularizer *
+                        cache_values[4 + role][slot][threadIdx.x];
+          }
+        }
 #if defined(COLMAP_OWNED_CACHE_TRACE_TEST)
-      trace.Record(row, col, sample, pcc_computer.src_image_idx, -1, costs);
+        trace.Record(row, col, sample, pcc_computer.src_image_idx, -1, costs);
 #endif
-    }
+      }
     } else {
-    for (int sample = 0; sample < options.num_samples; ++sample) {
-      const float rand_prob = curand_uniform(&rand_state) - FLT_EPSILON;
+      for (int sample = 0; sample < options.num_samples; ++sample) {
+        const float rand_prob = curand_uniform(&rand_state) - FLT_EPSILON;
 
-      pcc_computer.src_image_idx = -1;
-      for (int image_idx = 0; image_idx < cost_map.GetDepth(); ++image_idx) {
-        const float prob = sampling_probs[image_idx];
-        if (prob > rand_prob) {
-          pcc_computer.src_image_idx = image_idx;
-          break;
+        pcc_computer.src_image_idx = -1;
+        for (int image_idx = 0; image_idx < cost_map.GetDepth(); ++image_idx) {
+          const float prob = sampling_probs[image_idx];
+          if (prob > rand_prob) {
+            pcc_computer.src_image_idx = image_idx;
+            break;
+          }
         }
-      }
 
-      if (pcc_computer.src_image_idx == -1) {
+        if (pcc_computer.src_image_idx == -1) {
 #if defined(COLMAP_OWNED_CACHE_TRACE_TEST)
-        trace.Record(row, col, sample, -1, -1, costs);
+          trace.Record(row, col, sample, -1, -1, costs);
 #endif
-        continue;
-      }
+          continue;
+        }
 
-      costs[0] += cost_map.Get(row, col, pcc_computer.src_image_idx);
-      if (kGeomConsistencyTerm) {
-        costs[0] +=
-            options.geom_consistency_regularizer *
-            ComputeGeomConsistencyCost(calibration, poses_texture,
-                                       src_depth_maps_texture, source_layers,
-                                       row,
-                                       col,
-                                       depths[0],
-                                       pcc_computer.src_image_idx,
-                                       options.geom_consistency_max_cost);
-      }
-
-      for (int i = 1; i < kNumCosts; ++i) {
-        pcc_computer.depth = depths[i];
-        pcc_computer.normal = normals[i];
-        costs[i] += pcc_computer.Compute();
+        costs[0] += cost_map.Get(row, col, pcc_computer.src_image_idx);
         if (kGeomConsistencyTerm) {
-          costs[i] +=
+          costs[0] +=
               options.geom_consistency_regularizer *
-              ComputeGeomConsistencyCost(calibration, poses_texture,
-                                         src_depth_maps_texture, source_layers,
+              ComputeGeomConsistencyCost(calibration,
+                                         poses_texture,
+                                         src_depth_maps_texture,
+                                         source_layers,
                                          row,
                                          col,
-                                         depths[i],
+                                         depths[0],
                                          pcc_computer.src_image_idx,
                                          options.geom_consistency_max_cost);
         }
-      }
+
+        for (int i = 1; i < kNumCosts; ++i) {
+          pcc_computer.depth = depths[i];
+          pcc_computer.normal = normals[i];
+          costs[i] += pcc_computer.Compute();
+          if (kGeomConsistencyTerm) {
+            costs[i] +=
+                options.geom_consistency_regularizer *
+                ComputeGeomConsistencyCost(calibration,
+                                           poses_texture,
+                                           src_depth_maps_texture,
+                                           source_layers,
+                                           row,
+                                           col,
+                                           depths[i],
+                                           pcc_computer.src_image_idx,
+                                           options.geom_consistency_max_cost);
+          }
+        }
 #if defined(COLMAP_OWNED_CACHE_TRACE_TEST)
-      trace.Record(row, col, sample, pcc_computer.src_image_idx, -1, costs);
+        trace.Record(row, col, sample, pcc_computer.src_image_idx, -1, costs);
 #endif
-    }
+      }
     }
 
     // Find the parameters of the minimum cost.
@@ -1497,8 +1559,10 @@ __global__ void SweepFromTopToBottom(const ReferenceCalibration calibration,
             num_consistent += 1;
           }
         } else if (!kFilterPhotoConsistency) {
-          if (ComputeGeomConsistencyCost(calibration, poses_texture,
-                                         src_depth_maps_texture, source_layers,
+          if (ComputeGeomConsistencyCost(calibration,
+                                         poses_texture,
+                                         src_depth_maps_texture,
+                                         source_layers,
                                          row,
                                          col,
                                          best_depth,
@@ -1510,8 +1574,10 @@ __global__ void SweepFromTopToBottom(const ReferenceCalibration calibration,
           }
         } else {
           if (sel_prob_map.Get(row, col, image_idx) >= min_ncc_prob &&
-              ComputeGeomConsistencyCost(calibration, poses_texture,
-                                         src_depth_maps_texture, source_layers,
+              ComputeGeomConsistencyCost(calibration,
+                                         poses_texture,
+                                         src_depth_maps_texture,
+                                         source_layers,
                                          row,
                                          col,
                                          best_depth,
@@ -1566,8 +1632,10 @@ PatchMatchCuda::PatchMatchCuda(const PatchMatchOptions& options,
       ref_height_(0),
       rotation_in_half_pi_(0) {
   ValidatePatchMatchExecution(PatchMatchExecution::kOwnedCuda,
-                              options_.window_radius, options_.window_step,
-                              options_.geom_consistency, true);
+                              options_.window_radius,
+                              options_.window_step,
+                              options_.geom_consistency,
+                              true);
   SetBestCudaDevice(std::stoi(options_.gpu_index));
   stream_ = std::make_unique<OwnedCudaStream>();
   try {
@@ -1601,8 +1669,9 @@ void PatchMatchCuda::Run() {
 
 DepthMap PatchMatchCuda::GetDepthMap() const {
   stream_->Activate();
-  return DepthMap(
-      depth_map_->CopyToMat(stream_->Get()), options_.depth_min, options_.depth_max);
+  return DepthMap(depth_map_->CopyToMat(stream_->Get()),
+                  options_.depth_min,
+                  options_.depth_max);
 }
 
 NormalMap PatchMatchCuda::GetNormalMap() const {
@@ -1660,7 +1729,8 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
   ComputeCudaConfig();
   ComputeInitialCost<kWindowSize, kWindowStep, kTileThreads>
       <<<sweep_grid_size_, sweep_block_size_, 0, stream_->Get()>>>(
-          CurrentCalibration(), cost_map_->View(),
+          CurrentCalibration(),
+          cost_map_->View(),
           depth_map_->View(),
           normal_map_->View(),
           ref_image_texture_->GetObj(),
@@ -1890,7 +1960,9 @@ void PatchMatchCuda::InitRefImage() {
   ref_height_ = ref_image.GetHeight();
 
   rotation_layout_ = BuildOwnedBoundaryRotationLayout(
-      ref_width_, ref_height_, problem_.src_image_idxs.size(),
+      ref_width_,
+      ref_height_,
+      problem_.src_image_idxs.size(),
       options_.filter && options_.num_iterations > 0);
 
   // Upload to device and filter.
@@ -1903,16 +1975,19 @@ void PatchMatchCuda::InitRefImage() {
     THROW_CHECK_EQ(bank.LayerWidth(problem_.resident_ref_layer), ref_width_);
     THROW_CHECK_EQ(bank.LayerHeight(problem_.resident_ref_layer), ref_height_);
     ref_image_->FilterResident(bank.ReferenceGrayscaleTexture(),
-                              problem_.resident_ref_layer,
-                              options_.window_radius, options_.window_step,
-                              options_.sigma_spatial, options_.sigma_color,
-                              stream_->Get());
+                               problem_.resident_ref_layer,
+                               options_.window_radius,
+                               options_.window_step,
+                               options_.sigma_spatial,
+                               options_.sigma_color,
+                               stream_->Get());
   } else {
     ref_image_->Filter(ref_image.GetBitmap().RowMajorData().data(),
                        options_.window_radius,
                        options_.window_step,
                        options_.sigma_spatial,
-                       options_.sigma_color, stream_->Get());
+                       options_.sigma_color,
+                       stream_->Get());
   }
 
   cudaTextureDesc texture_desc;
@@ -1946,11 +2021,12 @@ void PatchMatchCuda::InitSourceImages() {
     }
     borrowed_src_images_ = bank.GrayscaleTexture();
     borrowed_src_depth_ = bank.DepthTexture();
-    source_layers_ = std::make_unique<GpuMat<int>>(
-        problem_.resident_src_layers.size(), 1);
+    source_layers_ =
+        std::make_unique<GpuMat<int>>(problem_.resident_src_layers.size(), 1);
     source_layers_->CopyToDevice(
         problem_.resident_src_layers.data(),
-        problem_.resident_src_layers.size() * sizeof(int), stream_->Get());
+        problem_.resident_src_layers.size() * sizeof(int),
+        stream_->Get());
     return;
   }
   // Determine maximum image size.
@@ -2021,7 +2097,8 @@ void PatchMatchCuda::InitSourceImages() {
         max_width,
         max_height,
         problem_.src_image_idxs.size(),
-        src_images_host_data.data(), stream_->Get());
+        src_images_host_data.data(),
+        stream_->Get());
   }
 
   // Upload source depth maps to device.
@@ -2058,7 +2135,8 @@ void PatchMatchCuda::InitSourceImages() {
         max_width,
         max_height,
         problem_.src_image_idxs.size(),
-        src_depth_maps_host_data.data(), stream_->Get());
+        src_depth_maps_host_data.data(),
+        stream_->Get());
   }
 }
 
@@ -2167,7 +2245,8 @@ void PatchMatchCuda::InitTransforms() {
         kNumTformParams,
         problem_.src_image_idxs.size(),
         1,
-        poses_host_data.data(), stream_->Get());
+        poses_host_data.data(),
+        stream_->Get());
 
     RotatePose(R_z90, rotated_R, rotated_T);
   }
@@ -2175,19 +2254,21 @@ void PatchMatchCuda::InitTransforms() {
 
 namespace {
 __global__ void InitOwnedPrngFromSeed(GpuMatView<curandState> output,
-                                     const int random_seed) {
+                                      const int random_seed) {
   const size_t row = blockIdx.y * blockDim.y + threadIdx.y;
   const size_t col = blockIdx.x * blockDim.x + threadIdx.x;
   if (col < output.GetWidth() && row < output.GetHeight()) {
     curand_init(prng_seed::PixelSeed(random_seed, row, col),
-                0, 0, &output.GetRef(row, col));
+                0,
+                0,
+                &output.GetRef(row, col));
   }
 }
 
 // One writer per canonical perimeter pixel, including degenerate dimensions.
 __global__ void CompactOwnedPrngBoundary(GpuMatView<curandState> input,
-                                       curandState* output,
-                                       PrngBoundaryLayout layout) {
+                                         curandState* output,
+                                         PrngBoundaryLayout layout) {
   const size_t row = blockIdx.y * blockDim.y + threadIdx.y;
   const size_t col = blockIdx.x * blockDim.x + threadIdx.x;
   if (row < input.GetHeight() && col < input.GetWidth() &&
@@ -2197,25 +2278,28 @@ __global__ void CompactOwnedPrngBoundary(GpuMatView<curandState> input,
   }
 }
 
-__global__ void CopyResidentDepth(cudaTextureObject_t texture, int layer,
+__global__ void CopyResidentDepth(cudaTextureObject_t texture,
+                                  int layer,
                                   GpuMatView<float> output) {
   const size_t col = blockIdx.x * blockDim.x + threadIdx.x;
   const size_t row = blockIdx.y * blockDim.y + threadIdx.y;
   if (col < output.GetWidth() && row < output.GetHeight()) {
-    output.Set(row, col, tex2DLayered<float>(texture, col + 0.5f, row + 0.5f, layer));
+    output.Set(
+        row, col, tex2DLayered<float>(texture, col + 0.5f, row + 0.5f, layer));
   }
 }
 }  // namespace
 
 void ReinitializeOwnedPrng(GpuMatPRNG& states,
-                          const cudaStream_t stream,
-                          const int random_seed) {
+                           const cudaStream_t stream,
+                           const int random_seed) {
   if (random_seed < 0) {
     states.Reinitialize(stream);
     return;
   }
   // Nonnegative seeding is coordinate-based, independent of launch geometry.
-  // Match the existing GpuMat default32x16 without exposing its protected state.
+  // Match the existing GpuMat default32x16 without exposing its protected
+  // state.
   const dim3 block(32, 16);
   const dim3 grid((states.GetWidth() + 31) / 32,
                   (states.GetHeight() + 15) / 16);
@@ -2225,9 +2309,9 @@ void ReinitializeOwnedPrng(GpuMatPRNG& states,
 }
 
 std::unique_ptr<GpuMatPRNG> MakeOwnedPrng(const int width,
-                                       const int height,
-                                       const cudaStream_t stream,
-                                       const int random_seed) {
+                                          const int height,
+                                          const cudaStream_t stream,
+                                          const int random_seed) {
   auto states = std::make_unique<GpuMatPRNG>(
       width, height, GpuMatPRNG::UninitializedTag{});
   ReinitializeOwnedPrng(*states, stream, random_seed);
@@ -2244,33 +2328,41 @@ void PatchMatchCuda::InitWorkspaceMemory() {
       const dim3 block(16, 16);
       const dim3 grid((ref_width_ + 15) / 16, (ref_height_ + 15) / 16);
       CopyResidentDepth<<<grid, block, 0, stream_->Get()>>>(
-          problem_.resident_bank->DepthTexture(), problem_.resident_ref_layer,
+          problem_.resident_bank->DepthTexture(),
+          problem_.resident_ref_layer,
           depth_map_->View());
       CUDA_CHECK();
     } else {
       const DepthMap& init_depth_map =
           problem_.depth_maps->at(problem_.ref_image_idx);
       depth_map_->CopyToDevice(init_depth_map.GetPtr(),
-          init_depth_map.GetWidth() * sizeof(float), stream_->Get());
+                               init_depth_map.GetWidth() * sizeof(float),
+                               stream_->Get());
     }
   } else {
-    depth_map_->FillWithRandomNumbers(
-        options_.depth_min, options_.depth_max, *init_rand_state_map_, stream_->Get());
+    depth_map_->FillWithRandomNumbers(options_.depth_min,
+                                      options_.depth_max,
+                                      *init_rand_state_map_,
+                                      stream_->Get());
   }
 
-  normal_map_.Set(0, std::make_unique<GpuMat<float>>(ref_width_, ref_height_, 3));
+  normal_map_.Set(0,
+                  std::make_unique<GpuMat<float>>(ref_width_, ref_height_, 3));
 
   // The backward pass writes every pixel/source before the forward pass reads
   // it, regardless of filtering. Only previous probabilities survive a sweep
   // and are exported; the current plane can reuse one packed allocation.
   sel_prob_map_ = std::make_unique<OwnedSelectionScratch<CudaSelectionStorage>>(
       ref_width_, ref_height_, problem_.src_image_idxs.size());
-  prev_sel_prob_map_.Set(0, std::make_unique<GpuMat<float>>(
-      ref_width_, ref_height_, problem_.src_image_idxs.size()));
+  prev_sel_prob_map_.Set(
+      0,
+      std::make_unique<GpuMat<float>>(
+          ref_width_, ref_height_, problem_.src_image_idxs.size()));
   prev_sel_prob_map_->FillWithScalar(0.5f, stream_->Get());
 
-  cost_map_.Set(0, std::make_unique<GpuMat<float>>(
-      ref_width_, ref_height_, problem_.src_image_idxs.size()));
+  cost_map_.Set(0,
+                std::make_unique<GpuMat<float>>(
+                    ref_width_, ref_height_, problem_.src_image_idxs.size()));
 
   const int ref_max_dim = std::max(ref_width_, ref_height_);
   if (options_.owned_async_pool) {
@@ -2286,16 +2378,22 @@ void PatchMatchCuda::InitWorkspaceMemory() {
 
   if (options_.geom_consistency) {
     THROW_CHECK(!problem_.resident_bank || problem_.resident_ref_normal);
-    const NormalMap& init_normal_map = problem_.resident_bank
-        ? *problem_.resident_ref_normal
-        : problem_.normal_maps->at(problem_.ref_image_idx);
+    const NormalMap& init_normal_map =
+        problem_.resident_bank
+            ? *problem_.resident_ref_normal
+            : problem_.normal_maps->at(problem_.ref_image_idx);
     THROW_CHECK_EQ(init_normal_map.GetWidth(), ref_width_);
     THROW_CHECK_EQ(init_normal_map.GetHeight(), ref_height_);
     normal_map_->CopyToDevice(init_normal_map.GetPtr(),
-                              init_normal_map.GetWidth() * sizeof(float), stream_->Get());
+                              init_normal_map.GetWidth() * sizeof(float),
+                              stream_->Get());
   } else {
-    InitNormalMap<<<elem_wise_grid_size_, elem_wise_block_size_, 0, stream_->Get()>>>(
-        CurrentCalibration(), normal_map_->View(), init_rand_state_map_->View());
+    InitNormalMap<<<elem_wise_grid_size_,
+                    elem_wise_block_size_,
+                    0,
+                    stream_->Get()>>>(CurrentCalibration(),
+                                      normal_map_->View(),
+                                      init_rand_state_map_->View());
   }
 }
 
@@ -2303,24 +2401,32 @@ void PatchMatchCuda::InitRotationStorage() {
   static_assert(sizeof(curandState) == 48, "Rotation layout requires XORWOW48");
   const size_t sources = problem_.src_image_idxs.size();
   // Keep original full-image initialization (including PHOTO rejection draws)
-  // and compact only AFTER it has completed. Interior states never feed a sweep.
+  // and compact only AFTER it has completed. Interior states never feed a
+  // sweep.
   const PrngBoundaryLayout boundary(ref_width_, ref_height_);
   boundary_rand_states_ =
       std::make_unique<GpuMat<curandState>>(boundary.Count(), 1);
   {
     ScopedStreamCompletion completion(stream_->Get());
-    CompactOwnedPrngBoundary<<<elem_wise_grid_size_, elem_wise_block_size_,
-                              0, stream_->Get()>>>(
-        init_rand_state_map_->View(), boundary_rand_states_->GetPtr(), boundary);
+    CompactOwnedPrngBoundary<<<elem_wise_grid_size_,
+                               elem_wise_block_size_,
+                               0,
+                               stream_->Get()>>>(
+        init_rand_state_map_->View(),
+        boundary_rand_states_->GetPtr(),
+        boundary);
     completion.Wait();
   }
   init_rand_state_map_.reset();
   // Genuine swapped-shape allocations, even for square images.
   depth_map_.Set(1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_));
-  normal_map_.Set(1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_, 3));
+  normal_map_.Set(1,
+                  std::make_unique<GpuMat<float>>(ref_height_, ref_width_, 3));
   ref_image_.Set(1, std::make_unique<GpuMatRefImage>(ref_height_, ref_width_));
-  prev_sel_prob_map_.Set(1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_, sources));
-  cost_map_.Set(1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_, sources));
+  prev_sel_prob_map_.Set(
+      1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_, sources));
+  cost_map_.Set(
+      1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_, sources));
   // No device consumer follows the last filtered sweep. Keep its orientation-3
   // output directly; the host getter reconstructs canonical coordinates.
   if (options_.filter && options_.num_iterations > 0) {
@@ -2341,9 +2447,9 @@ void PatchMatchCuda::EmitRotationAllocations() {
     line.imbue(std::locale::classic());
     line << "OWNED_ROTATION_ALLOCATION reference=" << problem_.ref_image_idx
          << " role=" << RotationRoleName(record.role)
-         << " parity=" << record.parity
-         << " width=" << record.width << " height=" << record.height
-         << " depth=" << record.depth << " element_bytes=" << record.element_bytes
+         << " parity=" << record.parity << " width=" << record.width
+         << " height=" << record.height << " depth=" << record.depth
+         << " element_bytes=" << record.element_bytes
          << " pitch_bytes=" << record.pitch_bytes
          << " requested_span_bytes=" << record.requested_span_bytes
          << " pitched_span_bytes=" << record.pitched_span_bytes
@@ -2353,19 +2459,39 @@ void PatchMatchCuda::EmitRotationAllocations() {
   for (const auto& slot : rotation_layout_.slots) {
     const auto p = slot.parity;
     switch (slot.role) {
-      case RotationRole::kPrng: emit(slot, *boundary_rand_states_); break;
-      case RotationRole::kDepth: emit(slot, *depth_map_.At(p)); break;
-      case RotationRole::kNormal: emit(slot, *normal_map_.At(p)); break;
-      case RotationRole::kRefImage: emit(slot, *ref_image_.At(p)->image); break;
-      case RotationRole::kRefSum: emit(slot, *ref_image_.At(p)->sum_image); break;
-      case RotationRole::kRefSquaredSum: emit(slot, *ref_image_.At(p)->squared_sum_image); break;
+      case RotationRole::kPrng:
+        emit(slot, *boundary_rand_states_);
+        break;
+      case RotationRole::kDepth:
+        emit(slot, *depth_map_.At(p));
+        break;
+      case RotationRole::kNormal:
+        emit(slot, *normal_map_.At(p));
+        break;
+      case RotationRole::kRefImage:
+        emit(slot, *ref_image_.At(p)->image);
+        break;
+      case RotationRole::kRefSum:
+        emit(slot, *ref_image_.At(p)->sum_image);
+        break;
+      case RotationRole::kRefSquaredSum:
+        emit(slot, *ref_image_.At(p)->squared_sum_image);
+        break;
       case RotationRole::kSelectionCurrent:
         emit(slot, sel_prob_map_->View<GpuMatView<float>>(0));
         break;
-      case RotationRole::kSelectionPrevious: emit(slot, *prev_sel_prob_map_.At(p)); break;
-      case RotationRole::kCost: emit(slot, *cost_map_.At(p)); break;
-      case RotationRole::kMask: emit(slot, *consistency_mask_); break;
-      case RotationRole::kWorkspace: emit(slot, *global_workspace_); break;
+      case RotationRole::kSelectionPrevious:
+        emit(slot, *prev_sel_prob_map_.At(p));
+        break;
+      case RotationRole::kCost:
+        emit(slot, *cost_map_.At(p));
+        break;
+      case RotationRole::kMask:
+        emit(slot, *consistency_mask_);
+        break;
+      case RotationRole::kWorkspace:
+        emit(slot, *global_workspace_);
+        break;
     }
   }
 }
@@ -2380,8 +2506,10 @@ void PatchMatchCuda::Rotate() {
   depth_map_->Rotate(depth_map_.Alternate(), stream_->Get(), wait);
   depth_map_.Flip();
 
-  RotateNormalMap<<<elem_wise_grid_size_, elem_wise_block_size_, 0, stream_->Get()>>>(
-      normal_map_->View());
+  RotateNormalMap<<<elem_wise_grid_size_,
+                    elem_wise_block_size_,
+                    0,
+                    stream_->Get()>>>(normal_map_->View());
   normal_map_->Rotate(normal_map_.Alternate(), stream_->Get(), wait);
   normal_map_.Flip();
 

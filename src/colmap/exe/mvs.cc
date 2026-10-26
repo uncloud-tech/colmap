@@ -214,13 +214,11 @@ int RunMeshTexturer(int argc, char** argv) {
   return EXIT_SUCCESS;
 }
 
-
 // Canonical unsigned CLI literal for the resident caps: exactly like the
 // wire's canonical decimals -- digits only, nonempty, no sign, no leading
 // zeros. Mirrors the parser-side canonicality the forecast wire requires;
 // the shared driver ParseBytes stays unchanged for owned-driver use.
-std::string CanonicalCliUnsigned(const std::string& value,
-                                 const char* name) {
+std::string CanonicalCliUnsigned(const std::string& value, const char* name) {
   if (value.empty() || value.front() == '+' || value.front() == '-' ||
       value.front() == ' ' || value.back() == ' ' ||
       (value.size() > 1 && value.front() == '0')) {
@@ -245,7 +243,6 @@ int RunPatchMatchStereo(int argc, char** argv) {
 
 #if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
 namespace {
-
 
 // Exclusive-creation write for the contract export: fails closed if the
 // target exists by ANY name at open time (no truncation race with
@@ -308,16 +305,16 @@ void WriteContractFileExclusively(const std::filesystem::path& path,
 // except the new contract export file. Verification re-resolves the SAME
 // invocation once natively and compares exact canonical contract bytes;
 // equality is a successful binding, never a certification.
-int RunOwnedBankMetadataMode(
-    const std::filesystem::path& workspace_path,
-    const std::string& workspace_format,
-    const std::string& pmvs_option_name,
-    const mvs::PatchMatchOptions& options,
-    const std::filesystem::path& config_path,
-    const std::filesystem::path& export_path,
-    const std::filesystem::path& verify_path) {
+int RunOwnedBankMetadataMode(const std::filesystem::path& workspace_path,
+                             const std::string& workspace_format,
+                             const std::string& pmvs_option_name,
+                             const mvs::PatchMatchOptions& options,
+                             const std::filesystem::path& config_path,
+                             const std::filesystem::path& export_path,
+                             const std::filesystem::path& verify_path) {
   const bool verify = !verify_path.empty();
-  const std::filesystem::path contract_path = verify ? verify_path : export_path;
+  const std::filesystem::path contract_path =
+      verify ? verify_path : export_path;
 
   std::string workspace_format_lower = workspace_format;
   StringToLower(&workspace_format_lower);
@@ -335,8 +332,7 @@ int RunOwnedBankMetadataMode(
 
   if (!verify) {
     THROW_CHECK(!ExistsFile(contract_path))
-        << "Refusing to overwrite an existing contract file: "
-        << contract_path;
+        << "Refusing to overwrite an existing contract file: " << contract_path;
     const auto contract = controller.ResolveOwnedBankContract();
     // The export target must never be any planned solver output of this
     // invocation (depth or normal, compared on resolved paths).
@@ -359,13 +355,13 @@ int RunOwnedBankMetadataMode(
       return static_cast<std::string (*)(const std::string_view&)>(nullptr);
 #endif
     }();
-    LOG(INFO)
-        << "Exported owned bank contract to " << contract_path << " ("
-        << bytes.size() << " bytes"
-        << (digest == nullptr
-                ? std::string(": sha256 unavailable without download support)")
-                : std::string(", sha256 " + digest(bytes) +
-                             "; binding snapshot, not certification)"));
+    LOG(INFO) << "Exported owned bank contract to " << contract_path << " ("
+              << bytes.size() << " bytes"
+              << (digest == nullptr
+                      ? std::string(
+                            ": sha256 unavailable without download support)")
+                      : std::string(", sha256 " + digest(bytes) +
+                                    "; binding snapshot, not certification)"));
   } else {
     THROW_CHECK(ExistsFile(contract_path));
     std::vector<char> prior_data;
@@ -377,12 +373,11 @@ int RunOwnedBankMetadataMode(
     const auto fresh = controller.ResolveOwnedBankContract();
     const auto fresh_bytes = mvs::SerializeOwnedBankContract(fresh);
     if (fresh_bytes != prior_bytes) {
-      const auto difference = mvs::FirstOwnedBankContractByteDifference(
-          prior_bytes, fresh_bytes);
+      const auto difference =
+          mvs::FirstOwnedBankContractByteDifference(prior_bytes, fresh_bytes);
       LOG(ERROR) << "Fresh resolution differs from the prior contract at byte "
-                 << (difference == std::string::npos
-                         ? prior_bytes.size()
-                         : difference);
+                 << (difference == std::string::npos ? prior_bytes.size()
+                                                     : difference);
       THROW_CHECK(false)
           << "Owned bank contract verification failed (changed order, "
              "options, files, layout or source identity before payload)";
@@ -459,22 +454,27 @@ int RunPatchMatchStereoWithExecution(
       "owned_photo_options_export",
       &owned_photo_options_export,
       "Metadata-only: export native PHOTO option binding bytes to a NEW file");
-  options.AddDefaultOption(
-      "owned_metadata_export",
-      &owned_metadata_export_path,
-      "Metadata-only mode: export the canonical owned bank contract to this NEW file; no solver runs");
-  options.AddDefaultOption(
-      "owned_metadata_verify",
-      &owned_metadata_verify_path,
-      "Metadata-only mode: re-resolve once and verify against this prior contract file; no solver runs");
+  options.AddDefaultOption("owned_metadata_export",
+                           &owned_metadata_export_path,
+                           "Metadata-only mode: export the canonical owned "
+                           "bank contract to this NEW file; no solver runs");
+  options.AddDefaultOption("owned_metadata_verify",
+                           &owned_metadata_verify_path,
+                           "Metadata-only mode: re-resolve once and verify "
+                           "against this prior contract file; no solver runs");
   options.AddDefaultOption(
       "owned_run_forecast",
       &owned_run_forecast_path,
-      "Opt-in bounded resident execution: run the full bank under this verified resident-forecast wire (bounded normals; single explicit PatchMatchStereo.gpu_index); stock remains the default");
+      "Opt-in bounded resident execution: run the full bank under this "
+      "verified resident-forecast wire (bounded normals; single explicit "
+      "PatchMatchStereo.gpu_index); stock remains the default");
   options.AddDefaultOption(
       "owned_run_cohort_forecast",
       &owned_run_cohort_forecast_path,
-      "Opt-in bounded COHORT resident execution: run strictly sequential FIFO cohorts under this verified resident-cohort-forecast wire (distinct magic; per-cohort admission ledgers; bounded normals; single explicit PatchMatchStereo.gpu_index); stock remains the default");
+      "Opt-in bounded COHORT resident execution: run strictly sequential FIFO "
+      "cohorts under this verified resident-cohort-forecast wire (distinct "
+      "magic; per-cohort admission ledgers; bounded normals; single explicit "
+      "PatchMatchStereo.gpu_index); stock remains the default");
   options.AddDefaultOption(
       "owned_run_timeout_seconds",
       &owned_run_timeout_seconds,
@@ -484,14 +484,15 @@ int RunPatchMatchStereoWithExecution(
       "owned_run_host_budget_bytes",
       &owned_run_host_budget_bytes,
       "Resident execution host budget cap (required with owned_run_forecast)");
-  options.AddDefaultOption(
-      "owned_run_device_budget_bytes",
-      &owned_run_device_budget_bytes,
-      "Resident execution device budget cap (required with owned_run_forecast)");
+  options.AddDefaultOption("owned_run_device_budget_bytes",
+                           &owned_run_device_budget_bytes,
+                           "Resident execution device budget cap (required "
+                           "with owned_run_forecast)");
   options.AddDefaultOption(
       "owned_run_max_concurrent_solvers",
       &owned_run_max_concurrent_solvers,
-      "Resident execution admitted rolling concurrency; must equal the forecast's declared active_jobs (required with owned_run_forecast)");
+      "Resident execution admitted rolling concurrency; must equal the "
+      "forecast's declared active_jobs (required with owned_run_forecast)");
   if (!options.Parse(argc, argv)) {
     return EXIT_FAILURE;
   }
@@ -509,8 +510,9 @@ int RunPatchMatchStereoWithExecution(
   bool raw_timeout_request = false;
   bool raw_optimized_request = false;
   const auto raw_flag = [](const std::string& arg, const char* name) {
-    return arg == name || arg.compare(0, std::string(name).size() + 1,
-                                      std::string(name) + "=") == 0;
+    return arg == name ||
+           arg.compare(
+               0, std::string(name).size() + 1, std::string(name) + "=") == 0;
   };
   for (int i = 1; i < argc; ++i) {
     const std::string arg(argv[i] != nullptr ? argv[i] : "");
@@ -532,8 +534,7 @@ int RunPatchMatchStereoWithExecution(
                             raw_flag(arg, "--owned_tile_threads") ||
                             raw_flag(arg, "--owned_photo_forecast") ||
                             raw_flag(arg, "--owned_photo_options_export");
-    raw_project_path =
-        raw_project_path || raw_flag(arg, "--project_path");
+    raw_project_path = raw_project_path || raw_flag(arg, "--project_path");
   }
   if (raw_project_path && (raw_export_request || raw_verify_request ||
                            raw_run_request || raw_optimized_request)) {
@@ -762,9 +763,8 @@ int RunPatchMatchStereoWithExecution(
           CanonicalCliUnsigned(owned_run_host_budget_bytes, "host budget"));
       device_budget_bytes = mvs::owned::ParseBytes(
           CanonicalCliUnsigned(owned_run_device_budget_bytes, "device budget"));
-      const uint64_t concurrency = mvs::owned::ParseBytes(
-          CanonicalCliUnsigned(owned_run_max_concurrent_solvers,
-                               "concurrency"));
+      const uint64_t concurrency = mvs::owned::ParseBytes(CanonicalCliUnsigned(
+          owned_run_max_concurrent_solvers, "concurrency"));
       if (concurrency > 2147483647ull) {
         throw std::invalid_argument(
             "resident concurrency exceeds the admitted range");
@@ -801,13 +801,14 @@ int RunPatchMatchStereoWithExecution(
                                                sha);
       deadline_guard->Check();
       if (optimized_only && result == EXIT_SUCCESS)
-        mvs::PublishOptimizedReceipt(optimized_dispatch_receipt,
-                                     mvs::OptimizedDispatchReceipt(
-                                       "geo", owned_tile_threads,
-                                       options.patch_match_stereo->num_samples,
-                                       true,
-                                       options.patch_match_stereo
-                                           ->owned_tex_lookahead));
+        mvs::PublishOptimizedReceipt(
+            optimized_dispatch_receipt,
+            mvs::OptimizedDispatchReceipt(
+                "geo",
+                owned_tile_threads,
+                options.patch_match_stereo->num_samples,
+                true,
+                options.patch_match_stereo->owned_tex_lookahead));
       return result;
 #else
       LOG(ERROR) << "The cohort runner requires the dense-stereo "
@@ -841,9 +842,8 @@ int RunPatchMatchStereoWithExecution(
           CanonicalCliUnsigned(owned_run_host_budget_bytes, "host budget"));
       device_budget_bytes = mvs::owned::ParseBytes(
           CanonicalCliUnsigned(owned_run_device_budget_bytes, "device budget"));
-      const uint64_t concurrency = mvs::owned::ParseBytes(
-          CanonicalCliUnsigned(owned_run_max_concurrent_solvers,
-                               "concurrency"));
+      const uint64_t concurrency = mvs::owned::ParseBytes(CanonicalCliUnsigned(
+          owned_run_max_concurrent_solvers, "concurrency"));
       if (concurrency > 2147483647ull) {
         throw std::invalid_argument(
             "resident concurrency exceeds the admitted range");
@@ -941,8 +941,11 @@ void RunPatchMatchStereoImpl(const std::filesystem::path& workspace_path,
                              const std::string& pmvs_option_name,
                              const mvs::PatchMatchOptions& options,
                              const std::filesystem::path& config_path) {
-  RunPatchMatchStereoImplWithExecution(workspace_path, workspace_format,
-                                       pmvs_option_name, options, config_path,
+  RunPatchMatchStereoImplWithExecution(workspace_path,
+                                       workspace_format,
+                                       pmvs_option_name,
+                                       options,
+                                       config_path,
                                        mvs::PatchMatchExecution::kStock);
 }
 

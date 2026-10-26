@@ -4,11 +4,10 @@
 // the post-read invocation-identity revalidation, and the repeated-input
 // identity consistency across problems. Uses real production map writers
 // and the real capture path; image bitmaps stay metadata-only dummies.
-#include "colmap/mvs/resident_contract.h"
-
 #include "colmap/mvs/depth_map.h"
 #include "colmap/mvs/normal_map.h"
 #include "colmap/mvs/owned_input_bank.h"
+#include "colmap/mvs/resident_contract.h"
 #include "colmap/util/file.h"
 
 #include <chrono>
@@ -52,8 +51,8 @@ owned::BankJob MakeJob(const std::filesystem::path& root) {
   job.options.num_threads = 2;
   job.reference_image_idx = 0;
   const auto image_path = root / "images" / "ref.png";
-  job.images.emplace_back(Image(image_path, 10, 5, kIdentityK(), kIdentityR(),
-                                kIdentityT()));
+  job.images.emplace_back(
+      Image(image_path, 10, 5, kIdentityK(), kIdentityR(), kIdentityT()));
   owned::BankInput input;
   input.image_idx = 0;
   input.image = job.images.front();
@@ -71,9 +70,11 @@ owned::BankJob MakeCaptureFixture(const std::filesystem::path& root) {
   std::filesystem::create_directories(root / "depth_maps");
   std::filesystem::create_directories(root / "normal_maps");
   const auto job = MakeJob(root);
-  { std::ofstream image_file(job.inputs.front().image.GetPath(),
+  {
+    std::ofstream image_file(job.inputs.front().image.GetPath(),
                              std::ios::binary);
-    image_file << "dummy-png-bytes"; }
+    image_file << "dummy-png-bytes";
+  }
   DepthMap depth(10, 5, 0.5f, 10.0f);
   depth.Fill(2.0f);
   depth.Write(job.inputs.front().depth_path);

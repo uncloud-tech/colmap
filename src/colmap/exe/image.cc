@@ -481,7 +481,9 @@ int RunImageUndistorter(int argc, char** argv) {
   OptionManager options;
   options.AddImageOptions();
   options.AddDefaultOption(
-      "dry_run", &dry_run, "Preview model target geometry only, without image I/O");
+      "dry_run",
+      &dry_run,
+      "Preview model target geometry only, without image I/O");
   options.AddRequiredOption("input_path", &input_path);
   options.AddRequiredOption("output_path", &output_path);
   options.AddDefaultOption(

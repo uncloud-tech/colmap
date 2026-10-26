@@ -31,13 +31,16 @@ using resident_lexical::ValidateFingerprintText;
 
 constexpr uint64_t kExpectedContractVersion = 1;
 
-uint64_t CheckedSum(const char* const what, const uint64_t a,
-                    const uint64_t b, const ForecastLexer& lexer) {
+uint64_t CheckedSum(const char* const what,
+                    const uint64_t a,
+                    const uint64_t b,
+                    const ForecastLexer& lexer) {
   try {
     return owned::CheckedAdd(a, b);
   } catch (const std::overflow_error&) {
-    lexer.Fail(std::string(what) + " overflows uint64 (refusing, never "
-                                   "wrapping)");
+    lexer.Fail(std::string(what) +
+               " overflows uint64 (refusing, never "
+               "wrapping)");
   }
 }
 
@@ -58,8 +61,8 @@ CohortForecastWire ParseResidentCohortForecast(const std::string& bytes,
       lexer.Fail("expected " + expected_key + ", got end of forecast");
     }
     if (lexer.Key() != expected_key) {
-      lexer.Fail("expected " + expected_key + ", got \"" +
-                 lexer.LineText() + "\"");
+      lexer.Fail("expected " + expected_key + ", got \"" + lexer.LineText() +
+                 "\"");
     }
   };
 
@@ -74,8 +77,9 @@ CohortForecastWire ParseResidentCohortForecast(const std::string& bytes,
   const uint64_t version = ParseUint(lexer, lexer.Token(1), "version");
   if (version != static_cast<uint64_t>(kCohortForecastVersion)) {
     lexer.Fail("unsupported cohort forecast version " +
-               std::to_string(version) + " (no version negotiation with the "
-                                         "full-bank wire)");
+               std::to_string(version) +
+               " (no version negotiation with the "
+               "full-bank wire)");
   }
   wire.version = static_cast<int>(version);
 
@@ -92,13 +96,13 @@ CohortForecastWire ParseResidentCohortForecast(const std::string& bytes,
 
   next_key("contract_raw_length");
   if (lexer.TokenCount() != 2) lexer.Fail("contract_raw_length field count");
-  const uint64_t raw_length = ParseUintMinimum(
-      lexer, lexer.Token(1), "contract_raw_length", 1);
+  const uint64_t raw_length =
+      ParseUintMinimum(lexer, lexer.Token(1), "contract_raw_length", 1);
 
   next_key("contract_raw");
   if (lexer.TokenCount() != 3) lexer.Fail("contract_raw field count");
-  const std::string raw = ParseByteString(
-      lexer, "contract_raw", 1, 2, /*line_final=*/true);
+  const std::string raw =
+      ParseByteString(lexer, "contract_raw", 1, 2, /*line_final=*/true);
   if (raw.size() != raw_length) {
     lexer.Fail("contract_raw length does not match contract_raw_length");
   }
@@ -113,7 +117,10 @@ CohortForecastWire ParseResidentCohortForecast(const std::string& bytes,
   wire.contract_raw = raw;
 
   next_key("qualification");
-  wire.qualification = ParseByteString(lexer, "qualification", 1, 2,
+  wire.qualification = ParseByteString(lexer,
+                                       "qualification",
+                                       1,
+                                       2,
                                        /*line_final=*/true);
   if (wire.qualification != kCohortQualificationProvisional &&
       wire.qualification != kCohortQualificationExecutable) {
@@ -123,7 +130,10 @@ CohortForecastWire ParseResidentCohortForecast(const std::string& bytes,
   wire.completeness =
       ParseByteString(lexer, "completeness", 1, 2, /*line_final=*/true);
   next_key("concurrency_basis");
-  wire.concurrency_basis = ParseByteString(lexer, "concurrency_basis", 1, 2,
+  wire.concurrency_basis = ParseByteString(lexer,
+                                           "concurrency_basis",
+                                           1,
+                                           2,
                                            /*line_final=*/true);
   if (wire.completeness != kResidentForecastComplete ||
       wire.concurrency_basis != kResidentForecastRollingDeclared) {
@@ -153,8 +163,8 @@ CohortForecastWire ParseResidentCohortForecast(const std::string& bytes,
   // execution gates (never silently at parse).
   next_key("image_channels");
   if (lexer.TokenCount() != 2) lexer.Fail("image_channels field count");
-  wire.image_channels = static_cast<int>(ParseUintMax(
-      lexer, lexer.Token(1), "image_channels", 255));
+  wire.image_channels = static_cast<int>(
+      ParseUintMax(lexer, lexer.Token(1), "image_channels", 255));
   if (wire.image_channels < 1) {
     lexer.Fail("image_channels must be at least 1");
   }
@@ -172,24 +182,32 @@ CohortForecastWire ParseResidentCohortForecast(const std::string& bytes,
   }
 
   next_key("build_allocation_fingerprint");
-  ParseFingerprint(lexer, "build_allocation_fingerprint", lexer.LineNo(),
+  ParseFingerprint(lexer,
+                   "build_allocation_fingerprint",
+                   lexer.LineNo(),
                    &wire.has_build_allocation_fingerprint,
                    &wire.build_allocation_fingerprint);
   next_key("source_fingerprint");
-  ParseFingerprint(lexer, "source_fingerprint", lexer.LineNo(),
-                   &wire.has_source_fingerprint, &wire.source_fingerprint);
+  ParseFingerprint(lexer,
+                   "source_fingerprint",
+                   lexer.LineNo(),
+                   &wire.has_source_fingerprint,
+                   &wire.source_fingerprint);
   if (wire.qualification == kCohortQualificationExecutable &&
       (!wire.has_build_allocation_fingerprint ||
        !wire.has_source_fingerprint)) {
-    lexer.Fail("an executable cohort qualification cannot carry absent "
-               "fingerprints");
+    lexer.Fail(
+        "an executable cohort qualification cannot carry absent "
+        "fingerprints");
   }
   if (wire.build_allocation_fingerprint != wire.source_fingerprint) {
-    lexer.Fail("cohort fingerprints must carry the same allocation-closure "
-               "digest");
+    lexer.Fail(
+        "cohort fingerprints must carry the same allocation-closure "
+        "digest");
   }
   if (wire.has_build_allocation_fingerprint) {
-    ValidateFingerprintText(lexer, "cohort allocation fingerprint",
+    ValidateFingerprintText(lexer,
+                            "cohort allocation fingerprint",
                             wire.build_allocation_fingerprint);
   }
 
@@ -225,19 +243,20 @@ CohortForecastWire ParseResidentCohortForecast(const std::string& bytes,
       next_key("member");
       if (lexer.TokenCount() != 2) lexer.Fail("member field count");
       CohortWireMember member;
-      member.member_ordinal = static_cast<size_t>(ParseUint(
-          lexer, lexer.Token(1), "member ordinal"));
+      member.member_ordinal = static_cast<size_t>(
+          ParseUint(lexer, lexer.Token(1), "member ordinal"));
       if (member.member_ordinal != cursor) {
-        lexer.Fail("cohort members must be contiguous increasing original "
-                   "ordinals (zero/duplicate/missing/reordered refuse)");
+        lexer.Fail(
+            "cohort members must be contiguous increasing original "
+            "ordinals (zero/duplicate/missing/reordered refuse)");
       }
       ++cursor;
       next_key("reference_image_idx");
       if (lexer.TokenCount() != 2) {
         lexer.Fail("reference_image_idx field count");
       }
-      const int64_t image_idx = ParseSignedInt32(
-          lexer, lexer.Token(1), "reference_image_idx");
+      const int64_t image_idx =
+          ParseSignedInt32(lexer, lexer.Token(1), "reference_image_idx");
       if (image_idx < 0) {
         lexer.Fail("reference_image_idx must be a nonnegative int32");
       }
@@ -270,17 +289,16 @@ CohortForecastWire ParseResidentCohortForecast(const std::string& bytes,
       cohort.members.push_back(std::move(member));
     }
 
-    for (const char* key : {"bank_estimate", "bank_charge",
-                            "reviewed_bank"}) {
+    for (const char* key : {"bank_estimate", "bank_charge", "reviewed_bank"}) {
       next_key(key);
       if (lexer.TokenCount() != 5 || lexer.Token(1) != "host" ||
           lexer.Token(3) != "device") {
         lexer.Fail(std::string(key) + " field layout");
       }
-      const uint64_t host = ParseUint(lexer, lexer.Token(2),
-                                      std::string(key) + " host");
-      const uint64_t device = ParseUint(lexer, lexer.Token(4),
-                                        std::string(key) + " device");
+      const uint64_t host =
+          ParseUint(lexer, lexer.Token(2), std::string(key) + " host");
+      const uint64_t device =
+          ParseUint(lexer, lexer.Token(4), std::string(key) + " device");
       if (std::string_view(key) == "bank_estimate") {
         cohort.bank_estimate_host_bytes = host;
         cohort.bank_estimate_device_bytes = device;
@@ -300,19 +318,20 @@ CohortForecastWire ParseResidentCohortForecast(const std::string& bytes,
     for (int side = 0; side < 2; ++side) {
       const uint64_t reviewed = side == 0 ? cohort.reviewed_bank_host_bytes
                                           : cohort.reviewed_bank_device_bytes;
-      const uint64_t estimate =
-          side == 0 ? cohort.bank_estimate_host_bytes
-                    : cohort.bank_estimate_device_bytes;
+      const uint64_t estimate = side == 0 ? cohort.bank_estimate_host_bytes
+                                          : cohort.bank_estimate_device_bytes;
       const uint64_t charge = side == 0 ? cohort.bank_charge_host_bytes
                                         : cohort.bank_charge_device_bytes;
       if (reviewed && estimate > reviewed) {
-        lexer.Fail("reviewed bank must be >= the native estimate (host or "
-                   "device side; zero means no reviewed R is declared)");
+        lexer.Fail(
+            "reviewed bank must be >= the native estimate (host or "
+            "device side; zero means no reviewed R is declared)");
       }
       if ((reviewed && charge != reviewed) ||
           (!reviewed && charge != estimate)) {
-        lexer.Fail("bank charge must be the reviewed R when declared, else "
-                   "the canonical estimate (a mixed producer refuses)");
+        lexer.Fail(
+            "bank charge must be the reviewed R when declared, else "
+            "the canonical estimate (a mixed producer refuses)");
       }
     }
 
@@ -337,10 +356,11 @@ CohortForecastWire ParseResidentCohortForecast(const std::string& bytes,
     }
     cohort.queue_host_bytes = ParseUint(lexer, lexer.Token(2), "queue host");
     if (cohort.queue_host_bytes < wire.global_snapshot_plan_host_bytes) {
-      lexer.Fail("every cohort ledger must carry the whole-invocation "
-                 "snapshot/plan charge (queue below the declared global "
-                 "basis; the persistent basis is never a per-cohort "
-                 "subset)");
+      lexer.Fail(
+          "every cohort ledger must carry the whole-invocation "
+          "snapshot/plan charge (queue below the declared global "
+          "basis; the persistent basis is never a per-cohort "
+          "subset)");
     }
 
     next_key("process");
@@ -360,17 +380,18 @@ CohortForecastWire ParseResidentCohortForecast(const std::string& bytes,
     cohort.process_device_bytes =
         ParseUint(lexer, lexer.Token(9), "process device");
     if (cohort.process_count != 1) {
-      lexer.Fail("process must be charged once per active ledger (the "
-                 "sequential cohort count never multiplies it)");
+      lexer.Fail(
+          "process must be charged once per active ledger (the "
+          "sequential cohort count never multiplies it)");
     }
     if (process_bound &&
         (cohort.process_mode != wire.cohorts.front().process_mode ||
-         cohort.process_host_bytes !=
-             wire.cohorts.front().process_host_bytes ||
+         cohort.process_host_bytes != wire.cohorts.front().process_host_bytes ||
          cohort.process_device_bytes !=
              wire.cohorts.front().process_device_bytes)) {
-      lexer.Fail("process is charged once; every cohort must carry the "
-                 "identical process term");
+      lexer.Fail(
+          "process is charged once; every cohort must carry the "
+          "identical process term");
     }
     process_bound = true;
 
@@ -398,9 +419,10 @@ CohortForecastWire ParseResidentCohortForecast(const std::string& bytes,
       }
       if (cohort.planner_max_member_host_bytes != max_host ||
           cohort.planner_max_member_device_bytes != max_device) {
-        lexer.Fail("planner max_member must be the per-side MAX of the "
-                   "member private charges (a bound is only provable by "
-                   "recomputation)");
+        lexer.Fail(
+            "planner max_member must be the per-side MAX of the "
+            "member private charges (a bound is only provable by "
+            "recomputation)");
       }
     }
 
@@ -417,8 +439,9 @@ CohortForecastWire ParseResidentCohortForecast(const std::string& bytes,
         ParseUint(lexer, lexer.Token(6), "rolling device");
     // MANDATORY admitted concurrency: 1 <= active_jobs <= member_count.
     if (cohort.rolling_active_jobs > cohort.member_count) {
-      lexer.Fail("active_jobs must not exceed the cohort member count (the "
-                 "admitted concurrency is bounded by the cohort)");
+      lexer.Fail(
+          "active_jobs must not exceed the cohort member count (the "
+          "admitted concurrency is bounded by the cohort)");
     }
     // The per-cohort rolling reserve must equal the SUM of the largest
     // active_jobs member private charges, INDEPENDENTLY PER SIDE
@@ -438,11 +461,14 @@ CohortForecastWire ParseResidentCohortForecast(const std::string& bytes,
         }
         std::partial_sort(values.begin(),
                           values.begin() + static_cast<long>(k),
-                          values.end(), std::greater<uint64_t>());
+                          values.end(),
+                          std::greater<uint64_t>());
         uint64_t sum = 0;
         for (size_t i = 0; i < k; ++i) {
           sum = CheckedSum("the largest active_jobs member private SUM",
-                           sum, values[i], lexer);
+                           sum,
+                           values[i],
+                           lexer);
         }
         if (which == 0) {
           host = sum;
@@ -452,10 +478,11 @@ CohortForecastWire ParseResidentCohortForecast(const std::string& bytes,
       }
       if (cohort.rolling_host_bytes != host ||
           cohort.rolling_device_bytes != device) {
-        lexer.Fail("rolling reserve must equal the SUM of the largest "
-                   "active_jobs member private charges in this cohort "
-                   "(per side independently; the declared reserve is the "
-                   "admitted concurrency, never a dynamic throttle)");
+        lexer.Fail(
+            "rolling reserve must equal the SUM of the largest "
+            "active_jobs member private charges in this cohort "
+            "(per side independently; the declared reserve is the "
+            "admitted concurrency, never a dynamic throttle)");
       }
     }
 
@@ -464,34 +491,42 @@ CohortForecastWire ParseResidentCohortForecast(const std::string& bytes,
         lexer.Token(3) != "device") {
       lexer.Fail("ledger field layout");
     }
-    cohort.ledger_host_bytes =
-        ParseUint(lexer, lexer.Token(2), "ledger host");
+    cohort.ledger_host_bytes = ParseUint(lexer, lexer.Token(2), "ledger host");
     cohort.ledger_device_bytes =
         ParseUint(lexer, lexer.Token(4), "ledger device");
     // Per-cohort complete ledger equality (checked; this IS the admission
     // unit; sequential cohort ledgers are never aggregated):
     //   host   = queue + bank_charge + normal charge + process + rolling
     //   device = bank_charge + process + rolling
-    const uint64_t expected_ledger_host = CheckedSum(
-        "ledger",
+    const uint64_t expected_ledger_host =
         CheckedSum("ledger",
-                   CheckedSum("ledger", cohort.queue_host_bytes,
-                              cohort.bank_charge_host_bytes, lexer),
-                   CheckedSum("ledger", cohort.normal_charge_host_bytes,
-                              cohort.process_host_bytes, lexer),
-                   lexer),
-        cohort.rolling_host_bytes, lexer);
-    const uint64_t expected_ledger_device = CheckedSum(
-        "ledger",
-        CheckedSum("ledger", cohort.bank_charge_device_bytes,
-                   cohort.process_device_bytes, lexer),
-        cohort.rolling_device_bytes, lexer);
+                   CheckedSum("ledger",
+                              CheckedSum("ledger",
+                                         cohort.queue_host_bytes,
+                                         cohort.bank_charge_host_bytes,
+                                         lexer),
+                              CheckedSum("ledger",
+                                         cohort.normal_charge_host_bytes,
+                                         cohort.process_host_bytes,
+                                         lexer),
+                              lexer),
+                   cohort.rolling_host_bytes,
+                   lexer);
+    const uint64_t expected_ledger_device =
+        CheckedSum("ledger",
+                   CheckedSum("ledger",
+                              cohort.bank_charge_device_bytes,
+                              cohort.process_device_bytes,
+                              lexer),
+                   cohort.rolling_device_bytes,
+                   lexer);
     if (cohort.ledger_host_bytes != expected_ledger_host ||
         cohort.ledger_device_bytes != expected_ledger_device) {
-      lexer.Fail("the per-cohort ledger must equal queue + bank_charge + "
-                 "normal charge + process + rolling (host) and "
-                 "bank_charge + process + rolling (device) exactly: the "
-                 "ledger is the admission unit");
+      lexer.Fail(
+          "the per-cohort ledger must equal queue + bank_charge + "
+          "normal charge + process + rolling (host) and "
+          "bank_charge + process + rolling (device) exactly: the "
+          "ledger is the admission unit");
     }
 
     next_key("end_cohort");
@@ -510,8 +545,9 @@ CohortForecastWire ParseResidentCohortForecast(const std::string& bytes,
   }
   if (ParseUint(lexer, lexer.Token(2), "summary global_snapshot_plan") !=
       wire.global_snapshot_plan_host_bytes) {
-    lexer.Fail("summary global_snapshot_plan disagrees with the declared "
-               "global basis");
+    lexer.Fail(
+        "summary global_snapshot_plan disagrees with the declared "
+        "global basis");
   }
   wire.summary.global_snapshot_plan_host_bytes =
       wire.global_snapshot_plan_host_bytes;
@@ -566,17 +602,19 @@ CohortForecastWire ParseResidentCohortForecast(const std::string& bytes,
           wire.cohorts.front().process_host_bytes ||
       wire.summary.process_once_device_bytes !=
           wire.cohorts.front().process_device_bytes) {
-    lexer.Fail("summary process_once must equal the first cohort's process "
-               "charge on both sides (once per active ledger; never "
-               "multiplied or understated)");
+    lexer.Fail(
+        "summary process_once must equal the first cohort's process "
+        "charge on both sides (once per active ledger; never "
+        "multiplied or understated)");
   }
 
   next_key("preflight_max");
   if (lexer.TokenCount() != 5 || lexer.Token(1) != "host" ||
       lexer.Token(3) != "device") {
-    lexer.Fail("summary preflight_max field layout (the aggregate "
-               "capacity token is removed from the frozen layout and "
-               "never parses)");
+    lexer.Fail(
+        "summary preflight_max field layout (the aggregate "
+        "capacity token is removed from the frozen layout and "
+        "never parses)");
   }
   wire.summary.preflight_max_host_bytes =
       ParseUint(lexer, lexer.Token(2), "preflight_max host");
@@ -596,18 +634,22 @@ CohortForecastWire ParseResidentCohortForecast(const std::string& bytes,
     uint64_t preflight_h = 0;
     uint64_t preflight_d = 0;
     for (const auto& cohort : wire.cohorts) {
-      queue_sum = CheckedSum("queue_sum", queue_sum, cohort.queue_host_bytes,
-                             lexer);
-      bank_sum_h = CheckedSum("bank_sum host", bank_sum_h,
-                              cohort.bank_charge_host_bytes, lexer);
-      bank_sum_d = CheckedSum("bank_sum device", bank_sum_d,
-                              cohort.bank_charge_device_bytes, lexer);
-      normal_sum_h = CheckedSum("normal_sum", normal_sum_h,
-                                cohort.normal_charge_host_bytes, lexer);
-      private_sum_h = CheckedSum("private_sum host", private_sum_h,
-                                 cohort.rolling_host_bytes, lexer);
-      private_sum_d = CheckedSum("private_sum device", private_sum_d,
-                                 cohort.rolling_device_bytes, lexer);
+      queue_sum =
+          CheckedSum("queue_sum", queue_sum, cohort.queue_host_bytes, lexer);
+      bank_sum_h = CheckedSum(
+          "bank_sum host", bank_sum_h, cohort.bank_charge_host_bytes, lexer);
+      bank_sum_d = CheckedSum("bank_sum device",
+                              bank_sum_d,
+                              cohort.bank_charge_device_bytes,
+                              lexer);
+      normal_sum_h = CheckedSum(
+          "normal_sum", normal_sum_h, cohort.normal_charge_host_bytes, lexer);
+      private_sum_h = CheckedSum(
+          "private_sum host", private_sum_h, cohort.rolling_host_bytes, lexer);
+      private_sum_d = CheckedSum("private_sum device",
+                                 private_sum_d,
+                                 cohort.rolling_device_bytes,
+                                 lexer);
       if (cohort.ledger_host_bytes > preflight_h) {
         preflight_h = cohort.ledger_host_bytes;
       }
@@ -621,14 +663,16 @@ CohortForecastWire ParseResidentCohortForecast(const std::string& bytes,
         wire.summary.normal_sum_host_bytes != normal_sum_h ||
         wire.summary.private_sum_host_bytes != private_sum_h ||
         wire.summary.private_sum_device_bytes != private_sum_d) {
-      lexer.Fail("the summary accounting sums must equal the per-cohort "
-                 "sums exactly (accounting only, never admission)");
+      lexer.Fail(
+          "the summary accounting sums must equal the per-cohort "
+          "sums exactly (accounting only, never admission)");
     }
     if (wire.summary.preflight_max_host_bytes != preflight_h ||
         wire.summary.preflight_max_device_bytes != preflight_d) {
-      lexer.Fail("summary preflight_max must equal the MAX over the "
-                 "per-cohort ledgers (the plan's sequential peak; never a "
-                 "sum)");
+      lexer.Fail(
+          "summary preflight_max must equal the MAX over the "
+          "per-cohort ledgers (the plan's sequential peak; never a "
+          "sum)");
     }
   }
 
@@ -673,8 +717,7 @@ void VerifyResidentCohortForecastBinding(
           << member_index;
       THROW_CHECK_EQ(member.input_count,
                      static_cast<uint64_t>(problem.inputs.size()))
-          << "cohort forecast binding: input count changed at "
-          << member_index;
+          << "cohort forecast binding: input count changed at " << member_index;
       ++member_index;
     }
   }

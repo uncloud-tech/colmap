@@ -17,15 +17,20 @@
 // native formula was invented for the global basis).
 //
 // Also included: the cohort-two SUBSET BANK mapping regression through the
-//real HostInputBank interface (subset job index == cohort-local
+// real HostInputBank interface (subset job index == cohort-local
 // generation; original ordinal is reporting-only; original job content,
 // reference/source layers preserved).
 //
 // Native build only (needs the OpenImageIO dense-stereo link); local
 // dev-box slices honestly skip this binary.
-#include "colmap/mvs/resident_cohort_wire.h"
+#include "colmap/mvs/depth_map.h"
+#include "colmap/mvs/normal_map.h"
 #include "colmap/mvs/owned_input_bank.h"
 #include "colmap/mvs/owned_resident_minima.h"
+#include "colmap/mvs/resident_cohort_wire.h"
+#include "colmap/scene/image.h"
+#include "colmap/sensor/bitmap.h"
+#include "colmap/util/testing.h"
 
 #include <chrono>
 #include <cstdint>
@@ -33,26 +38,20 @@
 #include <string>
 #include <vector>
 
-#include "colmap/mvs/depth_map.h"
-#include "colmap/mvs/normal_map.h"
-#include "colmap/scene/image.h"
-#include "colmap/sensor/bitmap.h"
-#include "colmap/util/testing.h"
-
 #include <gtest/gtest.h>
 
 namespace colmap {
 namespace mvs {
 namespace {
 
-using owned::BankInput;
-using owned::BankJob;
-using owned::BankLimits;
-using owned::BankRawLimits;
 using ::colmap::mvs::cohort::CohortForecastWire;
 using ::colmap::mvs::cohort::CohortWireCohort;
 using ::colmap::mvs::cohort::CohortWireMember;
 using ::colmap::mvs::cohort::VerifyResidentCohortForecastNativeFloors;
+using owned::BankInput;
+using owned::BankJob;
+using owned::BankLimits;
+using owned::BankRawLimits;
 
 class CohortNativeFloorsTest : public ::testing::Test {
  protected:
@@ -175,10 +174,11 @@ class CohortNativeFloorsTest : public ::testing::Test {
         member.member_ordinal = index;
         member.reference_image_idx = jobs_[index].reference_image_idx;
         member.input_count = jobs_[index].inputs.size();
-        const auto& reference = jobs_[index].images.at(
-            jobs_[index].reference_image_idx);
+        const auto& reference =
+            jobs_[index].images.at(jobs_[index].reference_image_idx);
         const auto minimum = owned::ResidentPrivateLogicalMinimum(
-            reference.GetWidth(), reference.GetHeight(),
+            reference.GetWidth(),
+            reference.GetHeight(),
             jobs_[index].source_image_idxs.size(),
             /*include_owner_normal=*/true);
         member.private_host_bytes = minimum.host;
@@ -190,9 +190,8 @@ class CohortNativeFloorsTest : public ::testing::Test {
       cohort.rolling_device_bytes = cohort.members[0].private_device_bytes;
       // planner max_member bounds (the per-side member MAX)
       for (const auto& member : cohort.members) {
-        cohort.planner_max_member_host_bytes =
-            std::max(cohort.planner_max_member_host_bytes,
-                     member.private_host_bytes);
+        cohort.planner_max_member_host_bytes = std::max(
+            cohort.planner_max_member_host_bytes, member.private_host_bytes);
         cohort.planner_max_member_device_bytes =
             std::max(cohort.planner_max_member_device_bytes,
                      member.private_device_bytes);
@@ -235,8 +234,8 @@ class CohortNativeFloorsTest : public ::testing::Test {
 };
 
 TEST_F(CohortNativeFloorsTest, NativeFloorsAcceptConsistentCharges) {
-  VerifyResidentCohortForecastNativeFloors(wire_, jobs_, identities_,
-                                           1ull << 40, 1ull << 40);
+  VerifyResidentCohortForecastNativeFloors(
+      wire_, jobs_, identities_, 1ull << 40, 1ull << 40);
 }
 
 TEST_F(CohortNativeFloorsTest, BankChargeBelowAllowanceComposedRawRefuses) {
@@ -275,8 +274,8 @@ TEST_F(CohortNativeFloorsTest, ChangedInputAfterCaptureRefuses) {
   bitmap.Fill(BitmapColor<uint8_t>(30, 90, 150));
   bitmap.Write(path);
   std::filesystem::last_write_time(
-      path, std::filesystem::file_time_type::clock::now() +
-                std::chrono::seconds(2));
+      path,
+      std::filesystem::file_time_type::clock::now() + std::chrono::seconds(2));
   EXPECT_THROW(VerifyResidentCohortForecastNativeFloors(
                    wire_, jobs_, identities_, 1ull << 40, 1ull << 40),
                std::exception);
@@ -293,9 +292,11 @@ TEST_F(CohortNativeFloorsTest, CohortTwoSubsetBankMappingRegression) {
   const BankLimits charges{owned::MarginBytes(raw_slice.bounded_host_raw_bytes),
                            owned::MarginBytes(raw_slice.device_raw_bytes)};
   const auto identity_slice = owned::HostInputBank::CaptureJobIdentities(slice);
-  const owned::HostInputBank bank(
-      slice, charges, owned::BankNormals::kBounded, identity_slice.data(),
-      identity_slice.size());
+  const owned::HostInputBank bank(slice,
+                                  charges,
+                                  owned::BankNormals::kBounded,
+                                  identity_slice.data(),
+                                  identity_slice.size());
   // Subset bank job index 0 IS cohort 2's first member (original ordinal
   // 2): the ORIGINAL job content, not any other cohort's job.
   EXPECT_EQ(bank.NumJobs(), 2u);
@@ -305,8 +306,7 @@ TEST_F(CohortNativeFloorsTest, CohortTwoSubsetBankMappingRegression) {
   EXPECT_EQ(bank.Job(0).inputs.size(), jobs_[2].inputs.size());
   for (size_t k = 0; k < bank.Job(0).inputs.size(); ++k) {
     EXPECT_EQ(bank.Job(0).inputs[k].image_idx, jobs_[2].inputs[k].image_idx);
-    EXPECT_EQ(bank.Job(0).inputs[k].depth_path,
-              jobs_[2].inputs[k].depth_path);
+    EXPECT_EQ(bank.Job(0).inputs[k].depth_path, jobs_[2].inputs[k].depth_path);
     EXPECT_EQ(bank.Job(0).inputs[k].normal_path,
               jobs_[2].inputs[k].normal_path);
   }

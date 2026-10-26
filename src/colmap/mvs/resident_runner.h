@@ -42,6 +42,7 @@
 // joins only in parent cleanup, before bank teardown. Cancellation is
 // independent of the optional observer.
 
+#include "colmap/mvs/generated/resident_allocation_fingerprint.h"
 #include "colmap/mvs/normal_map.h"
 #include "colmap/mvs/owned_input_bank.h"
 #include "colmap/mvs/owned_normal_lookahead.h"
@@ -65,8 +66,6 @@
 #include <memory>
 #include <string>
 #include <vector>
-
-#include "colmap/mvs/generated/resident_allocation_fingerprint.h"
 
 namespace colmap {
 namespace mvs {
@@ -140,9 +139,12 @@ inline int RunResidentBankImpl(
   THROW_CHECK(format == "colmap" || format == "pmvs")
       << "Invalid `workspace_format` " << workspace_format
       << " - supported values are 'COLMAP' or 'PMVS'.";
-  PatchMatchController resolution_controller(
-      invocation_options, workspace_path, format, pmvs_option_name,
-      config_path, PatchMatchExecution::kStock);
+  PatchMatchController resolution_controller(invocation_options,
+                                             workspace_path,
+                                             format,
+                                             pmvs_option_name,
+                                             config_path,
+                                             PatchMatchExecution::kStock);
   auto resolved = resolution_controller.ResolveOwnedBankContractWithJobs();
   const std::string fresh_bytes = SerializeOwnedBankContract(resolved.contract);
 
@@ -156,14 +158,15 @@ inline int RunResidentBankImpl(
   VerifyResidentForecastLedgerTerms(wire, limits.max_concurrent_solvers);
   // Before the minima estimators (which open input file headers).
   CheckContractIdentitiesUnchanged(bound_identities);
-  const auto minima = ComputeResidentLedgerMinima(
-      resolved.jobs, ResidentForecastNormals::kBounded,
-      static_cast<size_t>(wire.max_future));
+  const auto minima =
+      ComputeResidentLedgerMinima(resolved.jobs,
+                                  ResidentForecastNormals::kBounded,
+                                  static_cast<size_t>(wire.max_future));
   // After ALL estimator work, before any bank construction.
   CheckContractIdentitiesUnchanged(bound_identities);
   VerifyResidentForecastCharges(wire, minima);
-  VerifyResidentForecastFitsCaps(wire, limits.host_budget_bytes,
-                                 limits.device_budget_bytes);
+  VerifyResidentForecastFitsCaps(
+      wire, limits.host_budget_bytes, limits.device_budget_bytes);
 
   // Single explicit device (also enforced during resolution).
   const uint64_t device_value = owned::ParseBytes(invocation_options.gpu_index);
@@ -176,8 +179,8 @@ inline int RunResidentBankImpl(
     std::vector<owned::ByteCharge> values;
     values.reserve(wire.references.size());
     for (const auto& reference : wire.references) {
-      values.push_back({reference.private_host_bytes,
-                        reference.private_device_bytes});
+      values.push_back(
+          {reference.private_host_bytes, reference.private_device_bytes});
     }
     return values;
   }();
@@ -215,10 +218,9 @@ inline int RunResidentBankImpl(
   // (bank + process + metadata + normal queue + rolling reserve); the
   // bank stays dedicated OUTSIDE the rolling ledger.
   const owned::ByteCharge ledger_process{
-      owned::CheckedAdd(
-          wire.process_host_bytes,
-          owned::CheckedAdd(wire.metadata_charge_bytes,
-                            wire.normal_charge_bytes)),
+      owned::CheckedAdd(wire.process_host_bytes,
+                        owned::CheckedAdd(wire.metadata_charge_bytes,
+                                          wire.normal_charge_bytes)),
       wire.process_device_bytes};
   const auto ledger_capacity = [bank_charge](const uint64_t budget,
                                              const uint64_t bank) {
@@ -232,12 +234,12 @@ inline int RunResidentBankImpl(
       ledger_capacity(limits.host_budget_bytes, bank_charge.host),
       ledger_capacity(limits.device_budget_bytes, bank_charge.device)};
 
-  owned::HostInputBank host(std::move(resolved.jobs),
-                            owned::BankLimits{bank_charge.host,
-                                              bank_charge.device},
-                            owned::BankNormals::kBounded,
-                            identity_snapshot.data(),
-                            identity_snapshot.size());
+  owned::HostInputBank host(
+      std::move(resolved.jobs),
+      owned::BankLimits{bank_charge.host, bank_charge.device},
+      owned::BankNormals::kBounded,
+      identity_snapshot.data(),
+      identity_snapshot.size());
   owned::ResidentInputBank gpu(host, device_index);
   host.ReleaseUploadPayloads();
 
@@ -250,27 +252,29 @@ inline int RunResidentBankImpl(
     pipeline_layers.push_back(host.ReferenceLayer(generation));
   }
   auto normal_pipeline = std::make_unique<owned::NormalLookahead>(
-      std::move(pipeline_layers), static_cast<size_t>(wire.max_future),
+      std::move(pipeline_layers),
+      static_cast<size_t>(wire.max_future),
       wire.normal_charge_bytes);
-  normal_pipeline->Start(
-      [&host](size_t layer, const std::atomic<bool>&) {
-        return host.LoadReferenceNormal(layer);
-      });
+  normal_pipeline->Start([&host](size_t layer, const std::atomic<bool>&) {
+    return host.LoadReferenceNormal(layer);
+  });
 
   // Coordinator sink: failure wiring is MANDATORY (blocked consumers/
   // producers must wake before owner drain/join), independent of the
   // optional observer.
   auto normal_pipeline_raw = normal_pipeline.get();
   const auto observer_storage = observer;
-  const auto sink = [normal_pipeline_raw, &observer_storage](
-                        const owned::PairEvent& e) {
+  const auto sink = [normal_pipeline_raw,
+                     &observer_storage](const owned::PairEvent& e) {
     // MANDATORY ORDER: cancel first, observe after (Sol 3cdc fix 5; see
     // ResidentEventSink). A throwing observer is swallowed by the
     // coordinator's guarded sink only AFTER cancellation is published.
-    ResidentEventSink(e.event == "cancelled",
-                      [normal_pipeline_raw]() { normal_pipeline_raw->Cancel(); },
-                      observer_storage ? &observer_storage : nullptr,
-                      e.job, e.event.c_str());
+    ResidentEventSink(
+        e.event == "cancelled",
+        [normal_pipeline_raw]() { normal_pipeline_raw->Cancel(); },
+        observer_storage ? &observer_storage : nullptr,
+        e.job,
+        e.event.c_str());
   };
   owned::PairCoordinator coordinator(ledger,
                                      ledger_process,
@@ -284,32 +288,36 @@ inline int RunResidentBankImpl(
     // The bounded FIFO handoff is unique per generation; the owner frame
     // keeps the reference normal alive until upload and owner retirement.
     mvs::NormalMap owned_normal = normal_pipeline->Consume(generation);
-    PatchMatchController controller(
-        invocation_options, workspace_path, format, pmvs_option_name,
-        config_path, PatchMatchExecution::kOwnedCuda);
+    PatchMatchController controller(invocation_options,
+                                    workspace_path,
+                                    format,
+                                    pmvs_option_name,
+                                    config_path,
+                                    PatchMatchExecution::kOwnedCuda);
     PatchMatchController::OwnedPairHooks hooks;
     hooks.owned_tile_threads = limits.owned_tile_threads;
-    hooks.check_inputs = [&](size_t, const PatchMatchOptions&,
+    hooks.check_inputs = [&](size_t,
+                             const PatchMatchOptions&,
                              const PatchMatch::Problem& problem) {
       // Owner-scope re-check: the ASSIGNED forecast charge must still
       // cover the native private minimum with the active owner normal.
       const auto& reference = problem.images->at(problem.ref_image_idx);
-      const auto minimum = owned::ResidentPrivateLogicalMinimum(
-          reference.GetWidth(), reference.GetHeight(),
-          problem.src_image_idxs.size(), /*include_owner_normal=*/true);
+      const auto minimum =
+          owned::ResidentPrivateLogicalMinimum(reference.GetWidth(),
+                                               reference.GetHeight(),
+                                               problem.src_image_idxs.size(),
+                                               /*include_owner_normal=*/true);
       THROW_CHECK_GE(wire.references.at(generation).private_host_bytes,
                      minimum.host);
       THROW_CHECK_GE(wire.references.at(generation).private_device_bytes,
                      minimum.device);
     };
-    controller.RunResidentOwnedPairJob(host, gpu, coordinator, generation,
-                                       generation, hooks, &owned_normal);
+    controller.RunResidentOwnedPairJob(
+        host, gpu, coordinator, generation, generation, hooks, &owned_normal);
   };
 
   // Returns (or throws) only after all owners drained and joined.
-  const auto run_observer = observer
-                                ? observer
-                                : +[](size_t, const char*) {};
+  const auto run_observer = observer ? observer : +[](size_t, const char*) {};
   owned::RunRollingOwners(coordinator, run_job, run_observer);
 
   // Ledger fully released on success (Finish ran inside RunRollingOwners).
@@ -330,10 +338,15 @@ inline int RunResidentBankImpl(
 // Non-CUDA builds never execute: the CLI refuses before this call runs,
 // and any direct caller gets an explicit availability failure.
 inline int RunResidentBankImpl(
-    const PatchMatchOptions&, const std::filesystem::path&,
-    const std::string&, const std::string&, const std::filesystem::path&,
-    const std::filesystem::path&, const ResidentRunnerLimits&,
-    const ResidentSha256Fn, const std::function<void(size_t, const char*)>&) {
+    const PatchMatchOptions&,
+    const std::filesystem::path&,
+    const std::string&,
+    const std::string&,
+    const std::filesystem::path&,
+    const std::filesystem::path&,
+    const ResidentRunnerLimits&,
+    const ResidentSha256Fn,
+    const std::function<void(size_t, const char*)>&) {
   LOG(ERROR) << "The resident runner requires the dense-stereo library, "
                 "which is built with CUDA support";
   return EXIT_FAILURE;
@@ -353,9 +366,15 @@ inline int RunResidentBank(
     const ResidentRunnerLimits& limits,
     const ResidentSha256Fn sha,
     const std::function<void(size_t, const char*)>& observer) {
-  return RunResidentBankImpl(invocation_options, workspace_path,
-                             workspace_format, pmvs_option_name, config_path,
-                             forecast_path, limits, sha, observer);
+  return RunResidentBankImpl(invocation_options,
+                             workspace_path,
+                             workspace_format,
+                             pmvs_option_name,
+                             config_path,
+                             forecast_path,
+                             limits,
+                             sha,
+                             observer);
 }
 
 }  // namespace resident

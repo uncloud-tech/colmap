@@ -6,12 +6,12 @@
 #include "colmap/mvs/patch_match_cuda_owned.cu"
 #undef COLMAP_OWNED_CACHE_TRACE_TEST
 
-#include <gtest/gtest.h>
-
 #include <array>
 #include <cmath>
 #include <cstring>
 #include <type_traits>
+
+#include <gtest/gtest.h>
 
 namespace colmap::mvs::owned {
 namespace {
@@ -33,7 +33,8 @@ void ExpectBits(const T& a, const T& b) {
 
 void ExpectState(const curandState& a, const curandState& b) {
   // Compare every XORWOW field, not unspecified struct padding. Verified
-  // against the installed CUDA 12.8 curand_kernel.h; fail to compile if changed.
+  // against the installed CUDA 12.8 curand_kernel.h; fail to compile if
+  // changed.
   static_assert(std::is_same_v<curandState, curandStateXORWOW>);
   EXPECT_EQ(a.d, b.d);
   for (int i = 0; i < 5; ++i) EXPECT_EQ(a.v[i], b.v[i]);
@@ -69,12 +70,12 @@ SweepOutput RunSweep(int seed, int sources, bool flat, bool coincident) {
   for (int i = 0; i < sources; ++i) {
     source_pixels.insert(source_pixels.end(), pixels.begin(), pixels.end());
   }
-  const auto point = TextureDescription(cudaFilterModePoint,
-                                        cudaReadModeNormalizedFloat);
-  const auto linear = TextureDescription(cudaFilterModeLinear,
-                                         cudaReadModeNormalizedFloat);
-  const auto element = TextureDescription(cudaFilterModePoint,
-                                          cudaReadModeElementType);
+  const auto point =
+      TextureDescription(cudaFilterModePoint, cudaReadModeNormalizedFloat);
+  const auto linear =
+      TextureDescription(cudaFilterModeLinear, cudaReadModeNormalizedFloat);
+  const auto element =
+      TextureDescription(cudaFilterModePoint, cudaReadModeElementType);
   auto source_texture = CudaArrayLayeredTexture<uint8_t>::FromHostArray(
       linear, kWidth, kHeight, sources, source_pixels.data(), stream.Get());
   std::vector<float> source_depth(kWidth * kHeight * sources, 3.0f);
@@ -121,7 +122,8 @@ SweepOutput RunSweep(int seed, int sources, bool flat, bool coincident) {
   std::vector<curandState> packed_rng(boundary.Count());
   {
     ScopedStreamCompletion completion(stream.Get());
-    rng->CopyToHost(initial_rng.data(), kWidth * sizeof(curandState), stream.Get());
+    rng->CopyToHost(
+        initial_rng.data(), kWidth * sizeof(curandState), stream.Get());
     completion.Wait();
   }
   for (size_t row = 0; row < kHeight; ++row) {
@@ -147,11 +149,19 @@ SweepOutput RunSweep(int seed, int sources, bool flat, bool coincident) {
   trace.CopyToDevice(
       empty.data(), kRecords * sizeof(CacheTraceRecord), stream.Get());
   const dim3 grid((kWidth + kTile - 1) / kTile);
-  ComputeInitialCost<11, 1, kTile><<<grid, kTile, 0, stream.Get()>>>(
-      calibration, cost.View(), depth.View(), normal.View(),
-      reference_texture->GetObj(), reference.sum_image->View(),
-      reference.squared_sum_image->View(), source_texture->GetObj(), nullptr,
-      pose_texture->GetObj(), 5.0f, 0.2f);
+  ComputeInitialCost<11, 1, kTile>
+      <<<grid, kTile, 0, stream.Get()>>>(calibration,
+                                         cost.View(),
+                                         depth.View(),
+                                         normal.View(),
+                                         reference_texture->GetObj(),
+                                         reference.sum_image->View(),
+                                         reference.squared_sum_image->View(),
+                                         source_texture->GetObj(),
+                                         nullptr,
+                                         pose_texture->GetObj(),
+                                         5.0f,
+                                         0.2f);
   CUDA_CHECK();
   SweepOptions options;
   options.depth_min = 1;
@@ -161,14 +171,32 @@ SweepOutput RunSweep(int seed, int sources, bool flat, bool coincident) {
   options.sigma_color = 0.2f;
   // Geometry is real; no draw, CDF, cost or winner override is provided.
   const CacheTrace capture{trace.GetPtr(), kRecords, kWidth, kHeight, kSamples};
-  SweepFromTopToBottom<11, 1, kTile, kGeometry, false, false, kCache,
+  SweepFromTopToBottom<11,
+                       1,
+                       kTile,
+                       kGeometry,
+                       false,
+                       false,
+                       kCache,
                        kLookahead>
-      <<<grid, kTile, 0, stream.Get()>>>(
-          calibration, workspace.View(), rng_view, cost.View(), depth.View(),
-          normal.View(), mask.View(), probability.View(), previous.View(),
-          reference_texture->GetObj(), reference.sum_image->View(),
-          reference.squared_sum_image->View(), source_texture->GetObj(), nullptr,
-          depth_texture->GetObj(), pose_texture->GetObj(), options, capture);
+      <<<grid, kTile, 0, stream.Get()>>>(calibration,
+                                         workspace.View(),
+                                         rng_view,
+                                         cost.View(),
+                                         depth.View(),
+                                         normal.View(),
+                                         mask.View(),
+                                         probability.View(),
+                                         previous.View(),
+                                         reference_texture->GetObj(),
+                                         reference.sum_image->View(),
+                                         reference.squared_sum_image->View(),
+                                         source_texture->GetObj(),
+                                         nullptr,
+                                         depth_texture->GetObj(),
+                                         pose_texture->GetObj(),
+                                         options,
+                                         capture);
   CUDA_CHECK();
   SweepOutput output;
   output.cost = cost.CopyToMat(stream.Get());

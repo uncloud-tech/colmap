@@ -114,7 +114,7 @@ struct ResidentForecastWire {
 // oversized hex strings, truncated/empty/padded lines, trailing content,
 // executable qualification with absent or unequal fingerprints.
 ResidentForecastWire ParseResidentForecast(const std::string& bytes,
-                                            ResidentSha256Fn sha = nullptr);
+                                           ResidentSha256Fn sha = nullptr);
 
 // Native bank normal mode after the parser/gates have checked the label.
 ResidentForecastNormals ResidentForecastNormalsMode(
@@ -161,10 +161,9 @@ ResidentLedgerMinima ComputeResidentLedgerMinima(
 //    problems (count, order, reference_image_idx, exact name bytes);
 //  - the raw bytes must parse AND re-serialize canonically (rejected if the
 //    stored contract was not canonical).
-void VerifyResidentForecastBinding(
-    const ResidentForecastWire& wire,
-    const std::string& fresh_contract_bytes,
-    ResidentSha256Fn sha);
+void VerifyResidentForecastBinding(const ResidentForecastWire& wire,
+                                   const std::string& fresh_contract_bytes,
+                                   ResidentSha256Fn sha);
 
 // Parameter gate: executable-only shape plus fingerprint identity and the
 // BOUNDED-ONLY first execution gate.
@@ -258,8 +257,7 @@ void CheckContractIdentitiesUnchanged(
 // or empty (observer optional). Cancellation is observer-independent.
 void ResidentEventSink(const bool cancelled_event,
                        const std::function<void()>& cancel,
-                       const std::function<void(size_t, const char*)>*
-                           observer,
+                       const std::function<void(size_t, const char*)>* observer,
                        const size_t job,
                        const char* event);
 

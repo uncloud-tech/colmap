@@ -8,9 +8,8 @@
 // sequential-cohort teardown/advance ordering on the real
 // PairCoordinator/NormalLookahead interfaces. The CUDA surfaces
 // (ResidentInputBank, the controllers) remain dev1 native-build coverage.
-#include "colmap/mvs/resident_cohort_runner.h"
-
 #include "colmap/mvs/image.h"
+#include "colmap/mvs/resident_cohort_runner.h"
 
 #include <atomic>
 #include <chrono>
@@ -81,8 +80,7 @@ TEST(CohortOutputPathDiscipline, ExistingOutputsRefuse) {
     FAIL() << "existing outputs must refuse";
   } catch (const std::invalid_argument& error) {
     const std::string message = error.what();
-    EXPECT_NE(message.find("cohort output already exists"),
-              std::string::npos)
+    EXPECT_NE(message.find("cohort output already exists"), std::string::npos)
         << message;
   }
   std::filesystem::remove_all(root);
@@ -226,7 +224,8 @@ TEST(CohortRunnerLifecycle, FailureAbortsRemainingCohortsAfterDrain) {
     ++cohort_advance_attempts;
     auto pipeline = std::make_unique<owned::NormalLookahead>(
         std::vector<size_t>{2 * cohort, 2 * cohort + 1},
-        /*max_future=*/1, /*charge=*/4096);
+        /*max_future=*/1,
+        /*charge=*/4096);
     auto pipeline_raw = pipeline.get();
     const std::function<void(size_t, const char*)> throwing_observer =
         [&](size_t, const char* event) {
@@ -241,18 +240,20 @@ TEST(CohortRunnerLifecycle, FailureAbortsRemainingCohortsAfterDrain) {
       }
       // MANDATORY ORDER (identical composition to the production sink):
       // cancellation first, throwing observer after.
-      ResidentEventSink(e.event == "cancelled",
-                                  [pipeline_raw]() {
-                                    pipeline_raw->Cancel();
-                                  },
-                                  &throwing_observer, e.job,
-                                  e.event.c_str());
+      ResidentEventSink(
+          e.event == "cancelled",
+          [pipeline_raw]() { pipeline_raw->Cancel(); },
+          &throwing_observer,
+          e.job,
+          e.event.c_str());
     };
     owned::PairCoordinator coordinator(
-        owned::ByteCharge{65536, 65536}, owned::ByteCharge{2048, 2048},
+        owned::ByteCharge{65536, 65536},
+        owned::ByteCharge{2048, 2048},
         /*max_concurrent_solvers=*/1,
         std::vector<owned::ByteCharge>{{4096, 8192}, {4096, 8192}},
-        /*timeout=*/std::chrono::milliseconds(2000), sink);
+        /*timeout=*/std::chrono::milliseconds(2000),
+        sink);
     // Real pipeline production (the loader is the CPU stand-in for the
     // bounded bank normal read; the pipeline/queue/sink are the real
     // production classes).
@@ -288,8 +289,7 @@ TEST(CohortRunnerLifecycle, FailureAbortsRemainingCohortsAfterDrain) {
     // sink cancels the producer first and the throwing observer after) —
     // the external trigger race was part of the broken fixture.
     EXPECT_THROW(owned::RunRollingOwners(
-                     coordinator, run_job,
-                     [](size_t, const char*) {}),
+                     coordinator, run_job, [](size_t, const char*) {}),
                  std::exception);
     // The failure path never joins the producer explicitly (not fully
     // produced); the destructor CancelAndJoin-s it with the banks.

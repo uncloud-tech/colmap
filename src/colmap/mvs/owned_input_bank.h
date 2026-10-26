@@ -14,7 +14,8 @@
 
 namespace colmap::mvs::owned {
 
-// Metadata only. Paths identify immutable admitted input files, not job indices.
+// Metadata only. Paths identify immutable admitted input files, not job
+// indices.
 struct BankInput {
   int image_idx = -1;
   Image image;
@@ -51,8 +52,7 @@ struct BankFileIdentity {
 
 inline bool SameIdentity(const BankFileIdentity& a, const BankFileIdentity& b) {
   return a.path == b.path && a.size == b.size && a.device == b.device &&
-         a.inode == b.inode &&
-         a.modified_seconds == b.modified_seconds &&
+         a.inode == b.inode && a.modified_seconds == b.modified_seconds &&
          a.modified_nanoseconds == b.modified_nanoseconds &&
          a.changed_seconds == b.changed_seconds &&
          a.changed_nanoseconds == b.changed_nanoseconds;
@@ -180,9 +180,10 @@ class HostInputBank {
   static BankRawLimits RawEstimate(const std::vector<BankJob>& jobs);
   // Explicit owner/normal allowances reported for runtime charge records.
   // max_future must be 1 or 2 (the bounded FIFO queue contract).
-  static NormalAllowance EstimateNormalAllowance(const std::vector<BankJob>& jobs,
-                                                 size_t max_future);
-  HostInputBank(std::vector<BankJob> jobs, BankLimits limits,
+  static NormalAllowance EstimateNormalAllowance(
+      const std::vector<BankJob>& jobs, size_t max_future);
+  HostInputBank(std::vector<BankJob> jobs,
+                BankLimits limits,
                 BankNormals normals = BankNormals::kEager,
                 const BankJobIdentities* identity_snapshot = nullptr,
                 size_t snapshot_count = 0);

@@ -120,12 +120,17 @@ inline ByteCharge CohortRequired(const ByteCharge& bank,
   const ByteCharge& bank_charge = CohortBankCharge(terms, bank);
   ByteCharge required;
   try {
-    required.host = CheckedAdd(CheckedAdd(CheckedAdd(CheckedAdd(
-        bank_charge.host, terms.process.host), terms.queue_transient.host),
-        private_job.host), terms.unclassified.host);
-    required.device = CheckedAdd(CheckedAdd(CheckedAdd(CheckedAdd(
-        bank_charge.device, terms.process.device), terms.queue_transient.device),
-        private_job.device), terms.unclassified.device);
+    required.host = CheckedAdd(
+        CheckedAdd(CheckedAdd(CheckedAdd(bank_charge.host, terms.process.host),
+                              terms.queue_transient.host),
+                   private_job.host),
+        terms.unclassified.host);
+    required.device = CheckedAdd(
+        CheckedAdd(
+            CheckedAdd(CheckedAdd(bank_charge.device, terms.process.device),
+                       terms.queue_transient.device),
+            private_job.device),
+        terms.unclassified.device);
   } catch (const std::overflow_error&) {
     throw std::overflow_error(std::string(context) +
                               ": cohort admission arithmetic overflow");
@@ -161,35 +166,41 @@ inline bool CohortMembershipFits(const ByteCharge& bank,
 // Exact limiting-resource diagnostic for a rejected singleton/pair. The
 // limiting resource is the side with the larger positive deficit across the
 // membership and budget checks; all components are always reported.
-inline std::string CohortOversizedDiagnostic(
-    const char* stage, size_t original_job, size_t selection_ordinal,
-    const ByteCharge& bank, const CohortTerms& terms,
-    const ByteCharge& private_job, const ByteCharge& capacity) {
+inline std::string CohortOversizedDiagnostic(const char* stage,
+                                             size_t original_job,
+                                             size_t selection_ordinal,
+                                             const ByteCharge& bank,
+                                             const CohortTerms& terms,
+                                             const ByteCharge& private_job,
+                                             const ByteCharge& capacity) {
   const ByteCharge required =
       CohortRequired(bank, terms, private_job, "cohort diagnostic");
-  const bool policy =
-      terms.reviewed_bank.host || terms.reviewed_bank.device;
+  const bool policy = terms.reviewed_bank.host || terms.reviewed_bank.device;
   const int64_t bank_host_deficit =
       policy && bank.host > terms.reviewed_bank.host
-          ? static_cast<int64_t>(bank.host - terms.reviewed_bank.host) : 0;
+          ? static_cast<int64_t>(bank.host - terms.reviewed_bank.host)
+          : 0;
   const int64_t bank_device_deficit =
       policy && bank.device > terms.reviewed_bank.device
           ? static_cast<int64_t>(bank.device - terms.reviewed_bank.device)
           : 0;
   const int64_t host_deficit =
       required.host > capacity.host
-          ? static_cast<int64_t>(required.host - capacity.host) : 0;
+          ? static_cast<int64_t>(required.host - capacity.host)
+          : 0;
   const int64_t device_deficit =
       required.device > capacity.device
-          ? static_cast<int64_t>(required.device - capacity.device) : 0;
+          ? static_cast<int64_t>(required.device - capacity.device)
+          : 0;
   const int64_t worst_host = std::max(bank_host_deficit, host_deficit);
   const int64_t worst_device = std::max(bank_device_deficit, device_deficit);
   const char* limiting = worst_host || worst_device
-      ? (worst_host >= worst_device ? "host" : "device")
-      : "host";
+                             ? (worst_host >= worst_device ? "host" : "device")
+                             : "host";
   std::string message = "cohort: ";
   message += stage;
-  message += " oversized bank_job_index=" + std::to_string(original_job) +
+  message +=
+      " oversized bank_job_index=" + std::to_string(original_job) +
       " selection_ordinal=" + std::to_string(selection_ordinal) +
       " bank_host=" + std::to_string(bank.host) +
       " bank_device=" + std::to_string(bank.device) +
@@ -280,8 +291,8 @@ inline CohortPlan PlanCohorts(const std::vector<size_t>& selection,
     size_t end = first + 1;
     ByteCharge bank = estimate_slice(first, end - first);
     ByteCharge cohort_private = forecasts[first];
-    ByteCharge required = detail::CohortRequired(
-        bank, terms, cohort_private, "cohort packing");
+    ByteCharge required =
+        detail::CohortRequired(bank, terms, cohort_private, "cohort packing");
     while (end < selection.size()) {
       const ByteCharge candidate_bank = estimate_slice(first, end + 1 - first);
       // Per-side maxima are independent: the binding side decides
@@ -295,8 +306,8 @@ inline CohortPlan PlanCohorts(const std::vector<size_t>& selection,
       }
       const ByteCharge candidate_required = detail::CohortRequired(
           candidate_bank, terms, candidate_private, "cohort packing");
-      if (!detail::CohortMembershipFits(candidate_bank, terms,
-                                        candidate_private, capacity)) {
+      if (!detail::CohortMembershipFits(
+              candidate_bank, terms, candidate_private, capacity)) {
         // All singletons already preflighted, so the current cohort is
         // nonempty; close it and continue with the next FIFO segment.
         break;
@@ -314,16 +325,16 @@ inline CohortPlan PlanCohorts(const std::vector<size_t>& selection,
     entry.bank_estimate = bank;
     entry.member_private = cohort_private;
     const ByteCharge bank_charge = detail::CohortBankCharge(terms, bank);
-    entry.terms_total = {CheckedAdd(CheckedAdd(CheckedAdd(
-                            bank_charge.host, terms.process.host),
-                            terms.queue_transient.host),
-                            cohort_private.host),
-                        CheckedAdd(CheckedAdd(CheckedAdd(
-                            bank_charge.device, terms.process.device),
-                            terms.queue_transient.device),
-                            cohort_private.device)};
-    entry.required = detail::CohortRequired(bank, terms, cohort_private,
-                                            "cohort packing");
+    entry.terms_total = {
+        CheckedAdd(CheckedAdd(CheckedAdd(bank_charge.host, terms.process.host),
+                              terms.queue_transient.host),
+                   cohort_private.host),
+        CheckedAdd(
+            CheckedAdd(CheckedAdd(bank_charge.device, terms.process.device),
+                       terms.queue_transient.device),
+            cohort_private.device)};
+    entry.required =
+        detail::CohortRequired(bank, terms, cohort_private, "cohort packing");
     plan.cohorts.push_back(std::move(entry));
     first = end;
   }

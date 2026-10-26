@@ -11,11 +11,11 @@ namespace {
 
 template <bool kResident>
 __device__ float ReferenceSample(cudaTextureObject_t texture,
-                                float col,
-                                float row,
-                                int layer,
-                                size_t width,
-                                size_t height) {
+                                 float col,
+                                 float row,
+                                 int layer,
+                                 size_t width,
+                                 size_t height) {
   if constexpr (kResident) {
     // Preserve the original reference's border, not the bank's padded extent.
     if (col < 0 || row < 0 || col >= width || row >= height) {
@@ -56,9 +56,12 @@ __global__ void FilterKernel(const cudaTextureObject_t image_texture,
        window_row += window_step) {
     for (int window_col = -window_radius; window_col <= window_radius;
          window_col += window_step) {
-      const float color = ReferenceSample<kResident>(
-          image_texture, col + window_col, row + window_row, layer,
-          image.GetWidth(), image.GetHeight());
+      const float color = ReferenceSample<kResident>(image_texture,
+                                                     col + window_col,
+                                                     row + window_row,
+                                                     layer,
+                                                     image.GetWidth(),
+                                                     image.GetHeight());
       const float bilateral_weight = bilateral_weight_computer.Compute(
           window_row, window_col, center_color, color);
       color_sum += bilateral_weight * color;
@@ -105,13 +108,14 @@ void GpuMatRefImage::Filter(const uint8_t* image_data,
                        (height_ - 1) / block_size.y + 1);
 
   FilterKernel<false><<<grid_size, block_size>>>(image_texture->GetObj(),
-                                          image->View(),
-                                          sum_image->View(),
-                                          squared_sum_image->View(),
-                                          window_radius,
-                                          window_step,
-                                          sigma_spatial,
-                                          sigma_color, 0);
+                                                 image->View(),
+                                                 sum_image->View(),
+                                                 squared_sum_image->View(),
+                                                 window_radius,
+                                                 window_step,
+                                                 sigma_spatial,
+                                                 sigma_color,
+                                                 0);
   CUDA_SYNC_AND_CHECK();
 }
 
@@ -136,24 +140,39 @@ void GpuMatRefImage::Filter(const uint8_t* image_data,
   const dim3 grid_size((width_ - 1) / block_size.x + 1,
                        (height_ - 1) / block_size.y + 1);
   owned::ScopedStreamCompletion completion(stream);
-  FilterKernel<false><<<grid_size, block_size, 0, stream>>>(
-      image_texture->GetObj(), image->View(), sum_image->View(),
-      squared_sum_image->View(), window_radius, window_step,
-      sigma_spatial, sigma_color, 0);
+  FilterKernel<false>
+      <<<grid_size, block_size, 0, stream>>>(image_texture->GetObj(),
+                                             image->View(),
+                                             sum_image->View(),
+                                             squared_sum_image->View(),
+                                             window_radius,
+                                             window_step,
+                                             sigma_spatial,
+                                             sigma_color,
+                                             0);
   // Complete the final texture read before the local texture is destroyed.
   completion.Wait();
 }
 
-void GpuMatRefImage::FilterResident(cudaTextureObject_t texture, int layer,
-                                     size_t window_radius, size_t window_step,
-                                     float sigma_spatial, float sigma_color,
-                                     cudaStream_t stream) {
+void GpuMatRefImage::FilterResident(cudaTextureObject_t texture,
+                                    int layer,
+                                    size_t window_radius,
+                                    size_t window_step,
+                                    float sigma_spatial,
+                                    float sigma_color,
+                                    cudaStream_t stream) {
   const dim3 block(kBlockDimX, kBlockDimY);
   const dim3 grid((width_ - 1) / block.x + 1, (height_ - 1) / block.y + 1);
   owned::ScopedStreamCompletion completion(stream);
-  FilterKernel<true><<<grid, block, 0, stream>>>(
-      texture, image->View(), sum_image->View(), squared_sum_image->View(),
-      window_radius, window_step, sigma_spatial, sigma_color, layer);
+  FilterKernel<true><<<grid, block, 0, stream>>>(texture,
+                                                 image->View(),
+                                                 sum_image->View(),
+                                                 squared_sum_image->View(),
+                                                 window_radius,
+                                                 window_step,
+                                                 sigma_spatial,
+                                                 sigma_color,
+                                                 layer);
   completion.Wait();
 }
 #endif  // !defined(COLMAP_HIP_ENABLED)

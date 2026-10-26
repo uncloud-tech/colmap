@@ -3,7 +3,6 @@
 // Every path exercises the actual controller resolution and the actual
 // standard CLI argument parser; contract bytes are never mock-derived.
 #include "colmap/exe/mvs.h"
-
 #include "colmap/mvs/depth_map.h"
 #include "colmap/mvs/normal_map.h"
 #include "colmap/mvs/owned_input_bank.h"
@@ -16,8 +15,8 @@
 #include "colmap/util/testing.h"
 
 #include <algorithm>
-#include <fstream>
 #include <cstdint>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <string>
@@ -54,10 +53,9 @@ int RunArgs(const std::vector<std::string>& args) {
   for (auto& arg : args) {
     argv.push_back(const_cast<char*>(arg.c_str()));
   }
-  return RunPatchMatchStereoWithExecution(
-      static_cast<int>(argv.size()),
-      argv.data(),
-      mvs::PatchMatchExecution::kStock);
+  return RunPatchMatchStereoWithExecution(static_cast<int>(argv.size()),
+                                          argv.data(),
+                                          mvs::PatchMatchExecution::kStock);
 }
 
 // Real COLMAP workspace with synthetic poses/points, photometric inputs for
@@ -130,20 +128,19 @@ class ResidentCliContractTest : public ::testing::Test {
     // sparse model's auto depth range is invalid, so every valid-baseline
     // export passes it explicitly, matching the photometric input maps). No
     // product weakening: the real range guard stays active.
-    std::vector<std::string> args = {
-        "colmap",
-        "--workspace_path",
-        workspace.string(),
-        "--PatchMatchStereo.gpu_index",
-        "0",
-        "--PatchMatchStereo.num_threads",
-        "2",
-        "--PatchMatchStereo.depth_min",
-        "0.5",
-        "--PatchMatchStereo.depth_max",
-        "10",
-        ModeFlag(verify),
-        contract_path.string()};
+    std::vector<std::string> args = {"colmap",
+                                     "--workspace_path",
+                                     workspace.string(),
+                                     "--PatchMatchStereo.gpu_index",
+                                     "0",
+                                     "--PatchMatchStereo.num_threads",
+                                     "2",
+                                     "--PatchMatchStereo.depth_min",
+                                     "0.5",
+                                     "--PatchMatchStereo.depth_max",
+                                     "10",
+                                     ModeFlag(verify),
+                                     contract_path.string()};
     args.insert(args.end(), extra_options.begin(), extra_options.end());
     return RunArgs(args);
   }
@@ -160,9 +157,8 @@ class ResidentCliContractTest : public ::testing::Test {
       const std::filesystem::path& contract_path,
       const bool verify,
       const std::vector<std::pair<std::string, std::string>>& option_pairs) {
-    std::vector<std::string> args = {"colmap",
-                                     "--workspace_path",
-                                     root_.string()};
+    std::vector<std::string> args = {
+        "colmap", "--workspace_path", root_.string()};
     for (const auto& option : option_pairs) {
       args.push_back(option.first);
       args.push_back(option.second);
@@ -200,8 +196,11 @@ class ResidentCliContractTest : public ::testing::Test {
     Reconstruction reconstruction;
     reconstruction.Read(sparse);
     reconstruction.WriteText(sparse);
-    for (const char* file : {"cameras.bin", "images.bin", "points3D.bin",
-                             "rigs.bin", "frames.bin"}) {
+    for (const char* file : {"cameras.bin",
+                             "images.bin",
+                             "points3D.bin",
+                             "rigs.bin",
+                             "frames.bin"}) {
       std::filesystem::remove(sparse / file);
     }
     std::ifstream in(sparse / "cameras.txt");
@@ -287,24 +286,22 @@ TEST_F(ResidentCliContractTest, ExportAndVerifyTwoReferences) {
 }
 
 TEST_F(ResidentCliContractTest, ExportAndVerifyFourReferences) {
-  WriteConfig({{0, {1, 2, 3, 4}},
-               {1, {0, 2}},
-               {2, {0, 1, 3, 4}},
-               {3, {0, 1, 2, 4}}});
+  WriteConfig(
+      {{0, {1, 2, 3, 4}}, {1, {0, 2}}, {2, {0, 1, 3, 4}}, {3, {0, 1, 2, 4}}});
   const auto contract_path = root_ / "four_ref_contract.rc";
 
   EXPECT_EQ(RunCli(root_, contract_path, /*verify=*/false), EXIT_SUCCESS);
-  const auto parsed = mvs::ParseOwnedBankContract(ReadContractBytes(contract_path));
+  const auto parsed =
+      mvs::ParseOwnedBankContract(ReadContractBytes(contract_path));
   ASSERT_EQ(parsed.problems.size(), 4);
   for (size_t i = 0; i < parsed.problems.size(); ++i) {
     const auto& problem = parsed.problems[i];
     EXPECT_EQ(problem.reference_name, names_.at(i));
     // Exactly one ordered input is the reference, at a native position.
-    const auto reference_it = std::find_if(problem.inputs.begin(),
-                                           problem.inputs.end(),
-                                           [](const auto& input) {
-                                             return input.is_reference;
-                                           });
+    const auto reference_it = std::find_if(
+        problem.inputs.begin(), problem.inputs.end(), [](const auto& input) {
+          return input.is_reference;
+        });
     ASSERT_FALSE(reference_it == problem.inputs.end());
     EXPECT_EQ(reference_it->image_name, problem.reference_name);
     // Ordered inputs are the reference plus the configured dedup sources.
@@ -326,29 +323,42 @@ TEST_F(ResidentCliContractTest, OneReferenceWrapperRejectsBeforeTraversal) {
                            (names_.at(1) + ".geometric.bin"));
     occupied << "junk";
   }
-  auto owned_controller = mvs::PatchMatchController(
-      CliOptions(), root_, "colmap", "option-all", "",
-      mvs::PatchMatchExecution::kOwnedCuda);
+  auto owned_controller =
+      mvs::PatchMatchController(CliOptions(),
+                                root_,
+                                "colmap",
+                                "option-all",
+                                "",
+                                mvs::PatchMatchExecution::kOwnedCuda);
   try {
     owned_controller.ResolveOwnedBankJob();
     FAIL() << "expected the configured problem count guard to reject";
   } catch (const std::exception& exc) {
     EXPECT_THAT(exc.what(), testing::HasSubstr("problems_.size()"));
-    EXPECT_THAT(exc.what(), ::testing::Not(::testing::HasSubstr("Owned geometry")));
+    EXPECT_THAT(exc.what(),
+                ::testing::Not(::testing::HasSubstr("Owned geometry")));
   }
 }
 
 TEST_F(ResidentCliContractTest, OneReferenceWrapperCompatibility) {
   const auto workspace = WriteConfig({{2, {0, 1}}});
-  auto stock_controller = mvs::PatchMatchController(
-      CliOptions(), workspace, "colmap", "option-all", "",
-      mvs::PatchMatchExecution::kStock);
+  auto stock_controller =
+      mvs::PatchMatchController(CliOptions(),
+                                workspace,
+                                "colmap",
+                                "option-all",
+                                "",
+                                mvs::PatchMatchExecution::kStock);
   const auto all_jobs = stock_controller.ResolveOwnedBankJobs();
   ASSERT_EQ(all_jobs.size(), 1);
 
-  auto owned_controller = mvs::PatchMatchController(
-      CliOptions(), workspace, "colmap", "option-all", "",
-      mvs::PatchMatchExecution::kOwnedCuda);
+  auto owned_controller =
+      mvs::PatchMatchController(CliOptions(),
+                                workspace,
+                                "colmap",
+                                "option-all",
+                                "",
+                                mvs::PatchMatchExecution::kOwnedCuda);
   const auto wrapper_job = owned_controller.ResolveOwnedBankJob();
   // The size-one wrapper must resolve exactly the shared helper's snapshot.
   EXPECT_EQ(wrapper_job.reference_image_idx,
@@ -376,7 +386,8 @@ TEST_F(ResidentCliContractTest, OneReferenceWrapperCompatibility) {
             all_jobs.front().options.num_threads);
 }
 
-TEST_F(ResidentCliContractTest, ProjectPathWithMetadataFlagsRefusedBeforeStock) {
+TEST_F(ResidentCliContractTest,
+       ProjectPathWithMetadataFlagsRefusedBeforeStock) {
   // Real safety regression: an explicit metadata-mode request combined with
   // --project_path must be REFUSED up front. The project-file reread
   // discards CLI option values, so without the refusal the mode flag would
@@ -388,30 +399,28 @@ TEST_F(ResidentCliContractTest, ProjectPathWithMetadataFlagsRefusedBeforeStock) 
   }
   const auto contract_path = root_ / "project_refused.rc";
 
-  const int exit_code = RunArgs({
-      "colmap",
-      "--workspace_path",
-      root_.string(),
-      "--project_path",
-      (root_ / "project.ini").string(),
-      "--PatchMatchStereo.gpu_index",
-      "0",
-      "--PatchMatchStereo.num_threads",
-      "2",
-      "--PatchMatchStereo.depth_min",
-      "0.5",
-      "--PatchMatchStereo.depth_max",
-      "10",
-      "--owned_metadata_export",
-      contract_path.string()});
+  const int exit_code = RunArgs({"colmap",
+                                 "--workspace_path",
+                                 root_.string(),
+                                 "--project_path",
+                                 (root_ / "project.ini").string(),
+                                 "--PatchMatchStereo.gpu_index",
+                                 "0",
+                                 "--PatchMatchStereo.num_threads",
+                                 "2",
+                                 "--PatchMatchStereo.depth_min",
+                                 "0.5",
+                                 "--PatchMatchStereo.depth_max",
+                                 "10",
+                                 "--owned_metadata_export",
+                                 contract_path.string()});
   EXPECT_EQ(exit_code, EXIT_FAILURE);
   // No contract file and NO stock decode: the stock pipeline would have
   // written geometric outputs before any CUDA stage; the refusal must leave
   // the workspace untouched (all fixture outputs are photometric only).
   EXPECT_FALSE(ExistsFile(contract_path));
   for (const auto& entry :
-       std::filesystem::directory_iterator(root_ / "stereo" /
-                                           "depth_maps")) {
+       std::filesystem::directory_iterator(root_ / "stereo" / "depth_maps")) {
     const auto name = entry.path().filename().string();
     EXPECT_EQ(name.find("geometric"), std::string::npos)
         << "stock pipeline ran despite the refusal: " << name;
@@ -419,25 +428,23 @@ TEST_F(ResidentCliContractTest, ProjectPathWithMetadataFlagsRefusedBeforeStock) 
 
   // The verify mode gets the identical fail-closed treatment against a
   // prior contract; nothing runs and nothing changes.
-  EXPECT_EQ(RunCli(root_, root_ / "prior.rc", /*verify=*/false),
-            EXIT_SUCCESS);
+  EXPECT_EQ(RunCli(root_, root_ / "prior.rc", /*verify=*/false), EXIT_SUCCESS);
   const auto prior_bytes = ReadContractBytes(root_ / "prior.rc");
-  EXPECT_EQ(RunArgs({
-                "colmap",
-                "--workspace_path",
-                root_.string(),
-                "--project_path",
-                (root_ / "project.ini").string(),
-                "--PatchMatchStereo.gpu_index",
-                "0",
-                "--PatchMatchStereo.num_threads",
-                "2",
-                "--PatchMatchStereo.depth_min",
-                "0.5",
-                "--PatchMatchStereo.depth_max",
-                "10",
-                "--owned_metadata_verify",
-                (root_ / "prior.rc").string()}),
+  EXPECT_EQ(RunArgs({"colmap",
+                     "--workspace_path",
+                     root_.string(),
+                     "--project_path",
+                     (root_ / "project.ini").string(),
+                     "--PatchMatchStereo.gpu_index",
+                     "0",
+                     "--PatchMatchStereo.num_threads",
+                     "2",
+                     "--PatchMatchStereo.depth_min",
+                     "0.5",
+                     "--PatchMatchStereo.depth_max",
+                     "10",
+                     "--owned_metadata_verify",
+                     (root_ / "prior.rc").string()}),
             EXIT_FAILURE);
   EXPECT_EQ(ReadContractBytes(root_ / "prior.rc"), prior_bytes);
 }
@@ -464,8 +471,8 @@ TEST_F(ResidentCliContractTest, RejectsTraversalNameOutputAliases) {
   RenameImage(names_.at(0), alias_name);
   // Intermediate traversal component must exist as a directory wherever the
   // model name becomes a path (bitmap and depth/normal consumer dirs).
-  for (const char* sub : {"images", "stereo/depth_maps",
-                          "stereo/normal_maps"}) {
+  for (const char* sub :
+       {"images", "stereo/depth_maps", "stereo/normal_maps"}) {
     CreateDirIfNotExists(root_ / sub / "aliasdir", /*recursive=*/true);
   }
   std::ofstream cfg_file(root_ / "stereo" / "patch-match.cfg");
@@ -477,11 +484,12 @@ TEST_F(ResidentCliContractTest, RejectsTraversalNameOutputAliases) {
   EXPECT_FALSE(ExistsFile(contract_path));
 }
 
-TEST_F(ResidentCliContractTest, ExportTargetCollidesWithPlannedOutputsRejected) {
+TEST_F(ResidentCliContractTest,
+       ExportTargetCollidesWithPlannedOutputsRejected) {
   WriteConfig({{0, {1, 2}}, {1, {0, 2}}});
   // Targeting a planned (not yet occupied) solver output directly.
-  const auto planned_output = root_ / "stereo" / "depth_maps" /
-                              (names_.at(1) + ".geometric.bin");
+  const auto planned_output =
+      root_ / "stereo" / "depth_maps" / (names_.at(1) + ".geometric.bin");
   EXPECT_EQ(RunCli(root_, planned_output, /*verify=*/false), EXIT_FAILURE);
   EXPECT_FALSE(ExistsFile(planned_output));
 }
@@ -511,11 +519,12 @@ TEST_F(ResidentCliContractTest, ExportRefusesUnwritableParentFailClosed) {
   // Exclusive creation in an unwritable parent fails closed at open time;
   // a pre-existing target elsewhere is untouched and no file is created.
   CreateDirIfNotExists(root_ / "readonly", /*recursive=*/true);
-  std::filesystem::permissions(root_ / "readonly",
-                               std::filesystem::perms::owner_read |
-                                   std::filesystem::perms::owner_exec,
-                               std::filesystem::perm_options::replace);
-  EXPECT_EQ(RunCli(root_, root_ / "readonly" / "contract.rc",
+  std::filesystem::permissions(
+      root_ / "readonly",
+      std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec,
+      std::filesystem::perm_options::replace);
+  EXPECT_EQ(RunCli(root_,
+                   root_ / "readonly" / "contract.rc",
                    /*verify=*/false),
             EXIT_FAILURE);
   EXPECT_FALSE(ExistsFile(root_ / "readonly" / "contract.rc"));
@@ -532,13 +541,13 @@ TEST_F(ResidentCliContractTest, SharedInputsCarryConsistentIdentities) {
   EXPECT_EQ(RunCli(root_, contract_path, /*verify=*/false), EXIT_SUCCESS);
   std::vector<char> bytes_vec;
   ReadBinaryBlob(contract_path, &bytes_vec);
-  const auto parsed =
-      mvs::ParseOwnedBankContract(std::string(bytes_vec.begin(), bytes_vec.end()));
+  const auto parsed = mvs::ParseOwnedBankContract(
+      std::string(bytes_vec.begin(), bytes_vec.end()));
   ASSERT_EQ(parsed.problems.size(), 2);
   std::map<std::string, std::pair<uintmax_t, uintmax_t>> identities;
-  auto record_input = [&identities](
-                            const mvs::OwnedBankContractInput& input) {
-    for (const auto* identity : {&input.image_identity, &input.depth_identity,
+  auto record_input = [&identities](const mvs::OwnedBankContractInput& input) {
+    for (const auto* identity : {&input.image_identity,
+                                 &input.depth_identity,
                                  &input.normal_identity}) {
       const std::pair<uintmax_t, uintmax_t> key = {identity->size,
                                                    identity->inode};
@@ -639,20 +648,23 @@ TEST_F(ResidentCliContractTest, RejectUnsupportedNegativeFailureReasons) {
       FAIL() << "expected rejection containing: " << expected;
     } catch (const std::exception& exc) {
       EXPECT_NE(std::string(exc.what()).find(expected), std::string::npos)
-          << "expected message containing \"" << expected << "\", got: "
-          << exc.what();
+          << "expected message containing \"" << expected
+          << "\", got: " << exc.what();
     }
   };
 
   // Duplicate reference name (output aliases collide together with it).
   {
     WriteConfig({{0, {1, 2}}, {0, {1}}});
-    auto controller = mvs::PatchMatchController(
-        CliOptions(), root_, "colmap", "option-all", "",
-        mvs::PatchMatchExecution::kStock);
-    expect_message(
-        [&controller] { controller.ResolveOwnedBankJobs(); },
-        "Duplicate reference image in configured problems");
+    auto controller =
+        mvs::PatchMatchController(CliOptions(),
+                                  root_,
+                                  "colmap",
+                                  "option-all",
+                                  "",
+                                  mvs::PatchMatchExecution::kStock);
+    expect_message([&controller] { controller.ResolveOwnedBankJobs(); },
+                   "Duplicate reference image in configured problems");
   }
 
   // Occupied output (pre-existing output for a configured reference) with
@@ -663,12 +675,15 @@ TEST_F(ResidentCliContractTest, RejectUnsupportedNegativeFailureReasons) {
                            (names_.at(0) + ".geometric.bin"));
     occupied << "junk";
     occupied.close();
-    auto controller = mvs::PatchMatchController(
-        CliOptions(), root_, "colmap", "option-all", "",
-        mvs::PatchMatchExecution::kStock);
-    expect_message(
-        [&controller] { controller.ResolveOwnedBankContract(); },
-        "!ExistsFile(result.depth_map_path)");
+    auto controller =
+        mvs::PatchMatchController(CliOptions(),
+                                  root_,
+                                  "colmap",
+                                  "option-all",
+                                  "",
+                                  mvs::PatchMatchExecution::kStock);
+    expect_message([&controller] { controller.ResolveOwnedBankContract(); },
+                   "!ExistsFile(result.depth_map_path)");
   }
 
   // Traversal-name output alias: valid inputs must capture, the rejection
@@ -678,20 +693,23 @@ TEST_F(ResidentCliContractTest, RejectUnsupportedNegativeFailureReasons) {
     const auto source_name = names_.at(2);
     const auto alias_name = "aliasdir/../" + base_name;
     RenameImage(names_.at(0), alias_name);
-    for (const char* sub : {"images", "stereo/depth_maps",
-                            "stereo/normal_maps"}) {
+    for (const char* sub :
+         {"images", "stereo/depth_maps", "stereo/normal_maps"}) {
       CreateDirIfNotExists(root_ / sub / "aliasdir", /*recursive=*/true);
     }
     std::ofstream cfg_file(root_ / "stereo" / "patch-match.cfg");
     cfg_file << alias_name << "\n" << source_name << "\n";
     cfg_file << base_name << "\n" << source_name << "\n";
     cfg_file.close();
-    auto controller = mvs::PatchMatchController(
-        CliOptions(), root_, "colmap", "option-all", "",
-        mvs::PatchMatchExecution::kStock);
-    expect_message(
-        [&controller] { controller.ResolveOwnedBankJobs(); },
-        "Duplicate owned output path across problems");
+    auto controller =
+        mvs::PatchMatchController(CliOptions(),
+                                  root_,
+                                  "colmap",
+                                  "option-all",
+                                  "",
+                                  mvs::PatchMatchExecution::kStock);
+    expect_message([&controller] { controller.ResolveOwnedBankJobs(); },
+                   "Duplicate owned output path across problems");
   }
 
   // Missing geometry.
@@ -699,12 +717,15 @@ TEST_F(ResidentCliContractTest, RejectUnsupportedNegativeFailureReasons) {
     WriteConfig({{0, {1, 2}}, {1, {0, 2}}});
     auto options = CliOptions();
     options.geom_consistency = false;
-    auto controller = mvs::PatchMatchController(
-        options, root_, "colmap", "option-all", "",
-        mvs::PatchMatchExecution::kStock);
-    expect_message(
-        [&controller] { controller.ResolveOwnedBankContract(); },
-        "options_.geom_consistency");
+    auto controller =
+        mvs::PatchMatchController(options,
+                                  root_,
+                                  "colmap",
+                                  "option-all",
+                                  "",
+                                  mvs::PatchMatchExecution::kStock);
+    expect_message([&controller] { controller.ResolveOwnedBankContract(); },
+                   "options_.geom_consistency");
   }
 
   // Unsupported solver-window options.
@@ -712,9 +733,13 @@ TEST_F(ResidentCliContractTest, RejectUnsupportedNegativeFailureReasons) {
     WriteConfig({{0, {1, 2}}, {1, {0, 2}}});
     auto options = CliOptions();
     options.window_radius = 2;
-    auto controller = mvs::PatchMatchController(
-        options, root_, "colmap", "option-all", "",
-        mvs::PatchMatchExecution::kStock);
+    auto controller =
+        mvs::PatchMatchController(options,
+                                  root_,
+                                  "colmap",
+                                  "option-all",
+                                  "",
+                                  mvs::PatchMatchExecution::kStock);
     expect_message(
         [&controller] { controller.ResolveOwnedBankContract(); },
         "Owned PatchMatch requires CUDA and window radius 5 / step 1");
@@ -723,12 +748,15 @@ TEST_F(ResidentCliContractTest, RejectUnsupportedNegativeFailureReasons) {
   // PMVS workspace format.
   {
     WriteConfig({{0, {1, 2}}, {1, {0, 2}}});
-    auto controller = mvs::PatchMatchController(
-        CliOptions(), root_, "pmvs", "option-all", "",
-        mvs::PatchMatchExecution::kStock);
-    expect_message(
-        [&controller] { controller.ResolveOwnedBankJobs(); },
-        "Resident input mode supports only COLMAP workspaces");
+    auto controller =
+        mvs::PatchMatchController(CliOptions(),
+                                  root_,
+                                  "pmvs",
+                                  "option-all",
+                                  "",
+                                  mvs::PatchMatchExecution::kStock);
+    expect_message([&controller] { controller.ResolveOwnedBankJobs(); },
+                   "Resident input mode supports only COLMAP workspaces");
   }
 }
 

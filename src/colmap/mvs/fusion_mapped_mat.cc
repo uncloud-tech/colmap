@@ -35,7 +35,7 @@ struct FusionMappedMat::Impl {
 #if defined(__unix__) || defined(__APPLE__)
   int fd = -1;
   void* mapping = MAP_FAILED;
-  struct stat identity {};
+  struct stat identity{};
 
   ~Impl() {
     if (mapping != MAP_FAILED) {
@@ -68,8 +68,8 @@ struct FusionMappedMat::Impl {
   }
 
   void Verify() const {
-    struct stat current {};
-    struct stat named {};
+    struct stat current{};
+    struct stat named{};
     if (fstat(fd, &current) != 0 || stat(path.c_str(), &named) != 0 ||
         !SameIdentity(current) || !SameIdentity(named)) {
       throw std::runtime_error("Fusion mapped matrix changed: " +

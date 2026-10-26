@@ -46,9 +46,8 @@ void TestDensePlanJson() {
   Rejects([] { Json bad(std::string("\xc0\x80")); });
   Rejects([] { Json bad(std::numeric_limits<double>::infinity()); });
   Rejects([] { Json bad(std::numeric_limits<double>::quiet_NaN()); });
-  Rejects([] {
-    Json::Object({{"duplicate", Json(1)}, {"duplicate", Json(2)}});
-  });
+  Rejects(
+      [] { Json::Object({{"duplicate", Json(1)}, {"duplicate", Json(2)}}); });
 }
 void TestDensePlanOptions() {
   Check(

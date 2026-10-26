@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
+#include "colmap/mvs/model.h"
 #include "colmap/mvs/patch_match.h"
 #include "colmap/mvs/workspace.h"
-#include "colmap/mvs/model.h"
-#include "colmap/util/hash_containers.h"
-
 #include "colmap/scene/synthetic.h"
 #include "colmap/sensor/bitmap.h"
 #include "colmap/util/file.h"
+#include "colmap/util/hash_containers.h"
 #include "colmap/util/testing.h"
 #include "colmap/util/threading.h"
 
@@ -126,7 +125,7 @@ class OwnedHostSnapshotTest : public ::testing::Test {
     ASSERT_EQ(problem.images->size(), 2);
     ASSERT_EQ(problem.src_image_idxs.size(), 1);
     const std::array<int, 2> indices = {problem.ref_image_idx,
-                                      problem.src_image_idxs[0]};
+                                        problem.src_image_idxs[0]};
     EXPECT_NE(indices[0], indices[1]);
     for (size_t image = 0; image != 2; ++image) {
       ASSERT_GE(indices[image], 0);
@@ -178,10 +177,9 @@ TEST_F(OwnedHostSnapshotTest, InputsSurviveControllersAndWorkspaceDeletion) {
     EXPECT_FALSE(options.geom_consistency);
     EXPECT_EQ(problem.src_image_idxs.size(), 1);
   };
-  hooks.metadata =
-      [&](size_t, const PatchMatchOptions&, const PatchMatch::Problem&) {
-        ++metadata_calls;
-      };
+  hooks.metadata = [&](size_t,
+                       const PatchMatchOptions&,
+                       const PatchMatch::Problem&) { ++metadata_calls; };
   for (size_t job = 0; job != 2; ++job) {
     auto controller = Controller(Options());
     prepared[job] = controller->PrepareOwnedPairJob(job, hooks);
@@ -215,7 +213,8 @@ TEST_F(OwnedHostSnapshotTest, InputsSurviveControllersAndWorkspaceDeletion) {
   }
 }
 
-TEST_F(OwnedHostSnapshotTest, IoOneOverrideKeepsMultiSourceOrderAndAutomaticDepth) {
+TEST_F(OwnedHostSnapshotTest,
+       IoOneOverrideKeepsMultiSourceOrderAndAutomaticDepth) {
   SyntheticDatasetOptions synthetic;
   synthetic.num_rigs = 1;
   synthetic.num_cameras_per_rig = 1;
@@ -233,7 +232,8 @@ TEST_F(OwnedHostSnapshotTest, IoOneOverrideKeepsMultiSourceOrderAndAutomaticDept
   ASSERT_TRUE(bitmap.Write(workspace_path_ / "images" / third_name));
   {
     std::ofstream config(config_path_);
-    config << image_names_[0] << '\n' << third_name << ',' << image_names_[1] << '\n';
+    config << image_names_[0] << '\n'
+           << third_name << ',' << image_names_[1] << '\n';
     ASSERT_TRUE(config.good());
   }
   Model model;
@@ -247,7 +247,8 @@ TEST_F(OwnedHostSnapshotTest, IoOneOverrideKeepsMultiSourceOrderAndAutomaticDept
   FlatHashSet<int> used(configured.begin(), configured.end());
   used.insert(reference);
   std::vector<int> effective;
-  for (const int index : used) if (index != reference) effective.push_back(index);
+  for (const int index : used)
+    if (index != reference) effective.push_back(index);
   auto options = Options();
   options.num_threads = 2;
   options.depth_min = options.depth_max = -1;
@@ -263,8 +264,14 @@ TEST_F(OwnedHostSnapshotTest, IoOneOverrideKeepsMultiSourceOrderAndAutomaticDept
   }
   std::filesystem::remove_all(workspace_path_);
   for (size_t i = 0; i < model.images.size(); ++i) {
-    EXPECT_EQ(synchronous->patch_match->GetProblem().images->at(i).GetBitmap().RowMajorData(),
-              lookahead->patch_match->GetProblem().images->at(i).GetBitmap().RowMajorData());
+    EXPECT_EQ(synchronous->patch_match->GetProblem()
+                  .images->at(i)
+                  .GetBitmap()
+                  .RowMajorData(),
+              lookahead->patch_match->GetProblem()
+                  .images->at(i)
+                  .GetBitmap()
+                  .RowMajorData());
   }
   EXPECT_NO_THROW(synchronous->patch_match->Check());
   EXPECT_NO_THROW(lookahead->patch_match->Check());
@@ -342,7 +349,8 @@ TEST_F(OwnedHostSnapshotTest, PreparedGeometrySurvivesInputRetirement) {
     EXPECT_TRUE(o.geom_consistency);
     EXPECT_EQ(p.src_image_idxs, effective);
   };
-  std::array<std::unique_ptr<PatchMatchController::OwnedPreparedJob>, 2> prepared;
+  std::array<std::unique_ptr<PatchMatchController::OwnedPreparedJob>, 2>
+      prepared;
   for (size_t job = 0; job < 2; ++job) {
     auto controller = Controller(options);
     prepared[job] = controller->PrepareOwnedPairJob(job, hooks);
@@ -356,7 +364,8 @@ TEST_F(OwnedHostSnapshotTest, PreparedGeometrySurvivesInputRetirement) {
     const auto& problem = engine.GetProblem();
     EXPECT_TRUE(engine.GetOptions().geom_consistency);
     EXPECT_EQ(problem.ref_image_idx, reference);
-    EXPECT_EQ(problem.src_image_idxs, effective);  // Native hash order, not sorted.
+    EXPECT_EQ(problem.src_image_idxs,
+              effective);  // Native hash order, not sorted.
     ASSERT_EQ(problem.depth_maps->size(), 4);
     ASSERT_EQ(problem.normal_maps->size(), 4);
     EXPECT_EQ(problem.depth_maps->at(unused).GetWidth(), 0);
@@ -368,7 +377,8 @@ TEST_F(OwnedHostSnapshotTest, PreparedGeometrySurvivesInputRetirement) {
         EXPECT_FLOAT_EQ(problem.normal_maps->at(idx).Get(0, 0, channel),
                         0.25 + idx);
       }
-      EXPECT_EQ(problem.images->at(idx).GetBitmap().GetPixel(0, 0)->r, 20 + idx);
+      EXPECT_EQ(problem.images->at(idx).GetBitmap().GetPixel(0, 0)->r,
+                20 + idx);
     }
     EXPECT_EQ(job->depth_map_path.filename(), ref_name + ".geometric.bin");
     EXPECT_EQ(job->normal_map_path.filename(), ref_name + ".geometric.bin");
@@ -388,7 +398,8 @@ TEST_F(OwnedHostSnapshotTest, GeometryPreparationRejectsUnsupportedFlags) {
   }
 }
 
-TEST_F(OwnedHostSnapshotTest, PreparedGeometryRejectsMissingSeedsAndFreshOutputs) {
+TEST_F(OwnedHostSnapshotTest,
+       PreparedGeometryRejectsMissingSeedsAndFreshOutputs) {
   auto options = Options();
   options.geom_consistency = true;
   EXPECT_THROW(Controller(options)->PrepareOwnedPairJob(0, {}),
@@ -401,12 +412,13 @@ TEST_F(OwnedHostSnapshotTest, PreparedGeometryRejectsMissingSeedsAndFreshOutputs
       output << "partial";
     }
     EXPECT_THROW(Controller(options)->PrepareOwnedPairJob(0, {}),
-               std::invalid_argument);
+                 std::invalid_argument);
     std::filesystem::remove(path);
   }
 }
 
-TEST_F(OwnedHostSnapshotTest, GeometrySnapshotsOwnMapsAndPreserveGlobalIndices) {
+TEST_F(OwnedHostSnapshotTest,
+       GeometrySnapshotsOwnMapsAndPreserveGlobalIndices) {
   auto prepared = Controller(Options())->PrepareOwnedPairJob(0, {});
   auto options = Options();
   options.geom_consistency = true;
@@ -478,12 +490,14 @@ TEST_F(OwnedHostSnapshotTest, GeometryRejectsMalformedMapInputs) {
   normals.emplace_back(kWidth, kHeight);
   depths.at(problem.src_image_idxs.at(0)) = DepthMap(1, 1, 1.25, 8.5);
   rejects();
-  depths.at(problem.src_image_idxs.at(0)) = DepthMap(kWidth, kHeight, 1.25, 8.5);
+  depths.at(problem.src_image_idxs.at(0)) =
+      DepthMap(kWidth, kHeight, 1.25, 8.5);
   normals.at(problem.src_image_idxs.at(0)) = NormalMap(1, 1);
   rejects();
 }
 
-TEST_F(OwnedHostSnapshotTest, GeometryRequiresExistingSeedsWithoutPhotoPrepass) {
+TEST_F(OwnedHostSnapshotTest,
+       GeometryRequiresExistingSeedsWithoutPhotoPrepass) {
   auto options = Options();
   options.geom_consistency = true;
   // No seeds: fail before any backend can be constructed. A photo prepass
@@ -496,15 +510,16 @@ TEST_F(OwnedHostSnapshotTest, GeometryRequiresExistingSeedsWithoutPhotoPrepass) 
     try {
       std::rethrow_exception(error.exceptions().front());
     } catch (const std::invalid_argument& cause) {
-      EXPECT_NE(std::string(cause.what()).find("Missing image or map dependency"),
-                std::string::npos);
+      EXPECT_NE(
+          std::string(cause.what()).find("Missing image or map dependency"),
+          std::string::npos);
     }
   }
   for (const auto& name : image_names_) {
     EXPECT_FALSE(ExistsFile(workspace_path_ / "stereo" / "depth_maps" /
-                           (name + ".photometric.bin")));
+                            (name + ".photometric.bin")));
     EXPECT_FALSE(ExistsFile(workspace_path_ / "stereo" / "normal_maps" /
-                           (name + ".photometric.bin")));
+                            (name + ".photometric.bin")));
   }
 }
 

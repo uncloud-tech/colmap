@@ -19,9 +19,12 @@ class CudaArrayTextureView {
     cudaResourceDesc resource{};
     resource.resType = cudaResourceTypeArray;
     resource.res.array.array = array;
-    CUDA_SAFE_CALL(cudaCreateTextureObject(&texture_, &resource, &desc, nullptr));
+    CUDA_SAFE_CALL(
+        cudaCreateTextureObject(&texture_, &resource, &desc, nullptr));
   }
-  ~CudaArrayTextureView() { CUDA_SAFE_CALL(cudaDestroyTextureObject(texture_)); }
+  ~CudaArrayTextureView() {
+    CUDA_SAFE_CALL(cudaDestroyTextureObject(texture_));
+  }
   CudaArrayTextureView(const CudaArrayTextureView&) = delete;
   CudaArrayTextureView& operator=(const CudaArrayTextureView&) = delete;
   cudaTextureObject_t GetObj() const { return texture_; }
@@ -64,16 +67,19 @@ class CudaArrayLayeredTexture {
     params.extent = make_cudaExtent(width_, height_, 1);
     params.dstPos = make_cudaPos(0, 0, layer);
     params.kind = cudaMemcpyHostToDevice;
-    params.srcPtr = make_cudaPitchedPtr(
-        (void*)data, width_ * sizeof(T), width_, height_);
+    params.srcPtr =
+        make_cudaPitchedPtr((void*)data, width_ * sizeof(T), width_, height_);
     params.dstArray = array_;
     CUDA_SAFE_CALL(cudaMemcpy3DAsync(&params, stream));
     completion.Wait();
   }
   static std::unique_ptr<CudaArrayLayeredTexture<T>> FromHostArray(
       const cudaTextureDesc& texture_desc,
-      size_t width, size_t height, size_t depth,
-      const T* data, cudaStream_t stream);
+      size_t width,
+      size_t height,
+      size_t depth,
+      const T* data,
+      cudaStream_t stream);
 #endif
 
   cudaTextureObject_t GetObj() const;
@@ -171,7 +177,8 @@ void CudaArrayLayeredTexture<T>::CopyFromGpuMat(const GpuMat<T>& mat,
   THROW_CHECK_EQ(mat.GetDepth(), depth_);
   owned::ScopedStreamCompletion completion(stream);
   cudaMemcpy3DParms params{};
-  params.extent = make_cudaExtent(mat.GetWidth(), mat.GetHeight(), mat.GetDepth());
+  params.extent =
+      make_cudaExtent(mat.GetWidth(), mat.GetHeight(), mat.GetDepth());
   params.kind = cudaMemcpyDeviceToDevice;
   params.srcPtr = make_cudaPitchedPtr(
       (void*)mat.GetPtr(), mat.GetPitch(), mat.GetWidth(), mat.GetHeight());
@@ -194,7 +201,8 @@ CudaArrayLayeredTexture<T>::FromHostArray(const cudaTextureDesc& texture_desc,
   cudaMemcpy3DParms params{};
   params.extent = make_cudaExtent(width, height, depth);
   params.kind = cudaMemcpyHostToDevice;
-  params.srcPtr = make_cudaPitchedPtr((void*)data, width * sizeof(T), width, height);
+  params.srcPtr =
+      make_cudaPitchedPtr((void*)data, width * sizeof(T), width, height);
   params.dstArray = array->array_;
   CUDA_SAFE_CALL(cudaMemcpy3DAsync(&params, stream));
   // The caller may release its pageable staging vector immediately on return.

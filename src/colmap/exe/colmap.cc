@@ -5,8 +5,8 @@
 #include "colmap/exe/gui.h"
 #include "colmap/exe/image.h"
 #include "colmap/exe/model.h"
-#include "colmap/exe/photo_directory_summary.h"
 #include "colmap/exe/optimized_dense_plan.h"
+#include "colmap/exe/photo_directory_summary.h"
 #if defined(COLMAP_MVS_ENABLED)
 #include "colmap/exe/mvs.h"
 #endif

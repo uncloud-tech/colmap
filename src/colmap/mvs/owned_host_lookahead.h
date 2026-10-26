@@ -76,12 +76,18 @@ class HostLookahead {
           Notify("prep_done");
         } catch (...) {
           error_ = std::current_exception();
-          try { Notify("failed"); } catch (...) {}
+          try {
+            Notify("failed");
+          } catch (...) {
+          }
         }
       });
     } catch (...) {
       const auto error = std::current_exception();
-      try { Notify("failed"); } catch (...) {}
+      try {
+        Notify("failed");
+      } catch (...) {
+      }
       CancelAndJoin();
       std::rethrow_exception(error);
     }
@@ -119,7 +125,10 @@ class HostLookahead {
     ready_ = false;
     if (reserved_) {
       reserved_ = false;
-      try { Notify("release"); } catch (...) {}
+      try {
+        Notify("release");
+      } catch (...) {
+      }
     }
   }
 

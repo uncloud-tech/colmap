@@ -94,90 +94,90 @@ from pathlib import Path, PurePosixPath
 # benchmark sources, and external dependency internals (e.g., OpenImageIO
 # itself), which no source digest can certify.
 CLOSURE = (
-    'src/colmap/mvs/patch_match_options.h',
-    'src/colmap/mvs/patch_match_options.cc',
-    'src/colmap/mvs/owned_tile.h',
-    'src/colmap/mvs/owned_source_cache.h',
-    'src/colmap/mvs/owned_texture_row_batch.h',
-    'src/colmap/mvs/owned_cuda_execution.h',
-    'src/colmap/mvs/owned_rotation_storage.h',
-    'src/colmap/mvs/owned_selection_scratch.h',
-    'src/colmap/mvs/gpu_mat.h',
-    'src/colmap/mvs/gpu_mat_prng.h',
-    'src/colmap/mvs/gpu_mat_prng.cu',
-    'src/colmap/mvs/owned_prng_seed.h',
-    'src/colmap/mvs/owned_prng.h',
-    'src/colmap/mvs/owned_prng_boundary.h',
-    'src/colmap/mvs/gpu_mat_ref_image.h',
-    'src/colmap/mvs/gpu_mat_ref_image.cu',
-    'src/colmap/sensor/bitmap.h',
-    'src/colmap/sensor/bitmap.cc',
-    'src/colmap/mvs/mat.h',
-    'src/colmap/mvs/mat.cc',
-    'src/colmap/mvs/mat_read_internal.h',
-    'src/colmap/mvs/depth_map.h',
-    'src/colmap/mvs/depth_map.cc',
-    'src/colmap/mvs/normal_map.h',
-    'src/colmap/mvs/normal_map.cc',
-    'src/colmap/mvs/image.h',
-    'src/colmap/mvs/image.cc',
-    'src/thirdparty/VLFeat/generic.h',
-    'src/thirdparty/VLFeat/generic.c',
-    'src/thirdparty/VLFeat/imopv.h',
-    'src/thirdparty/VLFeat/imopv.c',
-    'src/colmap/image/warp.h',
-    'src/colmap/image/warp.cc',
-    'src/colmap/mvs/owned_input_bank.h',
-    'src/colmap/mvs/owned_input_bank.cc',
-    'src/colmap/mvs/owned_input_bank.cu',
-    'src/colmap/mvs/cuda_texture.h',
-    'src/colmap/mvs/workspace.h',
-    'src/colmap/mvs/workspace.cc',
-    'src/colmap/mvs/model.h',
-    'src/colmap/mvs/model.cc',
-    'src/colmap/mvs/owned_pair_validation.h',
-    'src/colmap/mvs/owned_pair_coordinator.h',
-    'src/colmap/mvs/native_run_deadline.h',
-    'src/colmap/mvs/owned_pair_run.h',
-    'src/colmap/mvs/owned_normal_lookahead.h',
-    'src/colmap/mvs/patch_match.h',
-    'src/colmap/mvs/patch_match.cc',
-    'src/colmap/mvs/patch_match_cuda_owned.h',
-    'src/colmap/mvs/patch_match_cuda_owned.cu',
-    'src/colmap/mvs/resident_contract.h',
-    'src/colmap/mvs/resident_contract.cc',
-    'src/colmap/mvs/owned_rotation_memory.h',
-    'src/colmap/mvs/owned_resident_minima.h',
-    'src/colmap/mvs/resident_forecast.h',
-    'src/colmap/mvs/resident_forecast.cc',
-    'src/colmap/mvs/resident_forecast_minima.cc',
-    'src/colmap/mvs/resident_cohorts.h',
-    'src/colmap/mvs/resident_wire_lexical.h',
-    'src/colmap/mvs/resident_cohort_wire.h',
-    'src/colmap/mvs/resident_cohort_wire.cc',
-    'src/colmap/mvs/resident_cohort_wire_minima.cc',
-    'src/colmap/mvs/resident_cohort_runner.h',
-    'src/colmap/mvs/resident_runner.h',
-    'src/colmap/mvs/optimized_dispatch.h',
-    'src/colmap/mvs/optimized_receipt.h',
-    'src/colmap/mvs/optimized_photo_forecast.h',
-    'src/colmap/mvs/optimized_photo_options.h',
-    'src/colmap/mvs/optimized_photo_paths.h',
-    'src/colmap/mvs/optimized_photo_reservation.h',
-    'src/colmap/mvs/optimized_photo_runner.h',
-    'src/colmap/mvs/owned_pair_image.h',
-    'src/colmap/exe/mvs.cc',
-    'src/colmap/exe/optimized_dense_plan.h',
-    'src/colmap/exe/optimized_dense_plan.cc',
-    'src/colmap/exe/optimized_dense_plan_io.h',
-    'src/colmap/exe/optimized_dense_plan_options.h',
-    'src/colmap/mvs/owned_graph.h',
-    'src/colmap/mvs/owned_graph.cu',
-    'src/colmap/mvs/owned_graph_topology.h',
-    'src/colmap/mvs/owned_graph_coordinator.h',
-    'src/colmap/mvs/owned_async_pool.h',
-    'src/colmap/mvs/owned_selection_boundary.h',
-    'scripts/resident/generate_resident_allocation_fingerprint.py',
+    "src/colmap/mvs/patch_match_options.h",
+    "src/colmap/mvs/patch_match_options.cc",
+    "src/colmap/mvs/owned_tile.h",
+    "src/colmap/mvs/owned_source_cache.h",
+    "src/colmap/mvs/owned_texture_row_batch.h",
+    "src/colmap/mvs/owned_cuda_execution.h",
+    "src/colmap/mvs/owned_rotation_storage.h",
+    "src/colmap/mvs/owned_selection_scratch.h",
+    "src/colmap/mvs/gpu_mat.h",
+    "src/colmap/mvs/gpu_mat_prng.h",
+    "src/colmap/mvs/gpu_mat_prng.cu",
+    "src/colmap/mvs/owned_prng_seed.h",
+    "src/colmap/mvs/owned_prng.h",
+    "src/colmap/mvs/owned_prng_boundary.h",
+    "src/colmap/mvs/gpu_mat_ref_image.h",
+    "src/colmap/mvs/gpu_mat_ref_image.cu",
+    "src/colmap/sensor/bitmap.h",
+    "src/colmap/sensor/bitmap.cc",
+    "src/colmap/mvs/mat.h",
+    "src/colmap/mvs/mat.cc",
+    "src/colmap/mvs/mat_read_internal.h",
+    "src/colmap/mvs/depth_map.h",
+    "src/colmap/mvs/depth_map.cc",
+    "src/colmap/mvs/normal_map.h",
+    "src/colmap/mvs/normal_map.cc",
+    "src/colmap/mvs/image.h",
+    "src/colmap/mvs/image.cc",
+    "src/thirdparty/VLFeat/generic.h",
+    "src/thirdparty/VLFeat/generic.c",
+    "src/thirdparty/VLFeat/imopv.h",
+    "src/thirdparty/VLFeat/imopv.c",
+    "src/colmap/image/warp.h",
+    "src/colmap/image/warp.cc",
+    "src/colmap/mvs/owned_input_bank.h",
+    "src/colmap/mvs/owned_input_bank.cc",
+    "src/colmap/mvs/owned_input_bank.cu",
+    "src/colmap/mvs/cuda_texture.h",
+    "src/colmap/mvs/workspace.h",
+    "src/colmap/mvs/workspace.cc",
+    "src/colmap/mvs/model.h",
+    "src/colmap/mvs/model.cc",
+    "src/colmap/mvs/owned_pair_validation.h",
+    "src/colmap/mvs/owned_pair_coordinator.h",
+    "src/colmap/mvs/native_run_deadline.h",
+    "src/colmap/mvs/owned_pair_run.h",
+    "src/colmap/mvs/owned_normal_lookahead.h",
+    "src/colmap/mvs/patch_match.h",
+    "src/colmap/mvs/patch_match.cc",
+    "src/colmap/mvs/patch_match_cuda_owned.h",
+    "src/colmap/mvs/patch_match_cuda_owned.cu",
+    "src/colmap/mvs/resident_contract.h",
+    "src/colmap/mvs/resident_contract.cc",
+    "src/colmap/mvs/owned_rotation_memory.h",
+    "src/colmap/mvs/owned_resident_minima.h",
+    "src/colmap/mvs/resident_forecast.h",
+    "src/colmap/mvs/resident_forecast.cc",
+    "src/colmap/mvs/resident_forecast_minima.cc",
+    "src/colmap/mvs/resident_cohorts.h",
+    "src/colmap/mvs/resident_wire_lexical.h",
+    "src/colmap/mvs/resident_cohort_wire.h",
+    "src/colmap/mvs/resident_cohort_wire.cc",
+    "src/colmap/mvs/resident_cohort_wire_minima.cc",
+    "src/colmap/mvs/resident_cohort_runner.h",
+    "src/colmap/mvs/resident_runner.h",
+    "src/colmap/mvs/optimized_dispatch.h",
+    "src/colmap/mvs/optimized_receipt.h",
+    "src/colmap/mvs/optimized_photo_forecast.h",
+    "src/colmap/mvs/optimized_photo_options.h",
+    "src/colmap/mvs/optimized_photo_paths.h",
+    "src/colmap/mvs/optimized_photo_reservation.h",
+    "src/colmap/mvs/optimized_photo_runner.h",
+    "src/colmap/mvs/owned_pair_image.h",
+    "src/colmap/exe/mvs.cc",
+    "src/colmap/exe/optimized_dense_plan.h",
+    "src/colmap/exe/optimized_dense_plan.cc",
+    "src/colmap/exe/optimized_dense_plan_io.h",
+    "src/colmap/exe/optimized_dense_plan_options.h",
+    "src/colmap/mvs/owned_graph.h",
+    "src/colmap/mvs/owned_graph.cu",
+    "src/colmap/mvs/owned_graph_topology.h",
+    "src/colmap/mvs/owned_graph_coordinator.h",
+    "src/colmap/mvs/owned_async_pool.h",
+    "src/colmap/mvs/owned_selection_boundary.h",
+    "scripts/resident/generate_resident_allocation_fingerprint.py",
 )
 
 HEADER_COMMENT = """// GENERATED FILE - DO NOT EDIT.
@@ -193,13 +193,15 @@ HEADER_COMMENT = """// GENERATED FILE - DO NOT EDIT.
 
 def check_entry(name: str) -> None:
     path = PurePosixPath(name)
-    if path.is_absolute() or '..' in path.parts or not str(path) == name:
+    if path.is_absolute() or ".." in path.parts or not str(path) == name:
         raise SystemExit(
-            'closure entries must be repo-relative forward-slash paths: '
-            '%r' % name)
-    if not name.endswith(('.h', '.c', '.cc', '.cu', '.py')):
+            "closure entries must be repo-relative forward-slash paths: "
+            f"{name!r}"
+        )
+    if not name.endswith((".h", ".c", ".cc", ".cu", ".py")):
         raise SystemExit(
-            'closure entries must be source or generator files: %r' % name)
+            f"closure entries must be source or generator files: {name!r}"
+        )
 
 
 def compute_fingerprint(repo_root: Path) -> str:
@@ -209,51 +211,66 @@ def compute_fingerprint(repo_root: Path) -> str:
         entry = repo_root / name
         if not entry.is_file():
             raise SystemExit(
-                'closure entry is missing or not a regular file: %s (repo '
-                'root %s); the closure is frozen so the build fails closed '
-                'rather than hashing a stale tree' % (name, repo_root))
+                "closure entry is missing or not a regular file: "
+                f"{name!s} (repo root {repo_root!s}); the closure is frozen "
+                "so the build fails closed rather than hashing a stale tree"
+            )
         content = entry.read_bytes()
-        digest.update(name.encode('utf-8'))
-        digest.update(b'\x00')
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\x00")
         digest.update(content)
-        digest.update(b'\x00')
+        digest.update(b"\x00")
     return digest.hexdigest()
 
 
 def render_header(fingerprint: str) -> str:
-    lines = [HEADER_COMMENT.rstrip('\n')]
-    lines.append('#pragma once')
-    lines.append('')
-    lines.append('namespace colmap {')
-    lines.append('namespace mvs {')
-    lines.append('')
-    lines.append('// Compiled allocation-closure fingerprint of the exact source inputs')
-    lines.append('// this binary was built with (see the header comment above).')
-    lines.append('// Consumers MUST compare the wire fingerprints against this value and')
-    lines.append('// MUST NOT accept any substitute digest, placeholder or registry.')
-    lines.append('inline constexpr char kResidentAllocationFingerprint[] =')
-    lines.append('    "%s";' % fingerprint)
-    lines.append('')
-    lines.append('}  // namespace mvs')
-    lines.append('}  // namespace colmap')
-    return '\n'.join(lines) + '\n'
+    lines = [HEADER_COMMENT.rstrip("\n")]
+    lines.append("#pragma once")
+    lines.append("")
+    lines.append("namespace colmap {")
+    lines.append("namespace mvs {")
+    lines.append("")
+    lines.append(
+        "// Compiled allocation-closure fingerprint of the exact source inputs"
+    )
+    lines.append(
+        "// this binary was built with (see the header comment above)."
+    )
+    lines.append(
+        "// Consumers MUST compare the wire fingerprints against this value and"
+    )
+    lines.append(
+        "// MUST NOT accept any substitute digest, placeholder or registry."
+    )
+    lines.append("inline constexpr char kResidentAllocationFingerprint[] =")
+    lines.append(f'    "{fingerprint!s}";')
+    lines.append("")
+    lines.append("}  // namespace mvs")
+    lines.append("}  // namespace colmap")
+    return "\n".join(lines) + "\n"
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description='Generate the compiled resident allocation fingerprint '
-                    'header from the frozen ordered closure.')
-    parser.add_argument('--repo-root', required=True,
-                        help='COLMAP source repository root')
-    parser.add_argument('--output', required=True,
-                        help='generated header output path')
-    parser.add_argument('--depfile', required=True,
-                        help='depfile path listing every closure entry')
+        description="Generate the compiled resident allocation fingerprint "
+        "header from the frozen ordered closure."
+    )
+    parser.add_argument(
+        "--repo-root", required=True, help="COLMAP source repository root"
+    )
+    parser.add_argument(
+        "--output", required=True, help="generated header output path"
+    )
+    parser.add_argument(
+        "--depfile",
+        required=True,
+        help="depfile path listing every closure entry",
+    )
     args = parser.parse_args()
 
     repo_root = Path(args.repo_root)
     if not repo_root.is_dir():
-        raise SystemExit('repo root is not a directory: %s' % args.repo_root)
+        raise SystemExit(f"repo root is not a directory: {args.repo_root!s}")
 
     fingerprint = compute_fingerprint(repo_root)
 
@@ -263,18 +280,19 @@ def main() -> int:
     # Write only when content changes so unchanged builds do not churn.
     current = output.read_text() if output.exists() else None
     if current != header:
-        temporary = output.with_name(output.name + '.tmp')
+        temporary = output.with_name(output.name + ".tmp")
         temporary.write_text(header)
         temporary.replace(output)
 
     depfile = Path(args.depfile)
     depfile.parent.mkdir(parents=True, exist_ok=True)
     # Absolute paths keep the depfile valid from any build working dir.
-    targets = ' '.join(
-        str((repo_root / PurePosixPath(name)).resolve()) for name in CLOSURE)
-    depfile.write_text('%s: %s\n' % (output.resolve(), targets))
+    targets = " ".join(
+        str((repo_root / PurePosixPath(name)).resolve()) for name in CLOSURE
+    )
+    depfile.write_text(f"{output.resolve()!s}: {targets!s}\n")
     return 0
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())

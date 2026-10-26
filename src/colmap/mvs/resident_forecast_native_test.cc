@@ -4,11 +4,10 @@
 // EstimateNormalAllowance on real image/map files produced by the real
 // writers); they require the dense-stereo library and never run on a
 // stubbed substitute. Registered with the normal CMake test suite.
-#include "colmap/mvs/resident_forecast.h"
-
 #include "colmap/mvs/optimized_dispatch.h"
 #include "colmap/mvs/owned_resident_minima.h"
 #include "colmap/mvs/resident_contract.h"
+#include "colmap/mvs/resident_forecast.h"
 #include "colmap/util/logging.h"
 #include "colmap/util/testing.h"
 
@@ -55,10 +54,8 @@ class ResidentForecastNativeTest : public ::testing::Test {
         input.image_idx = idx;
         input.image = image;
         input.max_image_size = 2;
-        input.depth_path =
-            root_ / (std::to_string(idx) + ".depth.bin");
-        input.normal_path =
-            root_ / (std::to_string(idx) + ".normal.bin");
+        input.depth_path = root_ / (std::to_string(idx) + ".depth.bin");
+        input.normal_path = root_ / (std::to_string(idx) + ".normal.bin");
         DepthMap depth(4, 2, 1, 10);
         depth.Fill(2);
         depth.Write(input.depth_path);
@@ -149,9 +146,9 @@ TEST_F(ResidentForecastNativeTest, MinimaMatchNativeEstimatorTerms) {
 
 // Bounded-only execution minima: eager mode refuses at the minima surface.
 TEST_F(ResidentForecastNativeTest, MinimaRefuseEagerMode) {
-  EXPECT_THROW(ComputeResidentLedgerMinima(
-                   jobs_, ResidentForecastNormals::kEager,
-                   /*max_future=*/2),
+  EXPECT_THROW(ComputeResidentLedgerMinima(jobs_,
+                                           ResidentForecastNormals::kEager,
+                                           /*max_future=*/2),
                std::exception);
 }
 
@@ -208,32 +205,31 @@ TEST_F(ResidentForecastNativeTest, ChargeGateAgainstNativeMinima) {
   EXPECT_NO_THROW(VerifyResidentForecastLedgerTerms(wire, 1));
   // The complete checked aggregate fits exactly at its own total.
   const uint64_t host_total = minima.bank_host_bytes + 2147483648u + 0u +
-      wire.normal_charge_bytes + wire.rolling_host_bytes;
-  const uint64_t device_total = minima.bank_device_bytes + 2147483648u +
-                                wire.rolling_device_bytes;
-  EXPECT_NO_THROW(VerifyResidentForecastFitsCaps(wire, host_total,
-                                                 device_total));
-  EXPECT_THROW(VerifyResidentForecastFitsCaps(wire, host_total - 1,
-                                              device_total),
-               std::exception);
-  EXPECT_THROW(VerifyResidentForecastFitsCaps(wire, host_total,
-                                              device_total - 1),
-               std::exception);
+                              wire.normal_charge_bytes +
+                              wire.rolling_host_bytes;
+  const uint64_t device_total =
+      minima.bank_device_bytes + 2147483648u + wire.rolling_device_bytes;
+  EXPECT_NO_THROW(
+      VerifyResidentForecastFitsCaps(wire, host_total, device_total));
+  EXPECT_THROW(
+      VerifyResidentForecastFitsCaps(wire, host_total - 1, device_total),
+      std::exception);
+  EXPECT_THROW(
+      VerifyResidentForecastFitsCaps(wire, host_total, device_total - 1),
+      std::exception);
   // A margin-1 device charge over-cap refusal is covered above; a
   // marginal aggregate case: cap one byte below the total.
-  EXPECT_THROW(VerifyResidentForecastFitsCaps(wire, host_total,
-                                              device_total - 1),
-               std::exception);
+  EXPECT_THROW(
+      VerifyResidentForecastFitsCaps(wire, host_total, device_total - 1),
+      std::exception);
 
   // One byte below any native minimum refuses.
   auto refused = wire;
   refused.bank_host_bytes -= 1;
-  EXPECT_THROW(VerifyResidentForecastCharges(refused, minima),
-               std::exception);
+  EXPECT_THROW(VerifyResidentForecastCharges(refused, minima), std::exception);
   refused = wire;
   refused.references[1].private_device_bytes -= 2;
-  EXPECT_THROW(VerifyResidentForecastCharges(refused, minima),
-               std::exception);
+  EXPECT_THROW(VerifyResidentForecastCharges(refused, minima), std::exception);
 }
 
 // Five distinct real reference files and native estimator-backed admission

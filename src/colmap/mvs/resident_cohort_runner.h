@@ -71,8 +71,8 @@
 // wire. Owner-fixed tiles stay untouched. No GPU work belongs to any
 // local writer; native qualification happens at the dev1 build.
 
+#include "colmap/mvs/generated/resident_allocation_fingerprint.h"
 #include "colmap/mvs/normal_map.h"
-#include "colmap/mvs/workspace.h"
 #include "colmap/mvs/owned_cohort.h"
 #include "colmap/mvs/owned_input_bank.h"
 #include "colmap/mvs/owned_normal_lookahead.h"
@@ -83,9 +83,9 @@
 #include "colmap/mvs/resident_cohort_wire.h"
 #include "colmap/mvs/resident_forecast.h"
 #include "colmap/mvs/resident_runner.h"
+#include "colmap/mvs/workspace.h"
 #include "colmap/util/file.h"
 #include "colmap/util/logging.h"
-#include "colmap/mvs/generated/resident_allocation_fingerprint.h"
 
 #include <atomic>
 #include <chrono>
@@ -143,16 +143,16 @@ inline void CohortOutputPathsRefuseExistingOrAliased(
         << "cohort output already exists: " << output;
     for (const auto& input : inputs) {
       THROW_CHECK(!owned::PathsAlias(input, output))
-          << "cohort output aliases an admitted input: " << output
-          << " vs " << input;
+          << "cohort output aliases an admitted input: " << output << " vs "
+          << input;
     }
   }
   for (size_t a = 0; a < outputs.size(); ++a) {
     for (size_t b = a + 1; b < outputs.size(); ++b) {
       THROW_CHECK(!owned::PathsAlias(outputs[a], outputs[b]))
           << "cohort output aliases another output (including the same "
-             "job's depth vs normal pair): " << outputs[a] << " vs "
-          << outputs[b];
+             "job's depth vs normal pair): "
+          << outputs[a] << " vs " << outputs[b];
     }
   }
 }
@@ -192,9 +192,12 @@ inline int RunResidentCohortBankImpl(
   THROW_CHECK(format == "colmap" || format == "pmvs")
       << "Invalid `workspace_format` " << workspace_format
       << " - supported values are 'COLMAP' or 'PMVS'.";
-  PatchMatchController resolution_controller(
-      invocation_options, workspace_path, format, pmvs_option_name,
-      config_path, PatchMatchExecution::kStock);
+  PatchMatchController resolution_controller(invocation_options,
+                                             workspace_path,
+                                             format,
+                                             pmvs_option_name,
+                                             config_path,
+                                             PatchMatchExecution::kStock);
   auto resolved = resolution_controller.ResolveOwnedBankContractWithJobs();
   const std::string fresh_bytes = SerializeOwnedBankContract(resolved.contract);
 
@@ -223,20 +226,21 @@ inline int RunResidentCohortBankImpl(
   // inclusive bank charge, exact normal allowances, private floors,
   // singleton feasibility).
   CheckContractIdentitiesUnchanged(identity_snapshot);
-  cohort::VerifyResidentCohortForecastNativeFloors(
-      wire, resolved.jobs, identity_snapshot, limits.host_budget_bytes,
-      limits.device_budget_bytes);
+  cohort::VerifyResidentCohortForecastNativeFloors(wire,
+                                                   resolved.jobs,
+                                                   identity_snapshot,
+                                                   limits.host_budget_bytes,
+                                                   limits.device_budget_bytes);
   CheckContractIdentitiesUnchanged(identity_snapshot);
 
   // 7. HARD FitsCaps: every cohort complete ledger (top-k SUM reserve)
   // against the CLI caps, active_jobs <= the CLI limit and members.
-  cohort::VerifyResidentCohortForecastFitsCaps(
-      wire, limits.host_budget_bytes, limits.device_budget_bytes,
-      limits.max_concurrent_solvers);
+  cohort::VerifyResidentCohortForecastFitsCaps(wire,
+                                               limits.host_budget_bytes,
+                                               limits.device_budget_bytes,
+                                               limits.max_concurrent_solvers);
 
-  const auto run_observer = observer
-                                ? observer
-                                : +[](size_t, const char*) {};
+  const auto run_observer = observer ? observer : +[](size_t, const char*) {};
   // 8. Strictly sequential cohort execution; a failure aborts the
   // remaining cohorts after the failing one drains and destroys.
   for (size_t c = 0; c < wire.cohorts.size(); ++c) {
@@ -270,8 +274,8 @@ inline int RunResidentCohortBankImpl(
         cohort.process_device_bytes};
     std::vector<owned::ByteCharge> member_forecasts;
     for (const auto& member : cohort.members) {
-      member_forecasts.push_back({member.private_host_bytes,
-                                  member.private_device_bytes});
+      member_forecasts.push_back(
+          {member.private_host_bytes, member.private_device_bytes});
     }
     // Per-cohort admitted concurrency (1 <= k <= members, <= CLI limit).
     const size_t active_jobs =
@@ -280,9 +284,11 @@ inline int RunResidentCohortBankImpl(
     // Fresh per-cohort bank with the ORIGINAL identity slice (bounded
     // reference-normal mode; construction validates every admitted
     // member's captured identity; never recaptured, never sorted).
-    owned::HostInputBank host(std::move(cohort_jobs), bank_charge,
+    owned::HostInputBank host(std::move(cohort_jobs),
+                              bank_charge,
                               owned::BankNormals::kBounded,
-                              identity_snapshot.data() + first, count);
+                              identity_snapshot.data() + first,
+                              count);
     // Bounded FIFO producer over the cohort's reference layers in native
     // problem order; declared AFTER the host bank, joined before teardown.
     std::vector<size_t> pipeline_layers;
@@ -300,16 +306,16 @@ inline int RunResidentCohortBankImpl(
 
     auto normal_pipeline_raw = normal_pipeline.get();
     const auto observer_storage = observer;
-    const auto sink = [normal_pipeline_raw, &observer_storage](
-                          const owned::PairEvent& e) {
+    const auto sink = [normal_pipeline_raw,
+                       &observer_storage](const owned::PairEvent& e) {
       // MANDATORY ORDER: cancel first, observe after; a throwing observer
       // never disables cancellation; cancellation is observer-independent.
-      ResidentEventSink(e.event == "cancelled",
-                        [normal_pipeline_raw]() {
-                          normal_pipeline_raw->Cancel();
-                        },
-                        observer_storage ? &observer_storage : nullptr,
-                        e.job, e.event.c_str());
+      ResidentEventSink(
+          e.event == "cancelled",
+          [normal_pipeline_raw]() { normal_pipeline_raw->Cancel(); },
+          observer_storage ? &observer_storage : nullptr,
+          e.job,
+          e.event.c_str());
     };
     owned::PairCoordinator coordinator(ledger_capacity,
                                        ledger_process,
@@ -328,17 +334,23 @@ inline int RunResidentCohortBankImpl(
       // Unique bounded FIFO handoff per cohort-local ordinal (the original
       // bank job ordinal is generation + first; no renumbering anywhere).
       mvs::NormalMap owned_normal = normal_pipeline->Consume(generation);
-      PatchMatchController controller(
-          invocation_options, workspace_path, format, pmvs_option_name,
-          config_path, PatchMatchExecution::kOwnedCuda);
+      PatchMatchController controller(invocation_options,
+                                      workspace_path,
+                                      format,
+                                      pmvs_option_name,
+                                      config_path,
+                                      PatchMatchExecution::kOwnedCuda);
       PatchMatchController::OwnedPairHooks hooks;
       hooks.owned_tile_threads = limits.owned_tile_threads;
-      hooks.check_inputs = [&](size_t, const PatchMatchOptions&,
+      hooks.check_inputs = [&](size_t,
+                               const PatchMatchOptions&,
                                const PatchMatch::Problem& problem) {
         const auto& reference = problem.images->at(problem.ref_image_idx);
-        const auto minimum = owned::ResidentPrivateLogicalMinimum(
-            reference.GetWidth(), reference.GetHeight(),
-            problem.src_image_idxs.size(), /*include_owner_normal=*/true);
+        const auto minimum =
+            owned::ResidentPrivateLogicalMinimum(reference.GetWidth(),
+                                                 reference.GetHeight(),
+                                                 problem.src_image_idxs.size(),
+                                                 /*include_owner_normal=*/true);
         THROW_CHECK_GE(cohort.members.at(generation).private_host_bytes,
                        minimum.host);
         THROW_CHECK_GE(cohort.members.at(generation).private_device_bytes,
@@ -348,8 +360,8 @@ inline int RunResidentCohortBankImpl(
       // per-cohort bank holds exactly this cohort's jobs); the ORIGINAL
       // invocation ordinal is `first + generation` and is used for
       // wire/telemetry binding only, never for subset-bank indexing.
-      controller.RunResidentOwnedPairJob(host, gpu, coordinator, generation,
-                                         generation, hooks, &owned_normal);
+      controller.RunResidentOwnedPairJob(
+          host, gpu, coordinator, generation, generation, hooks, &owned_normal);
     };
 
     // Returns (or throws) only after all owners drained and joined.
@@ -372,10 +384,15 @@ inline int RunResidentCohortBankImpl(
 
 // Non-CUDA builds never execute: the CLI refuses before this call runs.
 inline int RunResidentCohortBankImpl(
-    const PatchMatchOptions&, const std::filesystem::path&,
-    const std::string&, const std::string&, const std::filesystem::path&,
-    const std::filesystem::path&, const ResidentCohortLimits&,
-    const ResidentSha256Fn, const std::function<void(size_t, const char*)>&) {
+    const PatchMatchOptions&,
+    const std::filesystem::path&,
+    const std::string&,
+    const std::string&,
+    const std::filesystem::path&,
+    const std::filesystem::path&,
+    const ResidentCohortLimits&,
+    const ResidentSha256Fn,
+    const std::function<void(size_t, const char*)>&) {
   LOG(ERROR) << "The cohort runner requires the dense-stereo library, "
                 "which is built with CUDA support";
   return EXIT_FAILURE;
@@ -395,9 +412,14 @@ inline int RunResidentCohortBank(
     const ResidentCohortLimits& limits,
     const ResidentSha256Fn sha,
     const std::function<void(size_t, const char*)>& observer = {}) {
-  return RunResidentCohortBankImpl(invocation_options, workspace_path,
-                                   workspace_format, pmvs_option_name,
-                                   config_path, forecast_path, limits, sha,
+  return RunResidentCohortBankImpl(invocation_options,
+                                   workspace_path,
+                                   workspace_format,
+                                   pmvs_option_name,
+                                   config_path,
+                                   forecast_path,
+                                   limits,
+                                   sha,
                                    observer);
 }
 

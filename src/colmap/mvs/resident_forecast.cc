@@ -3,8 +3,8 @@
 #include "colmap/mvs/resident_forecast.h"
 
 #include "colmap/mvs/owned_resident_minima.h"
-#include "colmap/mvs/resident_wire_lexical.h"
 #include "colmap/mvs/resident_contract.h"
+#include "colmap/mvs/resident_wire_lexical.h"
 #include "colmap/util/logging.h"
 
 #include <algorithm>
@@ -30,8 +30,8 @@ using resident_lexical::ParseSignedInt32;
 using resident_lexical::ParseUint;
 using resident_lexical::ParseUintMax;
 using resident_lexical::ParseUintMinimum;
-using resident_lexical::ValidateFingerprintText;
 using resident_lexical::TryHexDecode;
+using resident_lexical::ValidateFingerprintText;
 
 constexpr int64_t kExpectedContractVersion = 1;
 
@@ -54,8 +54,8 @@ ResidentForecastWire ParseResidentForecast(const std::string& bytes,
       lexer.Fail("expected " + expected_key + ", got end of forecast");
     }
     if (lexer.Key() != expected_key) {
-      lexer.Fail("expected " + expected_key + ", got \"" +
-                 lexer.LineText() + "\"");
+      lexer.Fail("expected " + expected_key + ", got \"" + lexer.LineText() +
+                 "\"");
     }
   };
 
@@ -64,8 +64,7 @@ ResidentForecastWire ParseResidentForecast(const std::string& bytes,
 
   next_key("version");
   if (lexer.TokenCount() != 2) lexer.Fail("version field count");
-  const uint64_t version =
-      ParseUint(lexer, lexer.Token(1), "version");
+  const uint64_t version = ParseUint(lexer, lexer.Token(1), "version");
   if (version != kResidentForecastVersion) {
     lexer.Fail("unsupported resident forecast version " +
                std::to_string(version));
@@ -87,12 +86,13 @@ ResidentForecastWire ParseResidentForecast(const std::string& bytes,
 
   next_key("contract_raw_length");
   if (lexer.TokenCount() != 2) lexer.Fail("contract_raw_length field count");
-  const uint64_t raw_length = ParseUintMinimum(
-      lexer, lexer.Token(1), "contract_raw_length", 1);
+  const uint64_t raw_length =
+      ParseUintMinimum(lexer, lexer.Token(1), "contract_raw_length", 1);
 
   next_key("contract_raw");
   if (lexer.TokenCount() != 3) lexer.Fail("contract_raw field count");
-  const std::string raw = ParseByteString(lexer, "contract_raw", 1, 2, /*line_final=*/true);
+  const std::string raw =
+      ParseByteString(lexer, "contract_raw", 1, 2, /*line_final=*/true);
   if (raw.size() != raw_length) {
     lexer.Fail("contract_raw length does not match contract_raw_length");
   }
@@ -105,11 +105,14 @@ ResidentForecastWire ParseResidentForecast(const std::string& bytes,
   wire.contract_raw = raw;
 
   next_key("qualification");
-  wire.qualification = ParseByteString(lexer, "qualification", 1, 2, /*line_final=*/true);
+  wire.qualification =
+      ParseByteString(lexer, "qualification", 1, 2, /*line_final=*/true);
   next_key("completeness");
-  wire.completeness = ParseByteString(lexer, "completeness", 1, 2, /*line_final=*/true);
+  wire.completeness =
+      ParseByteString(lexer, "completeness", 1, 2, /*line_final=*/true);
   next_key("concurrency_basis");
-  wire.concurrency_basis = ParseByteString(lexer, "concurrency_basis", 1, 2, /*line_final=*/true);
+  wire.concurrency_basis =
+      ParseByteString(lexer, "concurrency_basis", 1, 2, /*line_final=*/true);
   next_key("mode");
   wire.mode = ParseByteString(lexer, "mode", 1, 2, /*line_final=*/true);
 
@@ -118,14 +121,14 @@ ResidentForecastWire ParseResidentForecast(const std::string& bytes,
   ParseUintMinimum(lexer, lexer.Token(1), "max_future", 1);
   // Python bounds the field to a uint8 width with a minimum of 1.
   // Python bounds max_future/image_channels to unsigned 8-bit values.
-  wire.max_future = static_cast<int>(ParseUintMax(
-      lexer, lexer.Token(1), "max_future", 255));
+  wire.max_future =
+      static_cast<int>(ParseUintMax(lexer, lexer.Token(1), "max_future", 255));
 
   next_key("image_channels");
   if (lexer.TokenCount() != 2) lexer.Fail("image_channels field count");
   ParseUintMinimum(lexer, lexer.Token(1), "image_channels", 1);
-  wire.image_channels = static_cast<int>(ParseUintMax(
-      lexer, lexer.Token(1), "image_channels", 255));
+  wire.image_channels = static_cast<int>(
+      ParseUintMax(lexer, lexer.Token(1), "image_channels", 255));
 
   next_key("unclassified_allowance_bytes");
   if (lexer.TokenCount() != 4) {
@@ -137,11 +140,15 @@ ResidentForecastWire ParseResidentForecast(const std::string& bytes,
       lexer, "unclassified_allowance_provenance", 2, 3, /*line_final=*/true);
 
   next_key("build_allocation_fingerprint");
-  ParseFingerprint(lexer, "build_allocation_fingerprint", lexer.LineNo(),
+  ParseFingerprint(lexer,
+                   "build_allocation_fingerprint",
+                   lexer.LineNo(),
                    &wire.has_build_allocation_fingerprint,
                    &wire.build_allocation_fingerprint);
   next_key("source_fingerprint");
-  ParseFingerprint(lexer, "source_fingerprint", lexer.LineNo(),
+  ParseFingerprint(lexer,
+                   "source_fingerprint",
+                   lexer.LineNo(),
                    &wire.has_source_fingerprint,
                    &wire.source_fingerprint);
   // Both fingerprints always agree (the emitter carries the same digest);
@@ -149,19 +156,21 @@ ResidentForecastWire ParseResidentForecast(const std::string& bytes,
   if (wire.qualification == kResidentForecastExecutableQualification) {
     if (!wire.has_build_allocation_fingerprint ||
         !wire.has_source_fingerprint) {
-      lexer.Fail("an executable qualification cannot carry absent "
-                 "fingerprints");
+      lexer.Fail(
+          "an executable qualification cannot carry absent "
+          "fingerprints");
     }
   }
-  if (wire.has_build_allocation_fingerprint !=
-      wire.has_source_fingerprint) {
-    lexer.Fail("build_allocation_fingerprint and source_fingerprint must "
-               "carry the same allocation-closure digest");
+  if (wire.has_build_allocation_fingerprint != wire.has_source_fingerprint) {
+    lexer.Fail(
+        "build_allocation_fingerprint and source_fingerprint must "
+        "carry the same allocation-closure digest");
   }
   if (wire.has_build_allocation_fingerprint &&
       wire.build_allocation_fingerprint != wire.source_fingerprint) {
-    lexer.Fail("build_allocation_fingerprint and source_fingerprint must "
-               "carry the same allocation-closure digest");
+    lexer.Fail(
+        "build_allocation_fingerprint and source_fingerprint must "
+        "carry the same allocation-closure digest");
   }
 
   next_key("charges");
@@ -182,12 +191,10 @@ ResidentForecastWire ParseResidentForecast(const std::string& bytes,
     lexer.Fail("normal charge field layout");
   }
   wire.normal_owner_bytes = ParseUint(lexer, lexer.Token(2), "normal owner");
-  wire.normal_future_bytes =
-      ParseUint(lexer, lexer.Token(4), "normal future");
+  wire.normal_future_bytes = ParseUint(lexer, lexer.Token(4), "normal future");
   wire.normal_transient_bytes =
       ParseUint(lexer, lexer.Token(6), "normal transient");
-  wire.normal_charge_bytes =
-      ParseUint(lexer, lexer.Token(8), "normal charge");
+  wire.normal_charge_bytes = ParseUint(lexer, lexer.Token(8), "normal charge");
 
   next_key("process");
   if (lexer.TokenCount() != 10 || lexer.Token(1) != "mode" ||
@@ -195,10 +202,10 @@ ResidentForecastWire ParseResidentForecast(const std::string& bytes,
       lexer.Token(8) != "device") {
     lexer.Fail("process charge field layout");
   }
-  wire.process_mode = ParseByteString(lexer, "process mode", 2, 3, /*line_final=*/false);
+  wire.process_mode =
+      ParseByteString(lexer, "process mode", 2, 3, /*line_final=*/false);
   wire.process_count = ParseUint(lexer, lexer.Token(5), "process count");
-  wire.process_host_bytes =
-      ParseUint(lexer, lexer.Token(7), "process host");
+  wire.process_host_bytes = ParseUint(lexer, lexer.Token(7), "process host");
   wire.process_device_bytes =
       ParseUint(lexer, lexer.Token(9), "process device");
 
@@ -207,9 +214,9 @@ ResidentForecastWire ParseResidentForecast(const std::string& bytes,
       lexer.Token(4) != "raw" || lexer.Token(6) != "charge") {
     lexer.Fail("metadata charge field layout");
   }
-  wire.metadata_source = ParseByteString(lexer, "metadata source", 2, 3, /*line_final=*/false);
-  wire.metadata_raw_bytes =
-      ParseUint(lexer, lexer.Token(5), "metadata raw");
+  wire.metadata_source =
+      ParseByteString(lexer, "metadata source", 2, 3, /*line_final=*/false);
+  wire.metadata_raw_bytes = ParseUint(lexer, lexer.Token(5), "metadata raw");
   wire.metadata_charge_bytes =
       ParseUint(lexer, lexer.Token(7), "metadata charge");
 
@@ -230,8 +237,7 @@ ResidentForecastWire ParseResidentForecast(const std::string& bytes,
   }
   wire.rolling_active_jobs =
       ParseUint(lexer, lexer.Token(2), "rolling active_jobs");
-  wire.rolling_host_bytes =
-      ParseUint(lexer, lexer.Token(4), "rolling host");
+  wire.rolling_host_bytes = ParseUint(lexer, lexer.Token(4), "rolling host");
   wire.rolling_device_bytes =
       ParseUint(lexer, lexer.Token(6), "rolling device");
 
@@ -239,11 +245,12 @@ ResidentForecastWire ParseResidentForecast(const std::string& bytes,
   if (lexer.TokenCount() != 2) lexer.Fail("reference_count field count");
   // Bounded before any reserve(): each reference block needs far more than
   // 32 bytes on the wire.
-  const uint64_t reference_count = ParseUint(lexer, lexer.Token(1),
-                                             "reference_count");
+  const uint64_t reference_count =
+      ParseUint(lexer, lexer.Token(1), "reference_count");
   if (reference_count > lexer.RemainingBytes() / 64) {
-    lexer.Fail("declared reference_count exceeds the remaining forecast "
-               "size");
+    lexer.Fail(
+        "declared reference_count exceeds the remaining forecast "
+        "size");
   }
   wire.references.reserve(static_cast<size_t>(reference_count));
 
@@ -260,8 +267,8 @@ ResidentForecastWire ParseResidentForecast(const std::string& bytes,
     if (lexer.TokenCount() != 2) {
       lexer.Fail("reference_image_idx field count");
     }
-    const int64_t image_idx = ParseSignedInt32(
-        lexer, lexer.Token(1), "reference_image_idx");
+    const int64_t image_idx =
+        ParseSignedInt32(lexer, lexer.Token(1), "reference_image_idx");
     if (image_idx < 0) {
       lexer.Fail("negative reference_image_idx");
     }
@@ -272,8 +279,8 @@ ResidentForecastWire ParseResidentForecast(const std::string& bytes,
         ParseByteString(lexer, "reference_name", 1, 2, /*line_final=*/true);
     next_key("input_count");
     if (lexer.TokenCount() != 2) lexer.Fail("input_count field count");
-    reference.input_count = ParseUintMinimum(
-        lexer, lexer.Token(1), "input_count", 1);
+    reference.input_count =
+        ParseUintMinimum(lexer, lexer.Token(1), "input_count", 1);
     next_key("private_host_bytes");
     if (lexer.TokenCount() != 2) lexer.Fail("private_host_bytes field count");
     reference.private_host_bytes =
@@ -307,10 +314,9 @@ ResidentForecastNormals ResidentForecastNormalsMode(
       "resident forecast declares unknown bank normal mode: " + wire.mode);
 }
 
-void VerifyResidentForecastBinding(
-    const ResidentForecastWire& wire,
-    const std::string& fresh_contract_bytes,
-    const ResidentSha256Fn sha) {
+void VerifyResidentForecastBinding(const ResidentForecastWire& wire,
+                                   const std::string& fresh_contract_bytes,
+                                   const ResidentSha256Fn sha) {
   // A real hash function is REQUIRED for execution; nullptr refuses (the
   // parser-only path stays hash-optional and documented as such).
   THROW_CHECK(sha != nullptr)
@@ -332,12 +338,9 @@ void VerifyResidentForecastBinding(
     const auto& problem = contract.problems.at(i);
     THROW_CHECK_EQ(wire.references.at(i).reference_image_idx,
                    problem.reference_image_idx)
-        << "Resident forecast binding: reference image index changed at "
-        << i;
-    THROW_CHECK_EQ(wire.references.at(i).reference_name,
-                   problem.reference_name)
-        << "Resident forecast binding: reference name bytes changed at "
-        << i;
+        << "Resident forecast binding: reference image index changed at " << i;
+    THROW_CHECK_EQ(wire.references.at(i).reference_name, problem.reference_name)
+        << "Resident forecast binding: reference name bytes changed at " << i;
     THROW_CHECK_EQ(static_cast<uint64_t>(wire.references.at(i).input_count),
                    static_cast<uint64_t>(problem.inputs.size()))
         << "Resident forecast binding: input count changed at " << i;
@@ -362,8 +365,7 @@ void VerifyResidentForecastParameters(
   THROW_CHECK(wire.has_build_allocation_fingerprint &&
               wire.has_source_fingerprint)
       << "Resident forecast execution refuses absent fingerprints";
-  THROW_CHECK_EQ(wire.build_allocation_fingerprint,
-                 wire.source_fingerprint)
+  THROW_CHECK_EQ(wire.build_allocation_fingerprint, wire.source_fingerprint)
       << "Resident forecast fingerprints disagree";
   THROW_CHECK_EQ(wire.build_allocation_fingerprint,
                  compiled_allocation_fingerprint)
@@ -373,12 +375,12 @@ void VerifyResidentForecastParameters(
   ResidentForecastNormalsMode(wire);
 }
 
-void VerifyResidentForecastLedgerTerms(
-    const ResidentForecastWire& wire,
-    const size_t max_concurrent_solvers) {
+void VerifyResidentForecastLedgerTerms(const ResidentForecastWire& wire,
+                                       const size_t max_concurrent_solvers) {
   THROW_CHECK(wire.max_future == 1 || wire.max_future == 2)
       << "Resident forecast max_future must be the bounded FIFO queue "
-         "contract value 1 or 2, got " << wire.max_future;
+         "contract value 1 or 2, got "
+      << wire.max_future;
   THROW_CHECK_GE(wire.image_channels, 1);
 
   THROW_CHECK_GE(wire.rolling_active_jobs, 1)
@@ -401,8 +403,8 @@ void VerifyResidentForecastLedgerTerms(
   devices.reserve(wire.references.size());
   for (const auto& reference : wire.references) {
     max_private_host = std::max(max_private_host, reference.private_host_bytes);
-    max_private_device = std::max(max_private_device,
-                                  reference.private_device_bytes);
+    max_private_device =
+        std::max(max_private_device, reference.private_device_bytes);
     hosts.push_back(reference.private_host_bytes);
     devices.push_back(reference.private_device_bytes);
   }
@@ -412,10 +414,11 @@ void VerifyResidentForecastLedgerTerms(
   THROW_CHECK_EQ(wire.planner_max_member_device_bytes, max_private_device)
       << "Resident forecast planner max-member device charge disagrees "
          "with the declared private charges";
-  std::sort(hosts.begin(), hosts.end(),
-            [](uint64_t a, uint64_t b) { return a > b; });
-  std::sort(devices.begin(), devices.end(),
-            [](uint64_t a, uint64_t b) { return a > b; });
+  std::sort(
+      hosts.begin(), hosts.end(), [](uint64_t a, uint64_t b) { return a > b; });
+  std::sort(devices.begin(), devices.end(), [](uint64_t a, uint64_t b) {
+    return a > b;
+  });
   uint64_t rolling_host = 0;
   uint64_t rolling_device = 0;
   const size_t active = std::min<size_t>(
@@ -462,7 +465,7 @@ void VerifyResidentForecastLedgerTerms(
            "matching partial label";
   } else {
     THROW_CHECK(wire.metadata_source == "caller_supplied_native_actual" ||
-              wire.metadata_source == "explicit_unclassified")
+                wire.metadata_source == "explicit_unclassified")
         << "Resident forecast declares an unknown metadata source";
     THROW_CHECK_EQ(wire.completeness, kResidentForecastComplete)
         << "Resident forecast partial completeness requires the omitted "
@@ -509,8 +512,8 @@ void VerifyResidentForecastCharges(const ResidentForecastWire& wire,
   THROW_CHECK_EQ(wire.normal_transient_bytes, minima.normal_transient_bytes)
       << "Resident forecast normal transient allowance disagrees with the "
          "native logical recompute";
-  const uint64_t required = owned::CheckedAdd(
-      minima.normal_future_bytes, minima.normal_transient_bytes);
+  const uint64_t required = owned::CheckedAdd(minima.normal_future_bytes,
+                                              minima.normal_transient_bytes);
   THROW_CHECK_GE(wire.normal_charge_bytes, required)
       << "Resident forecast normal charge is below the required "
          "future+transient allowance";
@@ -519,10 +522,12 @@ void VerifyResidentForecastCharges(const ResidentForecastWire& wire,
     const auto& minimum = minima.private_minima.at(i);
     THROW_CHECK_GE(reference.private_host_bytes, minimum[0])
         << "Resident forecast private host charge is below the native "
-           "logical minimum for reference " << i;
+           "logical minimum for reference "
+        << i;
     THROW_CHECK_GE(reference.private_device_bytes, minimum[1])
         << "Resident forecast private device charge is below the native "
-           "logical minimum for reference " << i;
+           "logical minimum for reference "
+        << i;
   }
 }
 
@@ -536,9 +541,8 @@ std::vector<owned::BankJobIdentities> ContractJobIdentities(
     owned::BankJobIdentities entries;
     entries.reserve(problem.inputs.size());
     for (const auto& input : problem.inputs) {
-      entries.push_back(owned::BankLayerIdentity{input.image_identity,
-                                                 input.depth_identity,
-                                                 input.normal_identity});
+      entries.push_back(owned::BankLayerIdentity{
+          input.image_identity, input.depth_identity, input.normal_identity});
     }
     snapshot.push_back(std::move(entries));
   }
@@ -558,8 +562,7 @@ void CheckContractIdentitiesUnchanged(
 
 void ResidentEventSink(const bool cancelled_event,
                        const std::function<void()>& cancel,
-                       const std::function<void(size_t, const char*)>*
-                           observer,
+                       const std::function<void(size_t, const char*)>* observer,
                        const size_t job,
                        const char* event) {
   // MANDATORY ORDER: cancellation first; a throwing observer (whose
@@ -582,10 +585,9 @@ void VerifyResidentForecastFitsCaps(const ResidentForecastWire& wire,
   // (the planner max-member terms are consistency checks, never additions).
   const uint64_t host_total = owned::CheckedAdd(
       owned::CheckedAdd(wire.bank_host_bytes, wire.process_host_bytes),
-      owned::CheckedAdd(
-          owned::CheckedAdd(wire.metadata_charge_bytes,
-                            wire.normal_charge_bytes),
-          wire.rolling_host_bytes));
+      owned::CheckedAdd(owned::CheckedAdd(wire.metadata_charge_bytes,
+                                          wire.normal_charge_bytes),
+                        wire.rolling_host_bytes));
   const uint64_t device_total = owned::CheckedAdd(
       owned::CheckedAdd(wire.bank_device_bytes, wire.process_device_bytes),
       wire.rolling_device_bytes);

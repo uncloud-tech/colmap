@@ -16,8 +16,8 @@ struct ReferenceCalibration {
 static_assert(sizeof(ReferenceCalibration) == 32);
 static_assert(std::is_trivially_copyable<ReferenceCalibration>::value);
 
-inline ReferenceCalibration SnapshotReferenceCalibration(
-    const float K[4], const float inv_K[4]) {
+inline ReferenceCalibration SnapshotReferenceCalibration(const float K[4],
+                                                         const float inv_K[4]) {
   ReferenceCalibration result;
   for (int i = 0; i < 4; ++i) {
     result.K[i] = K[i];

@@ -12,8 +12,8 @@
 #include <fstream>
 
 #if !defined(COLMAP_HIP_ENABLED)
-#include "colmap/mvs/owned_cuda_execution.h"
 #include "colmap/mvs/owned_async_pool.h"
+#include "colmap/mvs/owned_cuda_execution.h"
 #endif
 
 #if defined(__CUDACC__) || defined(__HIPCC__)
@@ -292,23 +292,33 @@ Mat<T> GpuMat<T>::CopyToMat() const {
 #if !defined(COLMAP_HIP_ENABLED)
 template <typename T>
 void GpuMat<T>::CopyToDevice(const T* data,
-                              const size_t pitch,
-                              const cudaStream_t stream) {
+                             const size_t pitch,
+                             const cudaStream_t stream) {
   owned::ScopedStreamCompletion completion(stream);
-  CUDA_SAFE_CALL(cudaMemcpy2DAsync(array_ptr_, pitch_, data, pitch,
-                                  width_ * sizeof(T), height_ * depth_,
-                                  cudaMemcpyHostToDevice, stream));
+  CUDA_SAFE_CALL(cudaMemcpy2DAsync(array_ptr_,
+                                   pitch_,
+                                   data,
+                                   pitch,
+                                   width_ * sizeof(T),
+                                   height_ * depth_,
+                                   cudaMemcpyHostToDevice,
+                                   stream));
   completion.Wait();
 }
 
 template <typename T>
 void GpuMat<T>::CopyToHost(T* data,
-                            const size_t pitch,
-                            const cudaStream_t stream) const {
+                           const size_t pitch,
+                           const cudaStream_t stream) const {
   owned::ScopedStreamCompletion completion(stream);
-  CUDA_SAFE_CALL(cudaMemcpy2DAsync(data, pitch, array_ptr_, pitch_,
-                                  width_ * sizeof(T), height_ * depth_,
-                                  cudaMemcpyDeviceToHost, stream));
+  CUDA_SAFE_CALL(cudaMemcpy2DAsync(data,
+                                   pitch,
+                                   array_ptr_,
+                                   pitch_,
+                                   width_ * sizeof(T),
+                                   height_ * depth_,
+                                   cudaMemcpyDeviceToHost,
+                                   stream));
   completion.Wait();
 }
 
@@ -527,17 +537,16 @@ void GpuMat<T>::FillWithScalar(const T value,
                                const cudaStream_t stream,
                                bool wait) {
   owned::ScopedStreamCompletion completion(stream);
-  internal::FillWithScalarKernel<T><<<gridSize_, blockSize_, 0, stream>>>(
-      View(), value);
+  internal::FillWithScalarKernel<T>
+      <<<gridSize_, blockSize_, 0, stream>>>(View(), value);
   completion.Wait(wait);
 }
 
 template <typename T>
-void GpuMat<T>::FillWithRandomNumbers(
-    const T min_value,
-    const T max_value,
-    const GpuMat<curandState>& random_state,
-    const cudaStream_t stream) {
+void GpuMat<T>::FillWithRandomNumbers(const T min_value,
+                                      const T max_value,
+                                      const GpuMat<curandState>& random_state,
+                                      const cudaStream_t stream) {
   owned::ScopedStreamCompletion completion(stream);
   internal::FillWithRandomNumbersKernel<T>
       <<<gridSize_, blockSize_, 0, stream>>>(
@@ -567,8 +576,11 @@ void GpuMat<T>::RotateFrom(const GpuMatView<T> input,
                    slice * input.GetPitch() * input.GetHeight()),
                reinterpret_cast<T*>(reinterpret_cast<char*>(GetPtr()) +
                                     slice * GetPitch() * GetHeight()),
-               input.GetWidth(), input.GetHeight(), input.GetPitch(),
-               GetPitch(), stream);
+               input.GetWidth(),
+               input.GetHeight(),
+               input.GetPitch(),
+               GetPitch(),
+               stream);
   }
   completion.Wait(wait);
 }
@@ -582,7 +594,11 @@ void GpuMat<T>::Rotate(GpuMat<T>* output,
     CudaRotate((T*)((char*)array_ptr_ + slice * pitch_ * GetHeight()),
                (T*)((char*)output->GetPtr() +
                     slice * output->pitch_ * output->GetHeight()),
-               width_, height_, pitch_, output->pitch_, stream);
+               width_,
+               height_,
+               pitch_,
+               output->pitch_,
+               stream);
   }
   completion.Wait(wait);
 }

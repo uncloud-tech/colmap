@@ -15,7 +15,6 @@
 
 #include <algorithm>
 #include <filesystem>
-#include <glog/logging.h>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -24,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include <glog/logging.h>
 #include <gtest/gtest.h>
 
 namespace colmap {
@@ -171,8 +171,7 @@ TEST(PhotoDirectorySummaryCli, MixedPhotosProblemsAndSidecar) {
   // JSON null.
   const std::string compiled_revision = GetCommitRevision();
   if (compiled_revision.empty()) {
-    EXPECT_NE(json.find(",\"build\":{\"revision\":null,"),
-              std::string::npos);
+    EXPECT_NE(json.find(",\"build\":{\"revision\":null,"), std::string::npos);
   } else {
     EXPECT_NE(
         json.find(",\"build\":{\"revision\":\"" + compiled_revision + "\","),
@@ -190,8 +189,8 @@ TEST(PhotoDirectorySummaryCli, MixedPhotosProblemsAndSidecar) {
   EXPECT_GT(layout.bytes, 0);
   EXPECT_GT(layout.alignment, 0);
   EXPECT_NE(json.find("\"stock_prng_state\":{\"bytes\":" +
-                      std::to_string(layout.bytes) + ",\"alignment\":" +
-                      std::to_string(layout.alignment) +
+                      std::to_string(layout.bytes) +
+                      ",\"alignment\":" + std::to_string(layout.alignment) +
                       ",\"type\":\"curandState\",\"provenance\":"
                       "\"cuda_translation_unit_compile_time\"}"),
             std::string::npos);
@@ -260,8 +259,8 @@ TEST(PhotoDirectorySummaryJsonSerializer, MissingCudaStateHasNoFallback) {
 TEST(PhotoDirectorySummaryJsonSerializer, InvalidStateDoesNotInventLayout) {
   PhotoDirectorySummaryJsonBuild build = TestBuild();
   build.cuda_compiled = true;
-  for (const auto layout : {mvs::StockPrngStateLayout{0, 8},
-                            mvs::StockPrngStateLayout{64, 0}}) {
+  for (const auto layout :
+       {mvs::StockPrngStateLayout{0, 8}, mvs::StockPrngStateLayout{64, 0}}) {
     build.stock_prng_state = layout;
     const std::string json = WritePhotoDirectorySummaryJson(
         PhotoDirectorySummary(), "/photos", build);
@@ -405,8 +404,7 @@ TEST(PhotoDirectorySummaryCli, BuildSectionMatchesCompiledIdentity) {
 // effect, and neither the failure nor the success path may create log files
 // or log directories; the only stdout content is the single JSON line on
 // success.
-TEST(PhotoDirectorySummaryCli,
-     RejectsLoggingOverridesBeforeSideEffects) {
+TEST(PhotoDirectorySummaryCli, RejectsLoggingOverridesBeforeSideEffects) {
   const auto sandbox = CreateTestDir();
   const auto log_dir = sandbox / "glog-should-stay-empty";
   CreateDirIfNotExists(log_dir, /*recursive=*/true);
@@ -414,10 +412,13 @@ TEST(PhotoDirectorySummaryCli,
   const std::string saved_log_dir = FLAGS_log_dir;
   FLAGS_log_dir = log_dir.string();
 
-  const CliResult result = RunPhotoDirectorySummaryCli(
-      {"--log_target", "stdout",
-       "--log_path", log_path_dir.string(),
-       "--image_path", (sandbox / "unused").string()});
+  const CliResult result =
+      RunPhotoDirectorySummaryCli({"--log_target",
+                                   "stdout",
+                                   "--log_path",
+                                   log_path_dir.string(),
+                                   "--image_path",
+                                   (sandbox / "unused").string()});
 
   // Rejected nonzero, and no stdout output: a rejected logging override
   // fails before any JSON could have been produced.
@@ -446,8 +447,7 @@ TEST(PhotoDirectorySummaryCli, RejectsUnknownOptionsWithoutSideEffects) {
   FLAGS_log_dir = log_dir.string();
 
   const CliResult result = RunPhotoDirectorySummaryCli(
-      {"--log_level", "3",
-       "--image_path", (sandbox / "unused").string()});
+      {"--log_level", "3", "--image_path", (sandbox / "unused").string()});
 
   EXPECT_EQ(result.return_code, EXIT_FAILURE);
   EXPECT_EQ(result.stdout_text, "");
@@ -459,8 +459,7 @@ TEST(PhotoDirectorySummaryCli, RejectsUnknownOptionsWithoutSideEffects) {
 
 // Success path: exactly one JSON line on stdout, and no log files or new
 // directory entries anywhere in the sandbox.
-TEST(PhotoDirectorySummaryCli,
-     SuccessWritesOnlySingleJsonWithNoNewEntries) {
+TEST(PhotoDirectorySummaryCli, SuccessWritesOnlySingleJsonWithNoNewEntries) {
   const auto sandbox = CreateTestDir();
   const auto image_path = sandbox / "photos";
   CreateDirIfNotExists(image_path, /*recursive=*/true);

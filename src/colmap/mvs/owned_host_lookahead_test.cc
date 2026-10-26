@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "colmap/mvs/owned_host_lookahead.h"
+
 #include "colmap/mvs/owned_pair_run.h"
 
 #include <atomic>
@@ -31,7 +32,8 @@ struct Snapshot {
       : lifetime(lifetime), payload(8, static_cast<int>(job + 10)) {
     const int count = ++lifetime.live;
     int peak = lifetime.peak.load();
-    while (peak < count && !lifetime.peak.compare_exchange_weak(peak, count)) {}
+    while (peak < count && !lifetime.peak.compare_exchange_weak(peak, count)) {
+    }
   }
   ~Snapshot() {
     --lifetime.live;
@@ -91,7 +93,8 @@ struct Journal {
   std::vector<Observation> entries;
 };
 
-TEST(OwnedHostLookahead, UnstartedAndPreExecutionOwnersDropSnapshotsBeforeRetirement) {
+TEST(OwnedHostLookahead,
+     UnstartedAndPreExecutionOwnersDropSnapshotsBeforeRetirement) {
   // Reproduce consumption after active admission, then each failure boundary
   // before an actual owner can take its snapshot from the outer handoff array.
   for (const int fail_launch : {0, 1, -1}) {
@@ -103,19 +106,23 @@ TEST(OwnedHostLookahead, UnstartedAndPreExecutionOwnersDropSnapshotsBeforeRetire
     });
     future.Join();
     std::atomic<int> release_count{0};
-    PairCoordinator coordinator(PairDispatch::kPair, {100, 100}, {10, 10},
-        {{{20, 20}, {20, 20}}}, std::chrono::milliseconds(1000),
-        [&](const PairEvent& event) {
-          if (event.event == "ledger_release") {
-            EXPECT_EQ(lifetime.live.load(), 0);
-            ++release_count;
-          }
-        });
+    PairCoordinator coordinator(PairDispatch::kPair,
+                                {100, 100},
+                                {10, 10},
+                                {{{20, 20}, {20, 20}}},
+                                std::chrono::milliseconds(1000),
+                                [&](const PairEvent& event) {
+                                  if (event.event == "ledger_release") {
+                                    EXPECT_EQ(lifetime.live.load(), 0);
+                                    ++release_count;
+                                  }
+                                });
     auto handoff = future.Consume();
     ASSERT_EQ(lifetime.live.load(), 2);
     int launched = 0;
     auto factory = [&](std::function<void()> fn) {
-      if (launched++ == fail_launch) throw std::runtime_error("owner launch failed");
+      if (launched++ == fail_launch)
+        throw std::runtime_error("owner launch failed");
       return std::thread(std::move(fn));
     };
     auto run = [&](size_t slot) {
@@ -131,10 +138,14 @@ TEST(OwnedHostLookahead, UnstartedAndPreExecutionOwnersDropSnapshotsBeforeRetire
       coordinator.AwaitOutputs(slot);
     };
     auto observer = [&](size_t slot, const char* event) {
-      if (std::string(event) == "cleanup_complete") EXPECT_EQ(handoff[slot], nullptr);
+      if (std::string(event) == "cleanup_complete")
+        EXPECT_EQ(handoff[slot], nullptr);
     };
-    EXPECT_THROW(RunPairOwners(coordinator, run, observer, factory,
-                             [&](size_t slot) { handoff[slot].reset(); }),
+    EXPECT_THROW(RunPairOwners(coordinator,
+                               run,
+                               observer,
+                               factory,
+                               [&](size_t slot) { handoff[slot].reset(); }),
                  std::runtime_error);
     EXPECT_EQ(lifetime.live.load(), 0);
     EXPECT_EQ(lifetime.destroyed.load(), 2);
@@ -144,14 +155,21 @@ TEST(OwnedHostLookahead, UnstartedAndPreExecutionOwnersDropSnapshotsBeforeRetire
 }
 
 TEST(OwnedHostLookahead, UnprovenInputCleanupCannotReleaseActiveCredits) {
-  PairCoordinator coordinator(PairDispatch::kPair, {100, 100}, {10, 10},
-      {{{20, 20}, {20, 20}}}, std::chrono::milliseconds(1000));
+  PairCoordinator coordinator(PairDispatch::kPair,
+                              {100, 100},
+                              {10, 10},
+                              {{{20, 20}, {20, 20}}},
+                              std::chrono::milliseconds(1000));
   auto no_thread = [](std::function<void()>) -> std::thread {
     throw std::runtime_error("owner launch failed");
   };
-  EXPECT_THROW(RunPairOwners(coordinator, [](size_t) {},
-      [](size_t, const char*) {}, no_thread,
-      [](size_t) { throw std::runtime_error("input cleanup not proven"); }),
+  EXPECT_THROW(
+      RunPairOwners(
+          coordinator,
+          [](size_t) {},
+          [](size_t, const char*) {},
+          no_thread,
+          [](size_t) { throw std::runtime_error("input cleanup not proven"); }),
       std::runtime_error);
   EXPECT_EQ(coordinator.ReservedBytes().host, 50);
   EXPECT_EQ(coordinator.ReservedBytes().device, 50);
@@ -201,8 +219,8 @@ TEST(OwnedHostLookahead, SequentialPairJoinsBeforeConsumerAdmission) {
     EXPECT_EQ(lifetime.live.load(), 1);
     EXPECT_THROW(lookahead.Consume(), std::logic_error);
     EXPECT_THROW(lookahead.Start([](size_t, const std::atomic<bool>&) {
-                   return std::unique_ptr<Snapshot>();
-                 }),
+      return std::unique_ptr<Snapshot>();
+    }),
                  std::logic_error);
     EXPECT_EQ(consumer_admissions, 0);
     allow_a.set_value();
@@ -272,8 +290,9 @@ TEST(OwnedHostLookahead, PreparationErrorsStopJobsAndCleanBeforeRelease) {
       EXPECT_EQ(std::string(error.what()),
                 failed_job == 0 ? "prep A failed" : "prep B failed");
     }
-    EXPECT_EQ(jobs, failed_job == 0 ? std::vector<size_t>{0}
-                                  : (std::vector<size_t>{0, 1}));
+    EXPECT_EQ(
+        jobs,
+        failed_job == 0 ? std::vector<size_t>{0} : (std::vector<size_t>{0, 1}));
     EXPECT_EQ(lifetime.live.load(), 0);
     EXPECT_EQ(lifetime.destroyed.load(), static_cast<int>(failed_job + 1));
     journal.ExpectRelease(0, static_cast<int>(failed_job + 1));
@@ -288,16 +307,15 @@ TEST(OwnedHostLookahead, ThreadFactoryFailureReleasesWithoutStartingBuilder) {
   Journal journal(lifetime);
   int builder_calls = 0;
   Lookahead lookahead(kCharge, journal.Observer());
-  EXPECT_THROW(
-      lookahead.Start(
-          [&](size_t job, const std::atomic<bool>&) {
-            ++builder_calls;
-            return std::make_unique<Snapshot>(lifetime, job);
-          },
-          [](std::function<void()>) -> std::thread {
-            throw std::runtime_error("thread creation failed");
-          }),
-      std::runtime_error);
+  EXPECT_THROW(lookahead.Start(
+                   [&](size_t job, const std::atomic<bool>&) {
+                     ++builder_calls;
+                     return std::make_unique<Snapshot>(lifetime, job);
+                   },
+                   [](std::function<void()>) -> std::thread {
+                     throw std::runtime_error("thread creation failed");
+                   }),
+               std::runtime_error);
   EXPECT_EQ(builder_calls, 0);
   EXPECT_EQ(lifetime.live.load(), 0);
   EXPECT_EQ(lifetime.destroyed.load(), 0);
@@ -366,11 +384,8 @@ TEST(OwnedHostLookahead, OutputFailureUnwindsAndDrainsActivePreparation) {
 TEST(OwnedHostLookahead, ObserverExceptionsDoNotLeakOrEscapeDestructor) {
   // Cover both synchronous and worker notifications, including throwing from
   // failure reporting itself and from release during scope-unwind cleanup.
-  for (const std::string throwing_event : {"reserved",
-                                           "job_done",
-                                           "prep_done",
-                                           "consume",
-                                           "release"}) {
+  for (const std::string throwing_event :
+       {"reserved", "job_done", "prep_done", "consume", "release"}) {
     SCOPED_TRACE(throwing_event);
     Lifetime lifetime;
     Journal journal(lifetime);
@@ -398,7 +413,7 @@ TEST(OwnedHostLookahead, ObserverExceptionsDoNotLeakOrEscapeDestructor) {
       }
     }
     EXPECT_EQ(lifetime.live.load(), 0);
-    const int expected = throwing_event == "reserved" ? 0
+    const int expected = throwing_event == "reserved"   ? 0
                          : throwing_event == "job_done" ? 1
                                                         : 2;
     EXPECT_EQ(lifetime.destroyed.load(), expected);
@@ -413,13 +428,13 @@ TEST(OwnedHostLookahead, ThrowingReleaseObserverIsSuppressedDuringDestruction) {
   Lifetime lifetime;
   Journal journal(lifetime);
   {
-    Lookahead lookahead(
-        kCharge, [&](const char* event, int job, uint64_t reserved) {
-          journal.Record(event, job, reserved);
-          if (std::string(event) == "release") {
-            throw std::runtime_error("release observer failed");
-          }
-        });
+    Lookahead lookahead(kCharge,
+                        [&](const char* event, int job, uint64_t reserved) {
+                          journal.Record(event, job, reserved);
+                          if (std::string(event) == "release") {
+                            throw std::runtime_error("release observer failed");
+                          }
+                        });
     lookahead.Start([&](size_t job, const std::atomic<bool>&) {
       return std::make_unique<Snapshot>(lifetime, job);
     });

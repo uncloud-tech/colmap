@@ -26,9 +26,15 @@ inline int ParseOwnedTileThreads(const std::string& text) {
 template <class Launch>
 void DispatchOwnedTile(int threads, Launch launch) {
   switch (ValidateOwnedTileThreads(threads)) {
-    case 8: launch(std::integral_constant<int, 8>{}); break;
-    case 16: launch(std::integral_constant<int, 16>{}); break;
-    case 32: launch(std::integral_constant<int, 32>{}); break;
+    case 8:
+      launch(std::integral_constant<int, 8>{});
+      break;
+    case 16:
+      launch(std::integral_constant<int, 16>{});
+      break;
+    case 32:
+      launch(std::integral_constant<int, 32>{});
+      break;
   }
 }
 

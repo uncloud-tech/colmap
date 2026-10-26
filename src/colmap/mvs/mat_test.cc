@@ -95,15 +95,16 @@ TEST_F(MatReadTest, MatchesLegacyBitsAndLayouts) {
 
 TEST_F(MatReadTest, PreservesLegacyHeaderExtraction) {
   const std::string payload = FloatPayload(6);
-  for (const std::string header : {"2&1&3&", " 2 &\t1 &\n3 &",
-                                   "2x1y3z", "+2&+1&+3&", "02&01&03&"}) {
+  for (const std::string header :
+       {"2&1&3&", " 2 &\t1 &\n3 &", "2x1y3z", "+2&+1&+3&", "02&01&03&"}) {
     SCOPED_TRACE(header);
     WriteFile(header + payload);
     std::ifstream old_stream(path_, std::ios::binary);
     SetFullPrecTextStream(old_stream);
     size_t width = 0, height = 0, depth = 0;
     char separator;
-    old_stream >> width >> separator >> height >> separator >> depth >> separator;
+    old_stream >> width >> separator >> height >> separator >> depth >>
+        separator;
     ASSERT_TRUE(old_stream);
     std::vector<float> old_data(width * height * depth);
     ReadBinaryLittleEndian<float>(&old_stream, &old_data);
@@ -135,13 +136,24 @@ TEST_F(MatReadTest, ProductionChunkBoundaries) {
 TEST_F(MatReadTest, RejectsInvalidDimensionsAndHeadersBeforeResize) {
   const std::string max = std::to_string(std::numeric_limits<size_t>::max());
   const std::string headers[] = {
-      "", "1&", "1&1&", "&1&1&", "0&1&1&", "1&0&1&", "1&1&0&",
-      "-1&1&1&", "a&1&1&",
-      max + "0&1&1&", max + "&2&1&", "1&" + max + "&2&",
-      max + "&1&1&", std::to_string(std::numeric_limits<size_t>::max() /
-                                    sizeof(float) + 1) + "&1&1&",
-      std::to_string(std::numeric_limits<std::streamoff>::max() /
-                     sizeof(float) + 1) + "&1&1&"};
+      "",
+      "1&",
+      "1&1&",
+      "&1&1&",
+      "0&1&1&",
+      "1&0&1&",
+      "1&1&0&",
+      "-1&1&1&",
+      "a&1&1&",
+      max + "0&1&1&",
+      max + "&2&1&",
+      "1&" + max + "&2&",
+      max + "&1&1&",
+      std::to_string(std::numeric_limits<size_t>::max() / sizeof(float) + 1) +
+          "&1&1&",
+      std::to_string(
+          std::numeric_limits<std::streamoff>::max() / sizeof(float) + 1) +
+          "&1&1&"};
   for (const auto& header : headers) {
     SCOPED_TRACE(header);
     WriteFile(header);
@@ -197,7 +209,8 @@ TEST(Mat, ChunkedPayloadAndEndianBits) {
       std::string expected = payload;
       if (!little_endian) {
         for (size_t offset = 0; offset < expected.size(); offset += 4) {
-          std::reverse(expected.begin() + offset, expected.begin() + offset + 4);
+          std::reverse(expected.begin() + offset,
+                       expected.begin() + offset + 4);
         }
       }
       EXPECT_EQ(std::memcmp(data.data(), expected.data(), expected.size()), 0);

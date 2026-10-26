@@ -3,8 +3,6 @@
 
 #include "colmap/util/logging.h"
 
-#include <OpenImageIO/imageio.h>
-
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -12,6 +10,8 @@
 #include <set>
 #include <stdexcept>
 #include <utility>
+
+#include <OpenImageIO/imageio.h>
 
 #if defined(__linux__) || defined(__APPLE__)
 #include <sys/stat.h>
@@ -33,8 +33,7 @@ uint64_t Mul(uint64_t a, uint64_t b) {
 }
 uint64_t Margin(uint64_t bytes) {
   // Single 3% forecast margin, rounded up; not a physical allocation bound.
-  return Add(bytes, Add(Mul(bytes / 100, 3),
-                        (Mul(bytes % 100, 3) + 99) / 100));
+  return Add(bytes, Add(Mul(bytes / 100, 3), (Mul(bytes % 100, 3) + 99) / 100));
 }
 // VLFeat gaussian filter charge (imopv.c _vl_new_gaussian_fitler_f):
 // 4 bytes * (2*ceil(3*sigma)+1) floats, with vl_ceil_d semantics (plain ceil).
@@ -50,7 +49,7 @@ BankFileIdentity Identify(const std::filesystem::path& path) {
   // Capture object identity and change metadata together. Size/mtime alone
   // cannot detect atomic replacement preserving timestamps, or an in-place
   // write followed by restoration of mtime. Do not truncate nanoseconds.
-  struct stat info {};
+  struct stat info{};
   if (::stat(resolved.c_str(), &info) != 0) {
     throw std::runtime_error("Cannot stat resident input");
   }
@@ -64,14 +63,19 @@ BankFileIdentity Identify(const std::filesystem::path& path) {
   const auto modified = info.st_mtim;
   const auto changed = info.st_ctim;
 #endif
-  return {resolved, static_cast<uintmax_t>(info.st_size),
+  return {resolved,
+          static_cast<uintmax_t>(info.st_size),
           static_cast<uintmax_t>(info.st_dev),
-          static_cast<uintmax_t>(info.st_ino), modified.tv_sec, modified.tv_nsec,
-          changed.tv_sec, changed.tv_nsec};
+          static_cast<uintmax_t>(info.st_ino),
+          modified.tv_sec,
+          modified.tv_nsec,
+          changed.tv_sec,
+          changed.tv_nsec};
 #else
   // Resident mode must fail closed rather than silently use a weaker identity
   // on platforms without the checked file-object/change metadata above.
-  throw std::runtime_error("Resident input identity unsupported on this platform");
+  throw std::runtime_error(
+      "Resident input identity unsupported on this platform");
 #endif
 }
 void CheckIdentity(const BankFileIdentity& identity) {
@@ -97,8 +101,10 @@ bool SameMetadata(const BankInput& a, const BankInput& b) {
          std::equal(a.image.GetR(), a.image.GetR() + 9, b.image.GetR()) &&
          std::equal(a.image.GetT(), a.image.GetT() + 3, b.image.GetT());
 }
-uint64_t MapBytes(const FileIdentity& file, size_t channels,
-                  uint64_t* width = nullptr, uint64_t* height = nullptr) {
+uint64_t MapBytes(const FileIdentity& file,
+                  size_t channels,
+                  uint64_t* width = nullptr,
+                  uint64_t* height = nullptr) {
   std::ifstream stream(file.path, std::ios::binary);
   uint64_t w = 0, h = 0, d = 0;
   char a = 0, b = 0, c = 0;
@@ -142,7 +148,8 @@ Layout Resolve(const std::vector<BankJob>& jobs) {
   for (const auto& job : jobs) {
     if (!job.options.geom_consistency || job.options.allow_missing_files ||
         job.source_image_idxs.empty()) {
-      throw std::invalid_argument("Resident bank requires complete geometry inputs");
+      throw std::invalid_argument(
+          "Resident bank requires complete geometry inputs");
     }
     for (const auto& image : job.images) {
       if (!image.GetBitmap().IsEmpty()) {
@@ -154,7 +161,8 @@ Layout Resolve(const std::vector<BankJob>& jobs) {
     required.insert(job.reference_image_idx);
     if (required.size() != job.source_image_idxs.size() + 1 ||
         job.inputs.size() != required.size()) {
-      throw std::invalid_argument("Duplicate or incomplete resident input mapping");
+      throw std::invalid_argument(
+          "Duplicate or incomplete resident input mapping");
     }
     std::vector<int> mapping(job.images.size(), -1);
     // Input-ordinal -> layer mapping: one entry per job input, in job.inputs
@@ -179,8 +187,8 @@ Layout Resolve(const std::vector<BankJob>& jobs) {
         throw std::invalid_argument("Resident job/input metadata mismatch");
       }
       std::vector<FileIdentity> ids = {Identify(input.image.GetPath()),
-                                      Identify(input.depth_path),
-                                      Identify(input.normal_path)};
+                                       Identify(input.depth_path),
+                                       Identify(input.normal_path)};
       size_t layer = 0;
       for (; layer < result.layers.size(); ++layer) {
         const auto& prior = result.identities[layer];
@@ -197,9 +205,12 @@ Layout Resolve(const std::vector<BankJob>& jobs) {
         }
         BankLayer entry;
         entry.input = input;
-        entry.input.image = Image(ids[0].path, input.image.GetWidth(),
-                                  input.image.GetHeight(), input.image.GetK(),
-                                  input.image.GetR(), input.image.GetT());
+        entry.input.image = Image(ids[0].path,
+                                  input.image.GetWidth(),
+                                  input.image.GetHeight(),
+                                  input.image.GetK(),
+                                  input.image.GetR(),
+                                  input.image.GetT());
         entry.input.depth_path = ids[1].path;
         entry.input.normal_path = ids[2].path;
         result.layers.push_back(std::move(entry));
@@ -223,17 +234,22 @@ Layout Resolve(const std::vector<BankJob>& jobs) {
   for (const auto& job : jobs) {
     metadata = Add(metadata, Mul(job.images.size(), sizeof(Image)));
     metadata = Add(metadata, Mul(job.inputs.size(), sizeof(BankInput) + 512));
-    metadata = Add(metadata, Mul(job.source_image_idxs.size(), 2 * sizeof(int)));
+    metadata =
+        Add(metadata, Mul(job.source_image_idxs.size(), 2 * sizeof(int)));
   }
-  metadata = Add(metadata, Mul(result.layers.size(),
-      sizeof(BankLayer) + 3 * sizeof(FileIdentity) + 512));
+  metadata = Add(metadata,
+                 Mul(result.layers.size(),
+                     sizeof(BankLayer) + 3 * sizeof(FileIdentity) + 512));
   for (size_t i = 0; i < result.layers.size(); ++i) {
     const auto& layer = result.layers[i];
     const auto& image = layer.input.image;
     const uint64_t area = Mul(image.GetWidth(), image.GetHeight());
-    if (image.GetWidth() > static_cast<size_t>(std::numeric_limits<int>::max()) ||
-        image.GetHeight() > static_cast<size_t>(std::numeric_limits<int>::max())) {
-      throw std::invalid_argument("Resident image exceeds bitmap dimension range");
+    if (image.GetWidth() >
+            static_cast<size_t>(std::numeric_limits<int>::max()) ||
+        image.GetHeight() >
+            static_cast<size_t>(std::numeric_limits<int>::max())) {
+      throw std::invalid_argument(
+          "Resident image exceeds bitmap dimension range");
     }
     result.width = std::max(result.width, image.GetWidth());
     result.height = std::max(result.height, image.GetHeight());
@@ -241,7 +257,8 @@ Layout Resolve(const std::vector<BankJob>& jobs) {
     const auto& ids = result.identities[i];
     // Header-only OIIO inspection: never decode before the whole-bank check.
     auto reader = OIIO::ImageInput::open(ids[0].path.u8string());
-    if (!reader) throw std::invalid_argument("Unreadable resident image header");
+    if (!reader)
+      throw std::invalid_argument("Unreadable resident image header");
     const auto spec = reader->spec();
     reader->close();
     if (spec.width <= 0 || spec.height <= 0 || spec.nchannels <= 0) {
@@ -266,13 +283,13 @@ Layout Resolve(const std::vector<BankJob>& jobs) {
     const float sigma_x = std::max(kEpsilon, kSigmaScale * (scale_x - 1.0f));
     const float sigma_y = std::max(kEpsilon, kSigmaScale * (scale_y - 1.0f));
     const uint64_t filters =
-        sigma_x == sigma_y ? GaussianFilterBytes(sigma_x)
-                           : Add(GaussianFilterBytes(sigma_x),
-                                 GaussianFilterBytes(sigma_y));
+        sigma_x == sigma_y
+            ? GaussianFilterBytes(sigma_x)
+            : Add(GaussianFilterBytes(sigma_x), GaussianFilterBytes(sigma_y));
     // Serial loader allowance: original decode and float maps, resample
     // destinations/copies and upload staging. Decoder internals are estimates.
-    staging = std::max(staging, Add(Add(Mul(decode, 4), depth),
-                                   Add(normal, Mul(area, 34))));
+    staging = std::max(
+        staging, Add(Add(Mul(decode, 4), depth), Add(normal, Mul(area, 34))));
     if (layer.is_reference) {
       // Explicit on-demand normal allowances, derived from the same header
       // validation as above. Owner charge: one retained 3-channel map at the
@@ -286,28 +303,32 @@ Layout Resolve(const std::vector<BankJob>& jobs) {
       const uint64_t owner = Mul(area, 12);
       result.max_ref_owner_bytes = std::max(result.max_ref_owner_bytes, owner);
       result.reference_layers += 1;
-      const uint64_t downsize_target_w = static_cast<uint64_t>(image.GetWidth());
-      const uint64_t downsize_target_h = static_cast<uint64_t>(image.GetHeight());
-      const bool downsize = layer.input.max_image_size > 0 &&
-                            (normal_w > downsize_target_w ||
-                             normal_h > downsize_target_h);
+      const uint64_t downsize_target_w =
+          static_cast<uint64_t>(image.GetWidth());
+      const uint64_t downsize_target_h =
+          static_cast<uint64_t>(image.GetHeight());
+      const bool downsize =
+          layer.input.max_image_size > 0 &&
+          (normal_w > downsize_target_w || normal_h > downsize_target_h);
       const uint64_t transient =
-          downsize ? std::max(
-              // Rescale keeps the original payload capacity, new_data and the
-              // shrink-to-fit replacement simultaneously
-              // [normal_map.cc 28,43,46]: payload + 24*a.
-              Add(normal, Add(owner, owner)),
-              // Each smoothing pass keeps new_data plus TWO full-source float
-              // temps: warp.cc DownsampleImage's smoothed vector (4*S) and
-              // the VLFeat convolution buffer of vl_imsmooth_f
-              // (imopv.c:660, 4*S); plus input-derived Gaussian filters
-              // (_vl_new_gaussian_fitler_f, imopv.c:620-639),
-              // 4*(2*ceil(3*sigma)+1) bytes per axis, with filtery aliasing
-              // filterx exactly as in vl_imsmooth_f when the float sigmas
-              // match (then charged once). vl_imconvcol_v (plain and SSE2)
-              // and ResampleImageBilinear allocate nothing.
-              Add(Add(normal, owner), Add(Mul(src_texels, 8), filters)))
-                     : normal;
+          downsize
+              ? std::max(
+                    // Rescale keeps the original payload capacity, new_data and
+                    // the shrink-to-fit replacement simultaneously
+                    // [normal_map.cc 28,43,46]: payload + 24*a.
+                    Add(normal, Add(owner, owner)),
+                    // Each smoothing pass keeps new_data plus TWO full-source
+                    // float temps: warp.cc DownsampleImage's smoothed vector
+                    // (4*S) and the VLFeat convolution buffer of vl_imsmooth_f
+                    // (imopv.c:660, 4*S); plus input-derived Gaussian filters
+                    // (_vl_new_gaussian_fitler_f, imopv.c:620-639),
+                    // 4*(2*ceil(3*sigma)+1) bytes per axis, with filtery
+                    // aliasing filterx exactly as in vl_imsmooth_f when the
+                    // float sigmas match (then charged once). vl_imconvcol_v
+                    // (plain and SSE2) and ResampleImageBilinear allocate
+                    // nothing.
+                    Add(Add(normal, owner), Add(Mul(src_texels, 8), filters)))
+              : normal;
       result.max_ref_transient_bytes =
           std::max(result.max_ref_transient_bytes, transient);
       result.normal_retained_once = Add(result.normal_retained_once, owner);
@@ -330,10 +351,11 @@ Layout Resolve(const std::vector<BankJob>& jobs) {
   }
   result.estimate_bounded.host_bytes =
       Margin(raw - result.normal_retained_once);
-  // Five bytes/texel (gray + float depth), plus one texture descriptor allowance
-  // per layer and fixed handle allowance. CUDA physical padding is not proven.
-  result.device_raw_bytes = Add(Mul(padded, 5),
-      Add(Mul(result.layers.size(), 256), 4096));
+  // Five bytes/texel (gray + float depth), plus one texture descriptor
+  // allowance per layer and fixed handle allowance. CUDA physical padding is
+  // not proven.
+  result.device_raw_bytes =
+      Add(Mul(padded, 5), Add(Mul(result.layers.size(), 256), 4096));
   result.estimate.device_bytes = Margin(result.device_raw_bytes);
   result.estimate_bounded.device_bytes = result.estimate.device_bytes;
   return result;
@@ -420,7 +442,8 @@ NormalAllowance HostInputBank::EstimateNormalAllowance(
   allowance.reference_layers = layout.reference_layers;
   return allowance;
 }
-HostInputBank::HostInputBank(std::vector<BankJob> jobs, BankLimits limits,
+HostInputBank::HostInputBank(std::vector<BankJob> jobs,
+                             BankLimits limits,
                              BankNormals normals,
                              const BankJobIdentities* identity_snapshot,
                              size_t snapshot_count)
@@ -437,8 +460,8 @@ HostInputBank::HostInputBank(std::vector<BankJob> jobs, BankLimits limits,
         "non-null pointer and positive count");
   }
   if (binds) {
-    impl_->snapshot.assign(
-        identity_snapshot, identity_snapshot + snapshot_count);
+    impl_->snapshot.assign(identity_snapshot,
+                           identity_snapshot + snapshot_count);
   }
   impl_->layout = Resolve(jobs);
   const auto estimate = normals == BankNormals::kBounded
@@ -548,7 +571,9 @@ HostInputBank::HostInputBank(std::vector<BankJob> jobs, BankLimits limits,
 HostInputBank::~HostInputBank() = default;
 HostInputBank::HostInputBank(HostInputBank&&) noexcept = default;
 HostInputBank& HostInputBank::operator=(HostInputBank&&) noexcept = default;
-const BankJob& HostInputBank::Job(size_t job) const { return impl_->jobs.at(job); }
+const BankJob& HostInputBank::Job(size_t job) const {
+  return impl_->jobs.at(job);
+}
 size_t HostInputBank::NumJobs() const { return impl_->jobs.size(); }
 const std::vector<BankLayer>& HostInputBank::Layers() const {
   return impl_->layout.layers;
@@ -563,8 +588,7 @@ const std::vector<int>& HostInputBank::SourceLayers(size_t job) const {
 }
 const NormalMap& HostInputBank::ReferenceNormal(size_t job) const {
   if (impl_->normals == BankNormals::kBounded) {
-    throw std::logic_error(
-        "bounded resident bank retains no reference normal");
+    throw std::logic_error("bounded resident bank retains no reference normal");
   }
   return impl_->layout.layers.at(ReferenceLayer(job)).reference_normal;
 }
@@ -577,10 +601,9 @@ NormalMap HostInputBank::LoadReferenceNormal(size_t layer) const {
   // invocation snapshot when bound; immutable admitted files must not be
   // replaced or rewritten between validation and consumption.
   const auto check = [&](const BankFileIdentity& id) {
-    const auto& expected_normal =
-        impl_->layer_expected.empty()
-            ? BankFileIdentity{}
-            : impl_->layer_expected.at(layer).normal;
+    const auto& expected_normal = impl_->layer_expected.empty()
+                                      ? BankFileIdentity{}
+                                      : impl_->layer_expected.at(layer).normal;
     if (!expected_normal.path.empty()) {
       CheckSnapshotIdentity(expected_normal);
     } else {

@@ -15,12 +15,12 @@ namespace owned {
 // before exposing it. Negative seeds retain legacy initialization; nonnegative
 // seeds use current reference-map coordinates only on the owned backend.
 std::unique_ptr<GpuMatPRNG> MakeOwnedPrng(int width,
-                                       int height,
-                                       cudaStream_t stream,
-                                       int random_seed);
+                                          int height,
+                                          cudaStream_t stream,
+                                          int random_seed);
 void ReinitializeOwnedPrng(GpuMatPRNG& states,
-                          cudaStream_t stream,
-                          int random_seed);
+                           cudaStream_t stream,
+                           int random_seed);
 
 }  // namespace owned
 }  // namespace mvs

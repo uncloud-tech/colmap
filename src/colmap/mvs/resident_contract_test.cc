@@ -86,7 +86,8 @@ OwnedBankContract TestContract() {
   problem0.effective_options.filter_min_num_consistent = 1;
   problem0.output_depth_path = "/ws/stereo/depth_maps/ref.geometric.bin";
   problem0.output_normal_path = "/ws/stereo/normal_maps/ref.geometric.bin";
-  problem0.inputs = {TestInput(0, "ref", true), TestInput(2, "b", false),
+  problem0.inputs = {TestInput(0, "ref", true),
+                     TestInput(2, "b", false),
                      TestInput(1, "a", false)};
 
   OwnedBankContractProblem problem1;
@@ -97,14 +98,17 @@ OwnedBankContract TestContract() {
   problem1.effective_options.depth_max = 4.0;
   problem1.output_depth_path = "/ws/stereo/depth_maps/ref2.geometric.bin";
   problem1.output_normal_path = "/ws/stereo/normal_maps/ref2.geometric.bin";
-  problem1.inputs = {TestInput(3, "c", false), TestInput(1, "ref2", true),
-                     TestInput(2, "b", false), TestInput(0, "ref", false)};
+  problem1.inputs = {TestInput(3, "c", false),
+                     TestInput(1, "ref2", true),
+                     TestInput(2, "b", false),
+                     TestInput(0, "ref", false)};
 
   contract.problems = {problem0, problem1};
   return contract;
 }
 
-std::string FindRequiredLine(const std::string& bytes, const std::string& key,
+std::string FindRequiredLine(const std::string& bytes,
+                             const std::string& key,
                              const size_t occurrence = 0) {
   const std::string needle = "\n" + key;
   size_t pos = std::string::npos;
@@ -156,14 +160,12 @@ TEST(OwnedBankContract, ExactBitRepresentationsAndHexStrings) {
   EXPECT_EQ(FindRequiredLine(bytes, "reference_name"),
             "reference_name 3 726566");
   // Calibration floats as exact 8-hex-digit bit patterns.
-  EXPECT_EQ(
-      FindRequiredLine(bytes, "calib_k"),
-      "calib_k 00000000 3f800000 40000000 40400000 40800000 40a00000 "
-      "40c00000 40e00000 41000000");
-  EXPECT_EQ(
-      FindRequiredLine(bytes, "calib_r"),
-      "calib_r 41100000 41200000 41300000 41400000 41500000 41600000 "
-      "41700000 41800000 41880000");
+  EXPECT_EQ(FindRequiredLine(bytes, "calib_k"),
+            "calib_k 00000000 3f800000 40000000 40400000 40800000 40a00000 "
+            "40c00000 40e00000 41000000");
+  EXPECT_EQ(FindRequiredLine(bytes, "calib_r"),
+            "calib_r 41100000 41200000 41300000 41400000 41500000 41600000 "
+            "41700000 41800000 41880000");
   EXPECT_EQ(FindRequiredLine(bytes, "calib_t"),
             "calib_t 3f000000 bf000000 3fc00000");
 }
@@ -177,8 +179,8 @@ TEST(OwnedBankContract, RoundtripByteExactWithNativeOrder) {
 
   const auto parsed = ParseOwnedBankContract(first);
   EXPECT_EQ(SerializeOwnedBankContract(parsed), first);
-  EXPECT_EQ(FindRequiredLine(SerializeOwnedBankContract(parsed),
-                             "opt_double depth_min", 1),
+  EXPECT_EQ(FindRequiredLine(
+                SerializeOwnedBankContract(parsed), "opt_double depth_min", 1),
             "opt_double depth_min 3ff8000000000000");
   // Input ordinals must NOT be renumbered or sorted anywhere.
   EXPECT_EQ(first, SerializeOwnedBankContract(ParseOwnedBankContract(first)));
@@ -242,9 +244,7 @@ TEST(OwnedBankContract, OrderSensitiveCanonicalBytes) {
   EXPECT_NE(base, SerializeOwnedBankContract(changed_options));
   // A changed file identity (size) changes the canonical bytes.
   auto changed_identity = contract;
-  changed_identity.problems[0]
-      .inputs[1]
-      .depth_identity.size += 1;
+  changed_identity.problems[0].inputs[1].depth_identity.size += 1;
   EXPECT_NE(base, SerializeOwnedBankContract(changed_identity));
 }
 
@@ -282,8 +282,8 @@ TEST(OwnedBankContract, RejectsMalformedAndTruncatedContracts) {
       ReplaceLineOnce(valid, "problem_count 2", "problem_count 3")));
 
   // Non-sequential problem ordinal.
-  EXPECT_ANY_THROW(ParseOwnedBankContract(
-      ReplaceLineOnce(valid, "problem 0", "problem 1")));
+  EXPECT_ANY_THROW(
+      ParseOwnedBankContract(ReplaceLineOnce(valid, "problem 0", "problem 1")));
 
   // Invalid hex content in a string field.
   EXPECT_ANY_THROW(ParseOwnedBankContract(ReplaceLineOnce(
@@ -294,14 +294,14 @@ TEST(OwnedBankContract, RejectsMalformedAndTruncatedContracts) {
       valid, "reference_name 3 726566", "reference_name 3 7265")));
 
   // Unknown line injected into the record layout.
-  EXPECT_ANY_THROW(ParseOwnedBankContract(ReplaceLineOnce(
-      valid, "version 1", "version 1\nunknown_key 42")));
+  EXPECT_ANY_THROW(ParseOwnedBankContract(
+      ReplaceLineOnce(valid, "version 1", "version 1\nunknown_key 42")));
 
   // Corrupted options line (short hex double token).
-  EXPECT_ANY_THROW(ParseOwnedBankContract(ReplaceLineOnce(
-      valid,
-      "opt_double depth_min 3ff8000000000000",
-      "opt_double depth_min 3ff800000000")));
+  EXPECT_ANY_THROW(ParseOwnedBankContract(
+      ReplaceLineOnce(valid,
+                      "opt_double depth_min 3ff8000000000000",
+                      "opt_double depth_min 3ff800000000")));
 
   // Invalid boolean.
   EXPECT_ANY_THROW(ParseOwnedBankContract(
@@ -319,7 +319,8 @@ TEST(OwnedBankContract, RejectsMalformedAndTruncatedContracts) {
   EXPECT_ANY_THROW(ParseOwnedBankContract(crlf));
 
   // Header replaced entirely (missing banner).
-  EXPECT_ANY_THROW(ParseOwnedBankContract(valid.substr(valid.find("version "))));
+  EXPECT_ANY_THROW(
+      ParseOwnedBankContract(valid.substr(valid.find("version "))));
 }
 
 TEST(OwnedBankContract, CanonicalStrictnessRejectsNoncanonicalSpellings) {
@@ -330,8 +331,8 @@ TEST(OwnedBankContract, CanonicalStrictnessRejectsNoncanonicalSpellings) {
       ReplaceLineOnce(valid, "problem_count 2", "problem_count 02")));
   EXPECT_ANY_THROW(ParseOwnedBankContract(
       ReplaceLineOnce(valid, "input_count 3", "input_count 03")));
-  EXPECT_ANY_THROW(ParseOwnedBankContract(
-      ReplaceLineOnce(valid, "reference_image_idx 0", "reference_image_idx 00")));
+  EXPECT_ANY_THROW(ParseOwnedBankContract(ReplaceLineOnce(
+      valid, "reference_image_idx 0", "reference_image_idx 00")));
 
   // Plus-signed and explicitly signed unsigned fields.
   EXPECT_ANY_THROW(ParseOwnedBankContract(
@@ -340,8 +341,8 @@ TEST(OwnedBankContract, CanonicalStrictnessRejectsNoncanonicalSpellings) {
       ReplaceLineOnce(valid, "version 1", "version +1")));
 
   // A negative integer can never appear in an unsigned field.
-  EXPECT_ANY_THROW(ParseOwnedBankContract(ReplaceLineOnce(
-      valid, "problem_count 2", "problem_count -1")));
+  EXPECT_ANY_THROW(ParseOwnedBankContract(
+      ReplaceLineOnce(valid, "problem_count 2", "problem_count -1")));
 
   // Uppercase hex is non-canonical and rejected.
   EXPECT_ANY_THROW(ParseOwnedBankContract(ReplaceLineOnce(
@@ -358,7 +359,8 @@ TEST(OwnedBankContract, UnsignedIdentityMaxValueRoundtrips) {
   // full declared range, including the maximum unsigned value.
   for (auto& problem : contract.problems) {
     for (auto& input : problem.inputs) {
-      for (auto* identity : {&input.image_identity, &input.depth_identity,
+      for (auto* identity : {&input.image_identity,
+                             &input.depth_identity,
                              &input.normal_identity}) {
         identity->device = std::numeric_limits<uintmax_t>::max();
         identity->inode = std::numeric_limits<uintmax_t>::max();
@@ -378,10 +380,10 @@ TEST(OwnedBankContract, BoundedCountsRejectInfeasibleDeclarations) {
   const auto valid = SerializeOwnedBankContract(TestContract());
   // A declared count that cannot possibly be backed by the remaining bytes
   // is rejected before any reserve(), including near-overflow spellings.
-  EXPECT_ANY_THROW(ParseOwnedBankContract(ReplaceLineOnce(
-      valid, "problem_count 2", "problem_count 999999999")));
-  EXPECT_ANY_THROW(ParseOwnedBankContract(ReplaceLineOnce(
-      valid, "input_count 3", "input_count 999999999999")));
+  EXPECT_ANY_THROW(ParseOwnedBankContract(
+      ReplaceLineOnce(valid, "problem_count 2", "problem_count 999999999")));
+  EXPECT_ANY_THROW(ParseOwnedBankContract(
+      ReplaceLineOnce(valid, "input_count 3", "input_count 999999999999")));
 }
 
 }  // namespace

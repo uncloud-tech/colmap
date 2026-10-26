@@ -41,23 +41,27 @@ TEST(ResidentRunnerSinkOrder, CancelBeforeObserver) {
     order.push_back('o');
     throw std::runtime_error("observer telemetry failure");
   };
-  EXPECT_THROW(ResidentEventSink(/*cancelled_event=*/true, do_cancel,
-                                 &observer, /*job=*/0, "cancelled"),
+  EXPECT_THROW(ResidentEventSink(/*cancelled_event=*/true,
+                                 do_cancel,
+                                 &observer,
+                                 /*job=*/0,
+                                 "cancelled"),
                std::exception);
   EXPECT_EQ(order, "co");
   // Non-cancelled events: observer runs, no cancellation (the throwing
   // observer still throws; the ordering is what this test pins).
   cancelled = false;
   order.clear();
-  EXPECT_THROW(ResidentEventSink(/*cancelled_event=*/false, do_cancel,
-                                 &observer, 0, "admitted"),
-               std::exception);
+  EXPECT_THROW(
+      ResidentEventSink(
+          /*cancelled_event=*/false, do_cancel, &observer, 0, "admitted"),
+      std::exception);
   EXPECT_EQ(order, "o");
   EXPECT_FALSE(cancelled);
   // Observer-free sinks still cancel.
   cancelled = false;
-  ResidentEventSink(/*cancelled_event=*/true, do_cancel, nullptr, 0,
-                    "cancelled");
+  ResidentEventSink(
+      /*cancelled_event=*/true, do_cancel, nullptr, 0, "cancelled");
   EXPECT_TRUE(cancelled);
 }
 
@@ -72,22 +76,28 @@ TEST(ResidentRunnerLifecycle, ThrowingCancellationObserverStillDrains) {
           throw std::runtime_error("telemetry cancelled event failed");
         }
       };
-  auto pipeline = std::make_unique<owned::NormalLookahead>(
-      std::vector<size_t>{0, 1}, /*max_future=*/1,
-      /*charge=*/4096);
+  auto pipeline =
+      std::make_unique<owned::NormalLookahead>(std::vector<size_t>{0, 1},
+                                               /*max_future=*/1,
+                                               /*charge=*/4096);
   auto pipeline_raw = pipeline.get();
   const auto sink = [pipeline_raw,
                      &throwing_observer](const owned::PairEvent& e) {
     // IDENTICAL composition to the production runner sink (Sol 3cdc fix 5).
-    ResidentEventSink(e.event == "cancelled",
-                      [pipeline_raw]() { pipeline_raw->Cancel(); },
-                      &throwing_observer, e.job, e.event.c_str());
+    ResidentEventSink(
+        e.event == "cancelled",
+        [pipeline_raw]() { pipeline_raw->Cancel(); },
+        &throwing_observer,
+        e.job,
+        e.event.c_str());
   };
   owned::PairCoordinator coordinator(
-      owned::ByteCharge{65536, 65536}, owned::ByteCharge{16384, 16384},
+      owned::ByteCharge{65536, 65536},
+      owned::ByteCharge{16384, 16384},
       /*max_concurrent_solvers=*/1,
       std::vector<owned::ByteCharge>{{4096, 4096}, {4096, 4096}},
-      /*timeout=*/std::chrono::milliseconds(2000), sink);
+      /*timeout=*/std::chrono::milliseconds(2000),
+      sink);
   // The loader blocks until cancellation is observed, then fails (no
   // payload production is needed for this regression).
   bool producer_started = false;
@@ -112,15 +122,15 @@ TEST(ResidentRunnerLifecycle, ThrowingCancellationObserverStillDrains) {
     // Bounded settling: cancellation is sticky, so a late trigger still
     // cancels and still unblocks the consumer; no hang either way.
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    coordinator.Cancel(0, std::make_exception_ptr(
-                              std::runtime_error("triggered cancellation")));
+    coordinator.Cancel(
+        0,
+        std::make_exception_ptr(std::runtime_error("triggered cancellation")));
   });
   // RunRollingOwners must drain and join despite the throwing observer,
   // and the preserved first error propagates from Finish.
-  EXPECT_THROW(owned::RunRollingOwners(
-                   coordinator, run_job,
-                   [](size_t, const char*) {}),
-               std::exception);
+  EXPECT_THROW(
+      owned::RunRollingOwners(coordinator, run_job, [](size_t, const char*) {}),
+      std::exception);
   trigger.join();
   // Join the producer before observing its non-atomic state.
   pipeline.reset();

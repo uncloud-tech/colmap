@@ -15,8 +15,9 @@
 // independent implementation validated by known NIST vectors and the
 // fixture digests; production binds through ComputeSHA256 (crypto builds).
 #include "colmap/mvs/resident_cohort_wire.h"
-#include "colmap/mvs/resident_forecast.h"
+
 #include "colmap/mvs/resident_contract.h"
+#include "colmap/mvs/resident_forecast.h"
 #include "colmap/util/logging.h"
 
 #include <cstdint>
@@ -85,8 +86,14 @@ std::string Sha(const std::string_view& bytes) {
       0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
       0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
       0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
-  uint32_t h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-                   0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+  uint32_t h[8] = {0x6a09e667,
+                   0xbb67ae85,
+                   0x3c6ef372,
+                   0xa54ff53a,
+                   0x510e527f,
+                   0x9b05688c,
+                   0x1f83d9ab,
+                   0x5be0cd19};
   std::string data(bytes);
   const uint64_t bit_len = static_cast<uint64_t>(data.size()) * 8;
   data.push_back(static_cast<char>(0x80));
@@ -94,20 +101,27 @@ std::string Sha(const std::string_view& bytes) {
   for (int i = 7; i >= 0; --i) {
     data.push_back(static_cast<char>((bit_len >> (i * 8)) & 0xff));
   }
-  auto rotr = [](uint32_t x, int n) {
-    return (x >> n) | (x << (32 - n));
-  };
+  auto rotr = [](uint32_t x, int n) { return (x >> n) | (x << (32 - n)); };
   for (size_t offset = 0; offset < data.size(); offset += 64) {
     uint32_t w[64];
     for (int i = 0; i < 16; ++i) {
-      w[i] = (static_cast<uint32_t>(static_cast<unsigned char>(data[offset + i * 4])) << 24) |
-             (static_cast<uint32_t>(static_cast<unsigned char>(data[offset + i * 4 + 1])) << 16) |
-             (static_cast<uint32_t>(static_cast<unsigned char>(data[offset + i * 4 + 2])) << 8) |
-             static_cast<uint32_t>(static_cast<unsigned char>(data[offset + i * 4 + 3]));
+      w[i] = (static_cast<uint32_t>(
+                  static_cast<unsigned char>(data[offset + i * 4]))
+              << 24) |
+             (static_cast<uint32_t>(
+                  static_cast<unsigned char>(data[offset + i * 4 + 1]))
+              << 16) |
+             (static_cast<uint32_t>(
+                  static_cast<unsigned char>(data[offset + i * 4 + 2]))
+              << 8) |
+             static_cast<uint32_t>(
+                 static_cast<unsigned char>(data[offset + i * 4 + 3]));
     }
     for (int i = 16; i < 64; ++i) {
-      const uint32_t s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
-      const uint32_t s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+      const uint32_t s0 =
+          rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+      const uint32_t s1 =
+          rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
       w[i] = w[i - 16] + s0 + w[i - 7] + s1;
     }
     uint32_t a = h[0], b = h[1], c = h[2], d = h[3];
@@ -119,11 +133,23 @@ std::string Sha(const std::string_view& bytes) {
       const uint32_t s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
       const uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
       const uint32_t t2 = s0 + maj;
-      hh = g; g = f; f = e; e = d + t1;
-      d = c; c = b; b = a; a = t1 + t2;
+      hh = g;
+      g = f;
+      f = e;
+      e = d + t1;
+      d = c;
+      c = b;
+      b = a;
+      a = t1 + t2;
     }
-    h[0] += a; h[1] += b; h[2] += c; h[3] += d;
-    h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+    h[0] += a;
+    h[1] += b;
+    h[2] += c;
+    h[3] += d;
+    h[4] += e;
+    h[5] += f;
+    h[6] += g;
+    h[7] += hh;
   }
   char out[65];
   for (int i = 0; i < 8; ++i) {
@@ -148,9 +174,8 @@ class ResidentCohortWireTest : public ::testing::Test {
     assert_wire_ = ReadFileOrDie("four-two-plus-two-provisional.cohort-wire");
     singleton_wire_ =
         ReadFileOrDie("four-all-singleton-provisional.cohort-wire");
-    contract_ =
-        ReadFileOrDieWithRoot(RESIDENT_COHORT_CONTRACT_TESTDATA_DIR,
-                              "four.contract");
+    contract_ = ReadFileOrDieWithRoot(RESIDENT_COHORT_CONTRACT_TESTDATA_DIR,
+                                      "four.contract");
     ASSERT_EQ(Sha(assert_wire_), kTwoPlusTwoFixtureSha);
     ASSERT_EQ(Sha(singleton_wire_), kAllSingletonFixtureSha);
     ASSERT_EQ(Sha(contract_), kFourContractSha);
@@ -164,10 +189,9 @@ class ResidentCohortWireTest : public ::testing::Test {
 TEST_F(ResidentCohortWireTest, FullBankWiresNeverParseAsCohortAndReverse) {
   // Distinct magic, no version negotiation, symmetric confusion refusal.
   const std::string fullbank_wire =
-      "resident-forecast\nversion 1\ncontract_sha256 " +
-      std::string(64, 'a') + "\n";
-  EXPECT_THROW(ParseResidentCohortForecast(fullbank_wire),
-               std::runtime_error);
+      "resident-forecast\nversion 1\ncontract_sha256 " + std::string(64, 'a') +
+      "\n";
+  EXPECT_THROW(ParseResidentCohortForecast(fullbank_wire), std::runtime_error);
   // A cohort wire is likewise never a full-bank wire (the full-bank
   // parser refuses the cohort magic symmetrically).
   EXPECT_THROW(ParseResidentForecast(assert_wire_, nullptr), std::exception);
@@ -181,7 +205,8 @@ TEST_F(ResidentCohortWireTest, ParsesTwoPlusTwoFixtureWithIndependentLiterals) {
   EXPECT_EQ(wire.contract_version, 1);
   EXPECT_EQ(wire.contract_raw, contract_);
   EXPECT_EQ(wire.contract_raw.size(), 15947u);
-  EXPECT_EQ(wire.qualification, "metadata_only_cpu_estimate_cohort_provisional");
+  EXPECT_EQ(wire.qualification,
+            "metadata_only_cpu_estimate_cohort_provisional");
   EXPECT_EQ(wire.completeness, "complete");
   EXPECT_EQ(wire.concurrency_basis, "rolling_reserve_declared");
   EXPECT_EQ(wire.mode, "bounded");
@@ -319,7 +344,8 @@ TEST_F(ResidentCohortWireTest, BindingAndGatesAcceptTheFrozenFixtures) {
                std::invalid_argument);
   // The committed provisional wires: every ledger fits the README caps
   // independently (40 GiB host / 32 GiB device, CLI-only).
-  VerifyResidentCohortForecastFitsCaps(wire, 40ull * 1024 * 1024 * 1024,
+  VerifyResidentCohortForecastFitsCaps(wire,
+                                       40ull * 1024 * 1024 * 1024,
                                        32ull * 1024 * 1024 * 1024,
                                        /*cli_max_concurrency=*/1);
   VerifyResidentCohortForecastFitsCaps(wire,
@@ -364,7 +390,9 @@ TEST_F(ResidentCohortWireTest, FitsCapsGateAcceptsFixtureWithReadmeCaps) {
       ParseResidentCohortForecast(assert_wire_, &Sha);
   const uint64_t host_cap = 40ull * 1024 * 1024 * 1024;
   const uint64_t device_cap = 32ull * 1024 * 1024 * 1024;
-  VerifyResidentCohortForecastFitsCaps(wire, host_cap, device_cap,
+  VerifyResidentCohortForecastFitsCaps(wire,
+                                       host_cap,
+                                       device_cap,
                                        /*cli_max_concurrency=*/1);
   // Exact-cap fit: the largest per-cohort ledger defines the minimum.
   VerifyResidentCohortForecastFitsCaps(wire,
@@ -373,13 +401,15 @@ TEST_F(ResidentCohortWireTest, FitsCapsGateAcceptsFixtureWithReadmeCaps) {
                                        /*cli_max_concurrency=*/1);
   // active_jobs above the CLI limit refuses (k must be <= the CLI max and
   // <= member_count).
-  EXPECT_THROW(VerifyResidentCohortForecastFitsCaps(wire, host_cap,
+  EXPECT_THROW(VerifyResidentCohortForecastFitsCaps(wire,
+                                                    host_cap,
                                                     device_cap,
                                                     /*cli_max_concurrency=*/0),
                std::invalid_argument);
 }
 
-TEST_F(ResidentCohortWireTest, ParametersGateSeparatesProvisionalFromExecutable) {
+TEST_F(ResidentCohortWireTest,
+       ParametersGateSeparatesProvisionalFromExecutable) {
   // Provisional cohort wires PARSE and pass the wire-internal gates but
   // are never execution-qualified. An executable-labeled wire with BOTH
   // fingerprints is required by the execution parameter gate, and only the
@@ -391,18 +421,21 @@ TEST_F(ResidentCohortWireTest, ParametersGateSeparatesProvisionalFromExecutable)
   ASSERT_NE(qual_line, std::string::npos);
   const std::string label = "metadata_only_cpu_estimate_cohort";
   const std::string label_hex = HexEncodeTest(label);
-  executable.replace(qual_line, executable.find('\n', qual_line) - qual_line,
-                     qual_key + " " + std::to_string(label.size()) + " " + label_hex);
+  executable.replace(
+      qual_line,
+      executable.find('\n', qual_line) - qual_line,
+      qual_key + " " + std::to_string(label.size()) + " " + label_hex);
   // A real digest-text shape (exact 64 lowercase hex characters).
   const std::string digest(64, 'e');  // synthetic, not a build identity
   EXPECT_EQ(digest.size(), 64u);
   const std::string fp_line = "build_allocation_fingerprint absent";
-  for (const char* field : {"build_allocation_fingerprint", "source_fingerprint"}) {
+  for (const char* field :
+       {"build_allocation_fingerprint", "source_fingerprint"}) {
     const std::string needle = std::string(field) + " absent";
     const size_t at = executable.find(needle);
     ASSERT_NE(at, std::string::npos);
-    executable.replace(at, needle.size(),
-                       std::string(field) + " 64 " + HexEncodeTest(digest));
+    executable.replace(
+        at, needle.size(), std::string(field) + " 64 " + HexEncodeTest(digest));
   }
   const CohortForecastWire exec_wire =
       ParseResidentCohortForecast(executable, &Sha);
@@ -412,13 +445,13 @@ TEST_F(ResidentCohortWireTest, ParametersGateSeparatesProvisionalFromExecutable)
   // Provisional fixture wire: parameters gate refuses (not executable).
   const CohortForecastWire provisional =
       ParseResidentCohortForecast(assert_wire_, &Sha);
-  EXPECT_THROW(VerifyResidentCohortForecastParameters(provisional,
-                                                      "any-digest"),
-               std::invalid_argument);
+  EXPECT_THROW(
+      VerifyResidentCohortForecastParameters(provisional, "any-digest"),
+      std::invalid_argument);
   // Executable wire: only the exact compiled cohort-scoped digest accepts.
-  EXPECT_THROW(VerifyResidentCohortForecastParameters(exec_wire,
-                     std::string(64, 'd')),
-               std::invalid_argument);
+  EXPECT_THROW(
+      VerifyResidentCohortForecastParameters(exec_wire, std::string(64, 'd')),
+      std::invalid_argument);
   VerifyResidentCohortForecastParameters(exec_wire, digest);
   // An empty compiled fingerprint (no cohort closure built) refuses.
   EXPECT_THROW(VerifyResidentCohortForecastParameters(exec_wire, ""),
@@ -437,8 +470,8 @@ TEST_F(ResidentCohortWireTest, ProcessOnceParityParseRuleAndOneSidedReviewedR) {
     const std::string needle = "process_once host 2147483648 device 2147483648";
     const size_t at = wrong.find(needle);
     ASSERT_NE(at, std::string::npos);
-    wrong.replace(at, needle.size(),
-                  "process_once host 2147483647 device 2147483648");
+    wrong.replace(
+        at, needle.size(), "process_once host 2147483647 device 2147483648");
     expect_parses_refused(wrong);
   }
   {
@@ -446,8 +479,8 @@ TEST_F(ResidentCohortWireTest, ProcessOnceParityParseRuleAndOneSidedReviewedR) {
     const std::string needle = "process_once host 2147483648 device 2147483648";
     const size_t at = wrong.find(needle);
     ASSERT_NE(at, std::string::npos);
-    wrong.replace(at, needle.size(),
-                  "process_once host 2147483648 device 4294967296");
+    wrong.replace(
+        at, needle.size(), "process_once host 2147483648 device 4294967296");
     expect_parses_refused(wrong);
   }
   // Parse parity with the canonical Python parser: max_future is any
@@ -490,7 +523,8 @@ TEST_F(ResidentCohortWireTest, ProcessOnceParityParseRuleAndOneSidedReviewedR) {
     // preflight_max host = 2147488858
     replace_first("preflight_max host 2147488607 device 2147494419",
                   "preflight_max host 2147488858 device 2147494419");
-    const CohortForecastWire one_sided_wire = ParseResidentCohortForecast(one_sided, &Sha);
+    const CohortForecastWire one_sided_wire =
+        ParseResidentCohortForecast(one_sided, &Sha);
     EXPECT_EQ(one_sided_wire.cohorts[0].reviewed_bank_host_bytes, 4000u);
     EXPECT_EQ(one_sided_wire.cohorts[0].bank_charge_host_bytes, 4000u);
     EXPECT_EQ(one_sided_wire.cohorts[0].bank_charge_device_bytes,
@@ -511,8 +545,7 @@ TEST_F(ResidentCohortWireTest, ProcessOnceParityParseRuleAndOneSidedReviewedR) {
 
 TEST_F(ResidentCohortWireTest, MutatedWiresRefusePerRule) {
   auto expect_parses_refused = [&](const std::string& mutated) {
-    EXPECT_THROW(ParseResidentCohortForecast(mutated, &Sha),
-                 std::exception)
+    EXPECT_THROW(ParseResidentCohortForecast(mutated, &Sha), std::exception)
         << "a mutated wire must refuse: " << mutated.substr(0, 64);
   };
   // Truncated final line and trailing content.
@@ -549,8 +582,7 @@ TEST_F(ResidentCohortWireTest, MutatedWiresRefusePerRule) {
     const std::string needle = "rolling active_jobs 1 host 445 device 5064";
     const size_t at = zero.find(needle);
     ASSERT_NE(at, std::string::npos);
-    zero.replace(at, needle.size(),
-                 "rolling active_jobs 0 host 0 device 0");
+    zero.replace(at, needle.size(), "rolling active_jobs 0 host 0 device 0");
     expect_parses_refused(zero);
   }
   {
@@ -653,7 +685,9 @@ TEST_F(ResidentCohortWireTest, MutatedWiresRefusePerRule) {
     const std::string needle = "build_allocation_fingerprint absent";
     const size_t at = bare.find(needle);
     ASSERT_NE(at, std::string::npos);
-    bare.replace(at, needle.size(), "build_allocation_fingerprint " + std::string(64, 'f'));
+    bare.replace(at,
+                 needle.size(),
+                 "build_allocation_fingerprint " + std::string(64, 'f'));
     expect_parses_refused(bare);
   }
   {
@@ -661,7 +695,10 @@ TEST_F(ResidentCohortWireTest, MutatedWiresRefusePerRule) {
     const std::string needle = "build_allocation_fingerprint absent";
     const size_t at = short_fp.find(needle);
     ASSERT_NE(at, std::string::npos);
-    short_fp.replace(at, needle.size(), "build_allocation_fingerprint 63 " + std::string(126, 'f'));
+    short_fp.replace(
+        at,
+        needle.size(),
+        "build_allocation_fingerprint 63 " + std::string(126, 'f'));
     expect_parses_refused(short_fp);
   }
   // Executable qualification with absent fingerprints refuses at parse
@@ -669,17 +706,25 @@ TEST_F(ResidentCohortWireTest, MutatedWiresRefusePerRule) {
   {
     std::string executable = assert_wire_;
     const std::string needle =
-        "qualification 45 6d657461646174615f6f6e6c795f6370755f657374696d6174655f636f686f72745f70726f766973696f6e616c";
+        "qualification 45 "
+        "6d657461646174615f6f6e6c795f6370755f657374696d6174655f636f686f72745f70"
+        "726f766973696f6e616c";
     const size_t at = executable.find(needle);
     ASSERT_NE(at, std::string::npos);
-    executable.replace(at, needle.size(), "qualification 33 6d657461646174615f6f6e6c795f6370755f657374696d6174655f636f686f7274");
+    executable.replace(
+        at,
+        needle.size(),
+        "qualification 33 "
+        "6d657461646174615f6f6e6c795f6370755f657374696d6174655f636f686f7274");
     expect_parses_refused(executable);
   }
   // Unknown qualification label refuses.
   {
     std::string unknown = assert_wire_;
     const std::string needle =
-        "qualification 45 6d657461646174615f6f6e6c795f6370755f657374696d6174655f636f686f72745f70726f766973696f6e616c";
+        "qualification 45 "
+        "6d657461646174615f6f6e6c795f6370755f657374696d6174655f636f686f72745f70"
+        "726f766973696f6e616c";
     const size_t at = unknown.find(needle);
     ASSERT_NE(at, std::string::npos);
     unknown.replace(at, needle.size(), "qualification 3 616263");

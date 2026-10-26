@@ -150,7 +150,9 @@ TEST(ModelAnalyzer, FailedModelReadReturnsFailureOnlyForJson) {
     std::ofstream stream(corrupt / "cameras.txt");
     stream << "not a camera\n";
   }
-  { std::ofstream stream(file_path); }
+  {
+    std::ofstream stream(file_path);
+  }
   const auto before = Snapshot(root);
   for (const auto& path :
        {root / "missing", empty_directory, file_path, corrupt, partial}) {

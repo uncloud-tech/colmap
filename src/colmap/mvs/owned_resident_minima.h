@@ -32,9 +32,9 @@ namespace owned {
 // canonical Python margin_bytes), shared here so every consumer applies the
 // same single margin exactly once.
 inline uint64_t MarginBytes(uint64_t bytes) {
-  return CheckedAdd(bytes, CheckedAdd(
-      CheckedMultiply(bytes / 100, 3),
-      (CheckedMultiply(bytes % 100, 3) + 99) / 100));
+  return CheckedAdd(bytes,
+                    CheckedAdd(CheckedMultiply(bytes / 100, 3),
+                               (CheckedMultiply(bytes % 100, 3) + 99) / 100));
 }
 
 struct ResidentPrivateMinimum {
@@ -51,9 +51,9 @@ struct ResidentPrivateMinimum {
 // HostInputBank::EstimateBounded). Device terms: the current-owned rotation
 // phase envelope plus source/pose arrays (692 bytes per source including the
 // private int layer mapping), both live reference arrays during rebinding
-// (2 * area), and the retained 32-byte calibration policy allowance. The default
-// retained mask conservatively covers filtered and unfiltered executions;
-// requested spans are not pitched physical allocation guarantees.
+// (2 * area), and the retained 32-byte calibration policy allowance. The
+// default retained mask conservatively covers filtered and unfiltered
+// executions; requested spans are not pitched physical allocation guarantees.
 inline ResidentPrivateMinimum ResidentPrivateLogicalMinimum(
     const uint64_t width,
     const uint64_t height,
@@ -68,8 +68,7 @@ inline ResidentPrivateMinimum ResidentPrivateLogicalMinimum(
   if (include_owner_normal) {
     minimum.host = CheckedAdd(minimum.host, CheckedMultiply(12, area));
   }
-  uint64_t device =
-      BuildOwnedRotationMemoryPhases(width, height, sources).peak;
+  uint64_t device = BuildOwnedRotationMemoryPhases(width, height, sources).peak;
   device = CheckedAdd(device, CheckedMultiply(2, area));
   device = CheckedAdd(device, CheckedMultiply(692, sources));
   device = CheckedAdd(device, 32);

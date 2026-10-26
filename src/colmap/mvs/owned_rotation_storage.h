@@ -144,10 +144,11 @@ inline size_t ValidateSlot(const RotationSlotLayout& slot) {
 }
 }  // namespace detail
 
-// Source-level logical inventory only: no pitch estimate or driver-memory bound.
+// Source-level logical inventory only: no pitch estimate or driver-memory
+// bound.
 inline OwnedRotationLayout BuildOwnedRotationLayout(size_t width,
-                                                   size_t height,
-                                                   size_t sources) {
+                                                    size_t height,
+                                                    size_t sources) {
   detail::CheckDimension(width);
   detail::CheckDimension(height);
   detail::CheckDimension(sources);

@@ -7,20 +7,18 @@
 // CPU-only builds. The actual cohort EXECUTION path (wire gates, bank
 // construction, owners) is covered by the CUDA-only surfaces.
 #include "colmap/exe/mvs.h"
+#include "colmap/util/testing.h"
 
 #include <cerrno>
-#include <stdexcept>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
-#include "colmap/util/testing.h"
-
-#include <gtest/gtest.h>
-
 #include <fcntl.h>
+#include <gtest/gtest.h>
 #include <unistd.h>
 
 namespace colmap {
@@ -57,10 +55,9 @@ int RunArgsExpectingError(const std::vector<std::string>& args,
       argv.push_back(const_cast<char*>(arg.c_str()));
     }
     argv.push_back(nullptr);
-    return RunPatchMatchStereoWithExecution(
-        static_cast<int>(argv.size() - 1),
-        argv.data(),
-        mvs::PatchMatchExecution::kStock);
+    return RunPatchMatchStereoWithExecution(static_cast<int>(argv.size() - 1),
+                                            argv.data(),
+                                            mvs::PatchMatchExecution::kStock);
   })();
   std::fflush(nullptr);
   std::fflush(stderr);
@@ -79,10 +76,9 @@ int RunArgs(const std::vector<std::string>& args) {
     argv.push_back(const_cast<char*>(arg.c_str()));
   }
   argv.push_back(nullptr);
-  return RunPatchMatchStereoWithExecution(
-      static_cast<int>(argv.size() - 1),
-      argv.data(),
-      mvs::PatchMatchExecution::kStock);
+  return RunPatchMatchStereoWithExecution(static_cast<int>(argv.size() - 1),
+                                          argv.data(),
+                                          mvs::PatchMatchExecution::kStock);
 }
 
 class ResidentCliCohortTest : public ::testing::Test {
@@ -96,8 +92,10 @@ class ResidentCliCohortTest : public ::testing::Test {
 
   std::vector<std::string> BaseArgs() const {
     return {"colmap",
-            "--workspace_path", workspace_.string(),
-            "--PatchMatchStereo.gpu_index", "0"};
+            "--workspace_path",
+            workspace_.string(),
+            "--PatchMatchStereo.gpu_index",
+            "0"};
   }
 
   std::filesystem::path workspace_;
@@ -156,8 +154,7 @@ TEST_F(ResidentCliCohortTest, FullBankAndCohortModesMutuallyExclusiveRefuse) {
   args.push_back("1");
   std::string log;
   EXPECT_EQ(RunArgsExpectingError(args, &log), EXIT_FAILURE);
-  EXPECT_NE(log.find("mutually exclusive (distinct wires"),
-            std::string::npos)
+  EXPECT_NE(log.find("mutually exclusive (distinct wires"), std::string::npos)
       << log;
 }
 
@@ -243,8 +240,7 @@ TEST_F(ResidentCliCohortTest, MalformedCapsRefuse) {
     args.push_back("1");
     std::string log;
     EXPECT_EQ(RunArgsExpectingError(args, &log), EXIT_FAILURE) << value;
-    EXPECT_NE(log.find("canonical unsigned decimal literal"),
-              std::string::npos)
+    EXPECT_NE(log.find("canonical unsigned decimal literal"), std::string::npos)
         << value << ": " << log;
   }
 }

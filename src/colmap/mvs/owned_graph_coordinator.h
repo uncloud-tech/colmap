@@ -24,6 +24,7 @@ class OwnerGraphLaunchState {
     if (!error) throw std::invalid_argument("Cancellation requires an error");
     cancelled_.store(true);
   }
+
  private:
   const size_t owners_;
   std::atomic<bool> cancelled_{false};

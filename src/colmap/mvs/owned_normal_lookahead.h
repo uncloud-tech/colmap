@@ -57,16 +57,18 @@ class NormalLookahead {
   static constexpr size_t kBatch = std::numeric_limits<size_t>::max();
   using Loader = std::function<NormalMap(size_t bank_layer,
                                          const std::atomic<bool>& cancelled)>;
-  using Observer = std::function<void(const char* event, size_t generation,
-                                      uint64_t reserved)>;
+  using Observer = std::function<void(
+      const char* event, size_t generation, uint64_t reserved)>;
 
   // `bank_layers` is the immutable FIFO generation -> original bank layer
   // mapping; every entry is loaded once, in order. `max_future` bounds
   // ready-but-unhanded buffers to one or two. `charge` is the caller's
   // separately reserved host allowance for this pipeline; it is never
   // enforced here, only reported.
-  NormalLookahead(std::vector<size_t> bank_layers, size_t max_future,
-                  uint64_t charge, Observer observer = {})
+  NormalLookahead(std::vector<size_t> bank_layers,
+                  size_t max_future,
+                  uint64_t charge,
+                  Observer observer = {})
       : bank_layers_(std::move(bank_layers)),
         buffers_(bank_layers_.size()),
         handed_(bank_layers_.size(), false),
@@ -97,9 +99,8 @@ class NormalLookahead {
       NotifyLocked("reserved", kBatch);
     }
     try {
-      worker_ = factory([this, loader = std::move(loader)]() mutable {
-        Produce(loader);
-      });
+      worker_ = factory(
+          [this, loader = std::move(loader)]() mutable { Produce(loader); });
     } catch (...) {
       {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -213,7 +214,8 @@ class NormalLookahead {
       reserved_ = false;
       try {
         Notify("release", kBatch);
-      } catch (...) {}
+      } catch (...) {
+      }
     }
   }
 
@@ -271,7 +273,8 @@ class NormalLookahead {
   void NotifyLocked(const char* event, size_t generation) {
     try {
       Notify(event, generation);
-    } catch (...) {}
+    } catch (...) {
+    }
   }
 
   // Immutable mapping and per-generation unique buffers.

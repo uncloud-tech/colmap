@@ -112,9 +112,10 @@ void BindMVS(py::module& m) {
               "num_samples",
               &PMOpts::num_samples,
               "Number of random samples to draw in Monte Carlo sampling.")
-          .def_readwrite("owned_distinct_source_cache",
-                         &PMOpts::owned_distinct_source_cache,
-                         "Opt-in owned CUDA distinct-source cache (default false).")
+          .def_readwrite(
+              "owned_distinct_source_cache",
+              &PMOpts::owned_distinct_source_cache,
+              "Opt-in owned CUDA distinct-source cache (default false).")
           .def_readwrite("ncc_sigma",
                          &PMOpts::ncc_sigma,
                          "Spread of the NCC likelihood function.")

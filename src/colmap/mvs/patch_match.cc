@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "colmap/mvs/patch_match.h"
+
+#include "colmap/math/math.h"
+#include "colmap/mvs/consistency_graph.h"
+#include "colmap/mvs/optimized_photo_paths.h"
 #include "colmap/mvs/owned_input_bank.h"
 #include "colmap/mvs/owned_pair_coordinator.h"
 #include "colmap/mvs/owned_pair_input.h"
 #include "colmap/mvs/owned_pair_output.h"
-#include "colmap/mvs/optimized_photo_paths.h"
-#include "colmap/mvs/resident_contract.h"
-
-#include "colmap/math/math.h"
-#include "colmap/mvs/consistency_graph.h"
 #include "colmap/mvs/patch_match_cuda.h"
+#include "colmap/mvs/resident_contract.h"
 #if !defined(COLMAP_HIP_ENABLED)
 #include "colmap/mvs/patch_match_cuda_owned.h"
 #endif
@@ -50,19 +50,24 @@ std::vector<Image> SnapshotImages(const PatchMatch::Problem& problem) {
   std::vector<Image> images;
   images.reserve(problem.images->size());
   for (const auto& image : *problem.images) {
-    images.emplace_back(image.GetPath(), image.GetWidth(), image.GetHeight(),
-                        image.GetK(), image.GetR(), image.GetT());
+    images.emplace_back(image.GetPath(),
+                        image.GetWidth(),
+                        image.GetHeight(),
+                        image.GetK(),
+                        image.GetR(),
+                        image.GetT());
   }
   return images;
 }
 PatchMatchExecution ValidateExecution(const PatchMatchOptions& options,
-                                     const PatchMatchExecution execution) {
+                                      const PatchMatchExecution execution) {
 #if defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
   constexpr bool kOwnedCudaAvailable = true;
 #else
   constexpr bool kOwnedCudaAvailable = false;
 #endif
-  return ValidatePatchMatchExecution(execution, options.window_radius,
+  return ValidatePatchMatchExecution(execution,
+                                     options.window_radius,
                                      options.window_step,
                                      options.geom_consistency,
                                      kOwnedCudaAvailable,
@@ -77,16 +82,18 @@ PatchMatch::PatchMatch(const PatchMatchOptions& options,
                        const PatchMatchExecution execution)
     : options_(options),
       execution_(ValidateExecution(options, execution)),
-      owned_images_(execution_ == PatchMatchExecution::kOwnedCuda && problem.images
-                        ? SnapshotImages(problem) : std::vector<Image>{}),
+      owned_images_(execution_ == PatchMatchExecution::kOwnedCuda &&
+                            problem.images
+                        ? SnapshotImages(problem)
+                        : std::vector<Image>{}),
       owned_depth_maps_(execution_ == PatchMatchExecution::kOwnedCuda &&
-                                options_.geom_consistency && !problem.resident_bank &&
-                                problem.depth_maps
+                                options_.geom_consistency &&
+                                !problem.resident_bank && problem.depth_maps
                             ? *problem.depth_maps
                             : std::vector<DepthMap>{}),
       owned_normal_maps_(execution_ == PatchMatchExecution::kOwnedCuda &&
-                                 options_.geom_consistency && !problem.resident_bank &&
-                                 problem.normal_maps
+                                 options_.geom_consistency &&
+                                 !problem.resident_bank && problem.normal_maps
                              ? *problem.normal_maps
                              : std::vector<NormalMap>{}),
       problem_([&] {
@@ -94,11 +101,15 @@ PatchMatch::PatchMatch(const PatchMatchOptions& options,
         if (execution_ == PatchMatchExecution::kOwnedCuda) {
           result.images = &owned_images_;
           result.depth_maps = options_.geom_consistency &&
-                                      !problem.resident_bank && problem.depth_maps
-                                  ? &owned_depth_maps_ : nullptr;
+                                      !problem.resident_bank &&
+                                      problem.depth_maps
+                                  ? &owned_depth_maps_
+                                  : nullptr;
           result.normal_maps = options_.geom_consistency &&
-                                       !problem.resident_bank && problem.normal_maps
-                                   ? &owned_normal_maps_ : nullptr;
+                                       !problem.resident_bank &&
+                                       problem.normal_maps
+                                   ? &owned_normal_maps_
+                                   : nullptr;
         }
         return result;
       }()) {}
@@ -150,7 +161,8 @@ void PatchMatch::Check() const {
     const Image& image = problem_.images->at(image_idx);
     if (problem_.resident_bank) {
 #if defined(COLMAP_HIP_ENABLED)
-      THROW_CHECK(false) << "Resident input banks require the owned CUDA backend";
+      THROW_CHECK(false)
+          << "Resident input banks require the owned CUDA backend";
 #else
       THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
       THROW_CHECK(options_.geom_consistency);
@@ -160,7 +172,8 @@ void PatchMatch::Check() const {
       int layer = problem_.resident_ref_layer;
       if (image_idx != problem_.ref_image_idx) {
         const auto it = std::find(problem_.src_image_idxs.begin(),
-                                  problem_.src_image_idxs.end(), image_idx);
+                                  problem_.src_image_idxs.end(),
+                                  image_idx);
         layer = problem_.resident_src_layers.at(
             std::distance(problem_.src_image_idxs.begin(), it));
       }
@@ -168,8 +181,10 @@ void PatchMatch::Check() const {
       THROW_CHECK_LT(layer, problem_.resident_bank->NumLayers());
       THROW_CHECK_GT(image.GetWidth(), 0);
       THROW_CHECK_GT(image.GetHeight(), 0);
-      THROW_CHECK_EQ(image.GetWidth(), problem_.resident_bank->LayerWidth(layer));
-      THROW_CHECK_EQ(image.GetHeight(), problem_.resident_bank->LayerHeight(layer));
+      THROW_CHECK_EQ(image.GetWidth(),
+                     problem_.resident_bank->LayerWidth(layer));
+      THROW_CHECK_EQ(image.GetHeight(),
+                     problem_.resident_bank->LayerHeight(layer));
       THROW_CHECK(image.GetBitmap().IsEmpty());
 #endif
     } else {
@@ -177,7 +192,8 @@ void PatchMatch::Check() const {
       THROW_CHECK_GT(image.GetBitmap().Height(), 0) << image_idx;
       THROW_CHECK(image.GetBitmap().IsGrey()) << image_idx;
       THROW_CHECK_EQ(image.GetWidth(), image.GetBitmap().Width()) << image_idx;
-      THROW_CHECK_EQ(image.GetHeight(), image.GetBitmap().Height()) << image_idx;
+      THROW_CHECK_EQ(image.GetHeight(), image.GetBitmap().Height())
+          << image_idx;
     }
 
     // Make sure, the calibration matrix only contains fx, fy, cx, cy.
@@ -206,9 +222,10 @@ void PatchMatch::Check() const {
       THROW_CHECK_NOTNULL(problem_.resident_ref_normal);
       THROW_CHECK_EQ(problem_.resident_ref_normal->GetDepth(), 3);
     }
-    const NormalMap& ref_normal_map = problem_.resident_bank
-        ? *problem_.resident_ref_normal
-        : problem_.normal_maps->at(problem_.ref_image_idx);
+    const NormalMap& ref_normal_map =
+        problem_.resident_bank
+            ? *problem_.resident_ref_normal
+            : problem_.normal_maps->at(problem_.ref_image_idx);
     THROW_CHECK_EQ(ref_image.GetWidth(), ref_normal_map.GetWidth());
     THROW_CHECK_EQ(ref_image.GetHeight(), ref_normal_map.GetHeight());
   }
@@ -238,8 +255,8 @@ void PatchMatch::PrepareOwned(
   THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
   THROW_CHECK(!owned_patch_match_cuda_) << "Owned instances prepare only once";
   Check();
-  owned_patch_match_cuda_ =
-      std::make_unique<owned::PatchMatchCuda>(options_, problem_, owned_tile_threads);
+  owned_patch_match_cuda_ = std::make_unique<owned::PatchMatchCuda>(
+      options_, problem_, owned_tile_threads);
   owned_patch_match_cuda_->SetGraphCoordinator(std::move(graph_coordinator),
                                                graph_owner);
   LOG(INFO) << "PATCH_MATCH_BACKEND actual=owned_cuda reference="
@@ -270,8 +287,7 @@ void PatchMatch::DrainOwned() noexcept {
 #endif
 }
 
-void PatchMatch::SetOwnedSweepObserver(
-    std::function<void(int, int)> observer) {
+void PatchMatch::SetOwnedSweepObserver(std::function<void(int, int)> observer) {
 #if !defined(COLMAP_HIP_ENABLED)
   THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
   THROW_CHECK_NOTNULL(owned_patch_match_cuda_.get());
@@ -321,8 +337,9 @@ ConsistencyGraph PatchMatch::GetConsistencyGraph() const {
   if (execution_ == PatchMatchExecution::kOwnedCuda) {
     THROW_CHECK_NOTNULL(owned_patch_match_cuda_.get());
     THROW_CHECK(owned_run_completed_) << "Owned result is not complete";
-    return ConsistencyGraph(ref_image.GetWidth(), ref_image.GetHeight(),
-                             owned_patch_match_cuda_->GetConsistentImageIdxs());
+    return ConsistencyGraph(ref_image.GetWidth(),
+                            ref_image.GetHeight(),
+                            owned_patch_match_cuda_->GetConsistentImageIdxs());
   }
 #endif
   return ConsistencyGraph(ref_image.GetWidth(),
@@ -539,8 +556,7 @@ OwnedBankContract PatchMatchController::ResolveOwnedBankContract() {
 }
 
 std::vector<owned::BankJob> PatchMatchController::ResolveOwnedBankJobsImpl(
-    OwnedBankContract* contract,
-    const size_t* expected_problems) {
+    OwnedBankContract* contract, const size_t* expected_problems) {
   THROW_CHECK(options_.geom_consistency);
   THROW_CHECK(!owned_pair_started_);
   THROW_CHECK(!workspace_ && !io_thread_pool_ && !thread_pool_);
@@ -576,8 +592,8 @@ std::vector<owned::BankJob> PatchMatchController::ResolveOwnedBankJobsImpl(
       image_names.push_back(model.GetImageName(image_idx));
     }
     if (contract != nullptr) {
-      *contract = MakeOwnedBankContract(
-          options_, workspace_->GetOptions().stereo_folder);
+      *contract = MakeOwnedBankContract(options_,
+                                        workspace_->GetOptions().stereo_folder);
       contract->problems.reserve(problems_.size());
     }
     // Native problem order is preserved; only actual duplicates are rejected:
@@ -601,8 +617,9 @@ std::vector<owned::BankJob> PatchMatchController::ResolveOwnedBankJobsImpl(
           problem_idx,
           image_names,
           contract == nullptr ? nullptr : &contract_problem);
-      THROW_CHECK(seen_reference_names.insert(
-                       image_names.at(job.reference_image_idx)).second)
+      THROW_CHECK(
+          seen_reference_names.insert(image_names.at(job.reference_image_idx))
+              .second)
           << "Duplicate reference image in configured problems: "
           << image_names.at(job.reference_image_idx);
       THROW_CHECK(seen_outputs.insert(output_key(job.depth_map_path)).second)
@@ -686,7 +703,8 @@ owned::BankJob PatchMatchController::CaptureOwnedBankJobMetadata(
     result.options.sigma_spatial = result.options.window_radius;
   }
   const auto& stereo = workspace_->GetOptions().stereo_folder;
-  const auto file = StringPrintf("%s.geometric.bin",
+  const auto file = StringPrintf(
+      "%s.geometric.bin",
       workspace_->GetModel().GetImageName(problem.ref_image_idx).c_str());
   result.depth_map_path = workspace_path_ / stereo / "depth_maps" / file;
   result.normal_map_path = workspace_path_ / stereo / "normal_maps" / file;
@@ -750,7 +768,8 @@ void PatchMatchController::RunResidentOwnedPairJob(
     if (host.NormalsMode() == owned::BankNormals::kBounded) {
       if (owned_ref_normal == nullptr) {
         throw std::invalid_argument(
-            "bounded resident bank requires an owned prepared reference normal");
+            "bounded resident bank requires an owned prepared reference "
+            "normal");
       }
     } else if (owned_ref_normal != nullptr) {
       throw std::invalid_argument(
@@ -772,8 +791,8 @@ void PatchMatchController::RunResidentOwnedPairJob(
     OwnedPreparedJob prepared;
     prepared.depth_map_path = resolved.depth_map_path;
     prepared.normal_map_path = resolved.normal_map_path;
-    prepared.patch_match = std::make_unique<PatchMatch>(
-        resolved.options, problem, execution_);
+    prepared.patch_match =
+        std::make_unique<PatchMatch>(resolved.options, problem, execution_);
     prepared.patch_match->Check();
     ExecutePreparedOwnedPairJob(prepared, coordinator, job, hooks);
   } catch (...) {
@@ -784,8 +803,8 @@ void PatchMatchController::RunResidentOwnedPairJob(
 
 std::unique_ptr<PatchMatchController::OwnedPreparedJob>
 PatchMatchController::PrepareOwnedPairJob(const size_t job,
-                                        const OwnedPairHooks& hooks,
-                                        const int preparation_threads) {
+                                          const OwnedPairHooks& hooks,
+                                          const int preparation_threads) {
   THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
   // `job` is an immutable generation/FIFO index, not a reusable slot number.
   // RunOwnedPairJob validates it with the coordinator before preparation.
@@ -816,7 +835,8 @@ PatchMatchController::PrepareOwnedPairJob(const size_t job,
     io_thread_pool_ = std::make_unique<ThreadPool>(
         preparation_threads == 0 ? options_.num_threads : preparation_threads);
     auto prepared = std::make_unique<OwnedPreparedJob>();
-    // Shared with stock dispatch: identical options, source ordering and decode.
+    // Shared with stock dispatch: identical options, source ordering and
+    // decode.
     ProcessProblemInputs(options_, 0, prepared.get(), job, hooks);
     THROW_CHECK_NOTNULL(prepared->patch_match.get());
     release_inputs();
@@ -933,9 +953,8 @@ void PatchMatchController::ExecutePreparedOwnedPairJob(
     coordinator.EndOutput(job);
     coordinator.AwaitOutputs(job);
   } catch (...) {
-    coordinator.CancelAndAwaitCleanup(job, std::current_exception(), [&] {
-      patch_match->DrainOwned();
-    });
+    coordinator.CancelAndAwaitCleanup(
+        job, std::current_exception(), [&] { patch_match->DrainOwned(); });
     throw;
   }
 }
@@ -1155,7 +1174,8 @@ void PatchMatchController::ProcessProblemInputs(
   const auto consistency_graph_path =
       workspace_path_ / stereo_folder / "consistency_graphs" / file_name;
 
-  if (execution_ == PatchMatchExecution::kOwnedCuda && options.geom_consistency) {
+  if (execution_ == PatchMatchExecution::kOwnedCuda &&
+      options.geom_consistency) {
     THROW_CHECK(!ExistsFile(depth_map_path) && !ExistsFile(normal_map_path))
         << "Owned geometry requires fresh output paths";
   }
@@ -1236,9 +1256,9 @@ void PatchMatchController::ProcessProblemInputs(
         } else {
           if (execution_ == PatchMatchExecution::kOwnedCuda &&
               options.geom_consistency) {
-            THROW_CHECK(false) << "Missing image or map dependency for image "
-                               << image_idx << ": "
-                               << model.GetImageName(image_idx);
+            THROW_CHECK(false)
+                << "Missing image or map dependency for image " << image_idx
+                << ": " << model.GetImageName(image_idx);
           }
           LOG(ERROR) << StringPrintf(
               "Missing image or map dependency for image %d: %s",
@@ -1280,8 +1300,10 @@ void PatchMatchController::ProcessProblemInputs(
     if (prepared) {
       // CPU preparation has no coordinator. Drain every launched task and the
       // pool's checker queue before local images or workspace can unwind.
-      owned::DrainPairInputs(io_thread_pool_, futures, input_error,
-                            [](std::exception_ptr) noexcept {});
+      owned::DrainPairInputs(io_thread_pool_,
+                             futures,
+                             input_error,
+                             [](std::exception_ptr) noexcept {});
     } else {
       for (auto& future : futures) future.get();
     }

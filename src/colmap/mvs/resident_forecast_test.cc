@@ -74,8 +74,14 @@ std::string ReadFileOrDie(const std::string& name) {
 class TestSha256Helper {
  public:
   TestSha256Helper() {
-    h_ = {0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
-          0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u};
+    h_ = {0x6a09e667u,
+          0xbb67ae85u,
+          0x3c6ef372u,
+          0xa54ff53au,
+          0x510e527fu,
+          0x9b05688cu,
+          0x1f83d9abu,
+          0x5be0cd19u};
     pending_bytes_ = 0;
     length_bits_ = 0;
   }
@@ -84,7 +90,8 @@ class TestSha256Helper {
     length_bits_ += static_cast<uint64_t>(data.size()) * 8;
     const char* input = data.data();
     while (!data.empty()) {
-      const size_t take = std::min(data.size(), 64 - static_cast<size_t>(pending_bytes_));
+      const size_t take =
+          std::min(data.size(), 64 - static_cast<size_t>(pending_bytes_));
       std::memcpy(&block_[pending_bytes_], input, take);
       pending_bytes_ += static_cast<uint64_t>(take);
       input += take;
@@ -107,8 +114,8 @@ class TestSha256Helper {
     }
     unsigned char tail[8];
     for (int i = 0; i < 8; ++i) {
-      tail[i] = static_cast<unsigned char>(
-          (original_bits >> (8 * (7 - i))) & 0xff);
+      tail[i] =
+          static_cast<unsigned char>((original_bits >> (8 * (7 - i))) & 0xff);
     }
     Update(std::string_view(reinterpret_cast<const char*>(tail), 8));
     for (const uint32_t word : h_) {
@@ -163,11 +170,23 @@ class TestSha256Helper {
       const uint32_t s0 = Ro(a, 2) ^ Ro(a, 13) ^ Ro(a, 22);
       const uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
       const uint32_t temp2 = s0 + maj;
-      h = g; g = f; f = e; e = d + temp1;
-      d = c; c = b; b = a; a = temp1 + temp2;
+      h = g;
+      g = f;
+      f = e;
+      e = d + temp1;
+      d = c;
+      c = b;
+      b = a;
+      a = temp1 + temp2;
     }
-    h_[0] += a; h_[1] += b; h_[2] += c; h_[3] += d;
-    h_[4] += e; h_[5] += f; h_[6] += g; h_[7] += h;
+    h_[0] += a;
+    h_[1] += b;
+    h_[2] += c;
+    h_[3] += d;
+    h_[4] += e;
+    h_[5] += f;
+    h_[6] += g;
+    h_[7] += h;
   }
 
   std::array<uint32_t, 8> h_;
@@ -186,7 +205,9 @@ std::string TestSha256(const std::string_view& message) {
 }
 
 // Deliberately wrong digest hook for refusal tests.
-std::string TestShaWrong(const std::string_view&) { return std::string(64, '0'); }
+std::string TestShaWrong(const std::string_view&) {
+  return std::string(64, '0');
+}
 
 std::string HexEncodeTest(const std::string& bytes) {
   static const char* kHexDigits = "0123456789abcdef";
@@ -207,8 +228,8 @@ std::string LineInt(const std::string& key, uint64_t value) {
   return key + " " + std::to_string(value) + "\n";
 }
 std::string LineBytes(const std::string& key, const std::string& value) {
-  return key + " " + std::to_string(value.size()) + " " +
-         HexEncodeTest(value) + "\n";
+  return key + " " + std::to_string(value.size()) + " " + HexEncodeTest(value) +
+         "\n";
 }
 std::string LineFingerprint(const std::string& key, const std::string* digest) {
   if (digest == nullptr) return key + " absent\n";
@@ -236,17 +257,16 @@ std::string BuildWire(const ResidentForecastWire& wire) {
                          wire.has_build_allocation_fingerprint
                              ? &wire.build_allocation_fingerprint
                              : nullptr);
-  out += LineFingerprint("source_fingerprint",
-                         wire.has_source_fingerprint
-                             ? &wire.source_fingerprint
-                             : nullptr);
+  out += LineFingerprint(
+      "source_fingerprint",
+      wire.has_source_fingerprint ? &wire.source_fingerprint : nullptr);
   out += "charges\n";
   out += "bank host " + std::to_string(wire.bank_host_bytes) + " device " +
          std::to_string(wire.bank_device_bytes) + "\n";
   out += "normal owner " + std::to_string(wire.normal_owner_bytes) +
-         " future " + std::to_string(wire.normal_future_bytes) +
-         " transient " + std::to_string(wire.normal_transient_bytes) +
-         " charge " + std::to_string(wire.normal_charge_bytes) + "\n";
+         " future " + std::to_string(wire.normal_future_bytes) + " transient " +
+         std::to_string(wire.normal_transient_bytes) + " charge " +
+         std::to_string(wire.normal_charge_bytes) + "\n";
   out += "process mode " + std::to_string(wire.process_mode.size()) + " " +
          HexEncodeTest(wire.process_mode) + " count " +
          std::to_string(wire.process_count) + " host " +
@@ -259,9 +279,8 @@ std::string BuildWire(const ResidentForecastWire& wire) {
   out += "planner max_member host " +
          std::to_string(wire.planner_max_member_host_bytes) + " device " +
          std::to_string(wire.planner_max_member_device_bytes) + "\n";
-  out += "rolling active_jobs " +
-         std::to_string(wire.rolling_active_jobs) + " host " +
-         std::to_string(wire.rolling_host_bytes) + " device " +
+  out += "rolling active_jobs " + std::to_string(wire.rolling_active_jobs) +
+         " host " + std::to_string(wire.rolling_host_bytes) + " device " +
          std::to_string(wire.rolling_device_bytes) + "\n";
   out += LineInt("reference_count", wire.references.size());
   for (size_t i = 0; i < wire.references.size(); ++i) {
@@ -298,10 +317,12 @@ class ResidentForecastFixture : public ::testing::Test {
     allowance_wire_ = ReadFileOrDie("four.executable.allowance.forecast");
     // The independent test SHA-256 must first agree with the known NIST
     // vectors; a transcription error cannot then corrupt gate vectors.
-    ASSERT_EQ(TestSha256(std::string_view()),
-              "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
-    ASSERT_EQ(TestSha256("abc"),
-              "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    ASSERT_EQ(
+        TestSha256(std::string_view()),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    ASSERT_EQ(
+        TestSha256("abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     // The committed wires must bind the committed contract bytes exactly.
     const auto two = ParseResidentForecast(two_wire_, &TestSha256);
     ASSERT_EQ(two.contract_sha256, kTwoContractSha);
@@ -466,14 +487,14 @@ TEST_F(ResidentForecastFixture, CapsGateOnFixtureCharges) {
   const uint64_t host_total = 2147488633ull;
   // device total = 5707 + 2147483648 + 5064 = 2147494419
   const uint64_t device_total = 2147494419ull;
-  EXPECT_NO_THROW(VerifyResidentForecastFitsCaps(wire, host_total,
-                                                 device_total));
-  EXPECT_THROW(VerifyResidentForecastFitsCaps(wire, host_total - 1,
-                                              device_total),
-               std::exception);
-  EXPECT_THROW(VerifyResidentForecastFitsCaps(wire, host_total,
-                                              device_total - 1),
-               std::exception);
+  EXPECT_NO_THROW(
+      VerifyResidentForecastFitsCaps(wire, host_total, device_total));
+  EXPECT_THROW(
+      VerifyResidentForecastFitsCaps(wire, host_total - 1, device_total),
+      std::exception);
+  EXPECT_THROW(
+      VerifyResidentForecastFitsCaps(wire, host_total, device_total - 1),
+      std::exception);
   // Max caps always admit the synthetic fixture charges; the aggregate is
   // checked, so NEAR-OVERFLOW charges refuse (checked addition) instead of
   // wrapping into an admission.
@@ -481,10 +502,10 @@ TEST_F(ResidentForecastFixture, CapsGateOnFixtureCharges) {
       wire, 18446744073709551615ull, 18446744073709551615ull));
   auto overcharged = wire;
   overcharged.bank_host_bytes = 18446744073709551615ull;
-  EXPECT_THROW(VerifyResidentForecastFitsCaps(
-                   overcharged, 18446744073709551615ull,
-                   18446744073709551615ull),
-               std::exception);
+  EXPECT_THROW(
+      VerifyResidentForecastFitsCaps(
+          overcharged, 18446744073709551615ull, 18446744073709551615ull),
+      std::exception);
 }
 
 TEST_F(ResidentForecastFixture, NormalsMode) {
@@ -608,8 +629,7 @@ TEST_F(ResidentForecastFixture, RefusesWrongVersion) {
 
 TEST_F(ResidentForecastFixture, RefusesWrongContractVersion) {
   std::string mutated = two_wire_;
-  mutated.replace(mutated.find("contract_version 1"), 17,
-                  "contract_version 2");
+  mutated.replace(mutated.find("contract_version 1"), 17, "contract_version 2");
   EXPECT_THROW(ParseResidentForecast(mutated), std::exception);
 }
 
@@ -630,8 +650,7 @@ TEST_F(ResidentForecastFixture, RefusesSignedCharge) {
 
 TEST_F(ResidentForecastFixture, RefusesPlusInteger) {
   std::string mutated = two_wire_;
-  mutated.replace(mutated.find("image_channels 3"), 16,
-                  "image_channels +3");
+  mutated.replace(mutated.find("image_channels 3"), 16, "image_channels +3");
   EXPECT_THROW(ParseResidentForecast(mutated), std::exception);
 }
 
@@ -722,8 +741,7 @@ TEST_F(ResidentForecastFixture, RefusesZeroMaxFuture) {
 
 TEST_F(ResidentForecastFixture, RefusesZeroImageChannels) {
   std::string mutated = two_wire_;
-  mutated.replace(mutated.find("image_channels 3"), 16,
-                  "image_channels 0");
+  mutated.replace(mutated.find("image_channels 3"), 16, "image_channels 0");
   EXPECT_THROW(ParseResidentForecast(mutated), std::exception);
 }
 
@@ -776,15 +794,14 @@ TEST_F(ResidentForecastFixture, ContractJobIdentitiesAreOriginalRecords) {
   contract.version = kOwnedBankContractVersion;
   const std::function<const owned::BankFileIdentity(const char*)> identity =
       [](const char* name) {
-        return owned::BankFileIdentity{
-            /*path=*/std::filesystem::path(name),
-            /*size=*/42,
-            /*device=*/123,
-            /*inode=*/456,
-            /*modified_seconds=*/1,
-            /*modified_nanoseconds=*/2,
-            /*changed_seconds=*/3,
-            /*changed_nanoseconds=*/4};
+        return owned::BankFileIdentity{/*path=*/std::filesystem::path(name),
+                                       /*size=*/42,
+                                       /*device=*/123,
+                                       /*inode=*/456,
+                                       /*modified_seconds=*/1,
+                                       /*modified_nanoseconds=*/2,
+                                       /*changed_seconds=*/3,
+                                       /*changed_nanoseconds=*/4};
       };
   for (int problem = 0; problem < 2; ++problem) {
     OwnedBankContractProblem record;
@@ -823,7 +840,8 @@ TEST_F(ResidentForecastFixture, ContractJobIdentitiesAreOriginalRecords) {
     for (size_t k = 0; k < again[i].size(); ++k) {
       EXPECT_TRUE(owned::SameIdentity(again[i][k].image, snapshot[i][k].image));
       EXPECT_TRUE(owned::SameIdentity(again[i][k].depth, snapshot[i][k].depth));
-      EXPECT_TRUE(owned::SameIdentity(again[i][k].normal, snapshot[i][k].normal));
+      EXPECT_TRUE(
+          owned::SameIdentity(again[i][k].normal, snapshot[i][k].normal));
     }
   }
 }
@@ -849,8 +867,9 @@ TEST_F(ResidentForecastFixture, BindingVerifiesFreshSha) {
   EXPECT_NO_THROW(
       VerifyResidentForecastBinding(wire, two_contract_, &TestSha256));
   // A wrong/failing sha must refuse even though the bytes bind exactly.
-  EXPECT_THROW(VerifyResidentForecastBinding(wire, two_contract_, &TestShaWrong),
-               std::exception);
+  EXPECT_THROW(
+      VerifyResidentForecastBinding(wire, two_contract_, &TestShaWrong),
+      std::exception);
 }
 
 TEST_F(ResidentForecastFixture, BindingRefusesChangedFreshSnapshot) {
@@ -958,10 +977,9 @@ TEST_F(ResidentForecastFixture, ParametersRefuseEagerExecution) {
   const auto wire = ParseResidentForecast(four_wire_);
   auto eager = wire;
   eager.mode = "eager";
-  EXPECT_THROW(
-      VerifyResidentForecastParameters(eager,
-                                       wire.build_allocation_fingerprint),
-      std::exception);
+  EXPECT_THROW(VerifyResidentForecastParameters(
+                   eager, wire.build_allocation_fingerprint),
+               std::exception);
 }
 
 TEST_F(ResidentForecastFixture, ParametersRefuseProvisionalWire) {
@@ -986,20 +1004,17 @@ TEST_F(ResidentForecastFixture, ParametersRefuseBadCompletenessOrBasisOrMode) {
   auto wire = ParseResidentForecast(four_wire_);
   wire.completeness = "partial";
   EXPECT_THROW(
-      VerifyResidentForecastParameters(
-          wire, wire.build_allocation_fingerprint),
+      VerifyResidentForecastParameters(wire, wire.build_allocation_fingerprint),
       std::exception);
   wire = ParseResidentForecast(four_wire_);
   wire.concurrency_basis = "bank_only";
   EXPECT_THROW(
-      VerifyResidentForecastParameters(
-          wire, wire.build_allocation_fingerprint),
+      VerifyResidentForecastParameters(wire, wire.build_allocation_fingerprint),
       std::exception);
   wire = ParseResidentForecast(four_wire_);
   wire.mode = "phased";
   EXPECT_THROW(
-      VerifyResidentForecastParameters(
-          wire, wire.build_allocation_fingerprint),
+      VerifyResidentForecastParameters(wire, wire.build_allocation_fingerprint),
       std::exception);
 }
 
@@ -1257,8 +1272,7 @@ TEST_F(ResidentForecastFixture, LedgerTermsRefuseActiveJobsAboveReferences) {
   mutated.rolling_active_jobs = 5;
   mutated.rolling_host_bytes = 371u + 223u;
   mutated.rolling_device_bytes = 3601u + 2744u;
-  EXPECT_THROW(VerifyResidentForecastLedgerTerms(mutated, 5),
-               std::exception);
+  EXPECT_THROW(VerifyResidentForecastLedgerTerms(mutated, 5), std::exception);
 }
 
 TEST_F(ResidentForecastFixture, LedgerTermsRefusePartialWithNonOmittedSource) {
@@ -1400,13 +1414,12 @@ TEST_F(ResidentForecastFixture, ChargesGateRefusesNormalMismatch) {
 TEST_F(ResidentForecastFixture, ChargesGateRefusesBoundedChargeBelowAllowance) {
   auto wire = ParseResidentForecast(four_wire_);
   // Bounded charge must cover future + transient, without overflowing.
-  wire.normal_charge_bytes = wire.normal_future_bytes +
-                             wire.normal_transient_bytes;
+  wire.normal_charge_bytes =
+      wire.normal_future_bytes + wire.normal_transient_bytes;
   EXPECT_NO_THROW(VerifyResidentForecastCharges(wire, HandMinimaFor(wire)));
   wire.normal_charge_bytes -= 1;
-  EXPECT_THROW(
-      VerifyResidentForecastCharges(wire, HandMinimaFor(wire)),
-      std::exception);
+  EXPECT_THROW(VerifyResidentForecastCharges(wire, HandMinimaFor(wire)),
+               std::exception);
 }
 
 TEST_F(ResidentForecastFixture, ChargesGateRefusesEagerMode) {
@@ -1414,9 +1427,8 @@ TEST_F(ResidentForecastFixture, ChargesGateRefusesEagerMode) {
   wire.mode = "eager";
   // Bounded-only execution: an eager declaration refuses regardless of
   // its charges; no eager-mode accounting exists on the native side.
-  EXPECT_THROW(
-      VerifyResidentForecastCharges(wire, HandMinimaFor(wire)),
-      std::exception);
+  EXPECT_THROW(VerifyResidentForecastCharges(wire, HandMinimaFor(wire)),
+               std::exception);
 }
 
 TEST_F(ResidentForecastFixture, ChargesGateRefusesPrivateBelowMinimum) {

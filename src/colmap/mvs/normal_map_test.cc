@@ -37,7 +37,9 @@ TEST(NormalMap, MovesOwnershipFromRvalueMat) {
   for (size_t slice = 0; slice < 3; ++slice) {
     for (size_t row = 0; row < height; ++row) {
       for (size_t col = 0; col < width; ++col) {
-        mat.Set(row, col, slice,
+        mat.Set(row,
+                col,
+                slice,
                 static_cast<float>(slice * 100 + row * width + col));
       }
     }

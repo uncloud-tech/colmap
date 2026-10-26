@@ -12,17 +12,24 @@ HEADER = ROOT / "src/colmap/mvs/gpu_mat_prng.h"
 SOURCE = ROOT / "src/colmap/mvs/gpu_mat_prng.cu"
 
 # Frozen baseline bodies from 011f9a55: compare tokens, not formatting.
-KERNEL = """__global__ void InitRandomStateKernel(GpuMatView<curandState> output) {
-  const size_t row = blockIdx.y * blockDim.y + threadIdx.y;
-  const size_t col = blockIdx.x * blockDim.x + threadIdx.x;
-  const size_t uniqueBlockIndex = blockIdx.y * gridDim.x + blockIdx.x;
-  const size_t id = uniqueBlockIndex * blockDim.y * blockDim.x +
-                    threadIdx.y * blockDim.x + threadIdx.x;
-  // Each thread gets same seed, a different sequence number, no offset.
-  if (col < output.GetWidth() && row < output.GetHeight()) {
-    curand_init(id, 0, 0, &output.GetRef(row, col));
-  }
-}"""
+KERNEL = (
+    "__global__ void InitRandomStateKernel(GpuMatView<curandState"
+    "> output) {\n"
+    "  const size_t row = blockIdx.y * blockDim.y + threadIdx.y;\n"
+    "  const size_t col = blockIdx.x * blockDim.x + threadIdx.x;\n"
+    "  const size_t uniqueBlockIndex = blockIdx.y * gridDim.x + b"
+    "lockIdx.x;\n"
+    "  const size_t id = uniqueBlockIndex * blockDim.y * blockDim"
+    ".x +\n"
+    "                    threadIdx.y * blockDim.x + threadIdx.x;\n"
+    "  // Each thread gets same seed, a different sequence number"
+    ", no offset.\n"
+    "  if (col < output.GetWidth() && row < output.GetHeight()) {"
+    "\n"
+    "    curand_init(id, 0, 0, &output.GetRef(row, col));\n"
+    "  }\n"
+    "}"
+)
 LEGACY = """GpuMatPRNG::GpuMatPRNG(const int width, const int height)
     : GpuMat(width, height) {
   InitRandomStateKernel<<<gridSize_, blockSize_>>>(View());
@@ -189,7 +196,10 @@ def run_host(header, source, harness=HARNESS):
     # Keep actual header/method/kernel bodies. Adapt only launch syntax and
     # GPU dependencies to CPU spies; this does not validate real CUDA behavior.
     source = re.sub(
-        r"InitRandomStateKernel<<<gridSize_, blockSize_, 0, stream>>>\(View\(\)\)",
+        (
+            "InitRandomStateKernel<<<gridSize_, blockSize_, 0, stream>>>\\"
+            "(View\\(\\)\\)"
+        ),
         "FakeLaunch(gridSize_, blockSize_, 0, stream, "
         "InitRandomStateKernel, View())",
         source,
@@ -209,14 +219,29 @@ def run_host(header, source, harness=HARNESS):
         cpp.write_text(source + harness)
         binary = tmp / "probe"
         compiled = subprocess.run(
-            ["g++", "-std=c++17", "-Wall", "-Wextra", "-pedantic",
-             "-I", str(tmp), str(cpp), "-o", str(binary)],
-            capture_output=True, text=True, timeout=30,
+            [
+                "g++",
+                "-std=c++17",
+                "-Wall",
+                "-Wextra",
+                "-pedantic",
+                "-I",
+                str(tmp),
+                str(cpp),
+                "-o",
+                str(binary),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         if compiled.returncode:
             raise AssertionError(compiled.stderr)
         return subprocess.run(
-            [str(binary)], capture_output=True, text=True, timeout=10,
+            [str(binary)],
+            capture_output=True,
+            text=True,
+            timeout=10,
             cwd=tmp,
         )
 
@@ -241,7 +266,9 @@ class RotationPrngTest(unittest.TestCase):
         self.assertNotEqual(run_host(self.header, mutated).returncode, 0)
 
     def test_negative_wrong_forwarded_stream(self):
-        mutated = self.source.replace("Reinitialize(stream);", "Reinitialize(0);", 1)
+        mutated = self.source.replace(
+            "Reinitialize(stream);", "Reinitialize(0);", 1
+        )
         self.assertNotEqual(mutated, self.source)
         with self.assertRaises(AssertionError):
             check_contract(self.header, mutated)
@@ -250,8 +277,10 @@ class RotationPrngTest(unittest.TestCase):
     def test_negative_kernel_seed_arithmetic_and_bounds(self):
         for old, new in [
             ("curand_init(id, 0, 0", "curand_init(id, 1, 0"),
-            ("threadIdx.y * blockDim.x + threadIdx.x;",
-             "threadIdx.y * blockDim.y + threadIdx.x;"),
+            (
+                "threadIdx.y * blockDim.x + threadIdx.x;",
+                "threadIdx.y * blockDim.y + threadIdx.x;",
+            ),
             ("col < output.GetWidth()", "col <= output.GetWidth()"),
         ]:
             with self.subTest(mutation=new):
@@ -270,29 +299,38 @@ class RotationPrngTest(unittest.TestCase):
     def test_negative_added_startup_initialization(self):
         signature = "UninitializedTag)"
         start = self.source.index("{", self.source.index(signature))
-        mutated = (self.source[:start + 1] + "Reinitialize(0);" +
-                   self.source[start + 1:])
+        mutated = (
+            self.source[: start + 1]
+            + "Reinitialize(0);"
+            + self.source[start + 1 :]
+        )
         with self.assertRaises(AssertionError):
             check_contract(self.header, mutated)
         self.assertNotEqual(run_host(self.header, mutated).returncode, 0)
 
     def test_hip_keeps_only_legacy_api(self):
-        harness = r"""
-#include <type_traits>
-using namespace colmap::mvs;
-template <class T, class = void> struct HasTag : std::false_type {};
-template <class T> struct HasTag<T, std::void_t<typename T::UninitializedTag>>
-    : std::true_type {};
-template <class T, class = void> struct HasReinitialize : std::false_type {};
-template <class T> struct HasReinitialize<T, std::void_t<decltype(&T::Reinitialize)>>
-    : std::true_type {};
-static_assert(!HasTag<GpuMatPRNG>::value);
-static_assert(!HasReinitialize<GpuMatPRNG>::value);
-int main() {
-  GpuMatPRNG legacy(3, 5);
-  assert(allocations == 1 && launches.size() == 1 && waits.empty());
-}
-"""
+        harness = (
+            "\n"
+            "#include <type_traits>\n"
+            "using namespace colmap::mvs;\n"
+            "template <class T, class = void> struct HasTag : std::false_"
+            "type {};\n"
+            "template <class T> struct HasTag<T, std::void_t<typename T::"
+            "UninitializedTag>>\n"
+            "    : std::true_type {};\n"
+            "template <class T, class = void> struct HasReinitialize : st"
+            "d::false_type {};\n"
+            "template <class T> struct HasReinitialize<T, std::void_t<dec"
+            "ltype(&T::Reinitialize)>>\n"
+            "    : std::true_type {};\n"
+            "static_assert(!HasTag<GpuMatPRNG>::value);\n"
+            "static_assert(!HasReinitialize<GpuMatPRNG>::value);\n"
+            "int main() {\n"
+            "  GpuMatPRNG legacy(3, 5);\n"
+            "  assert(allocations == 1 && launches.size() == 1 && waits.e"
+            "mpty());\n"
+            "}\n"
+        )
         result = run_host(
             self.header, "#define COLMAP_HIP_ENABLED\n" + self.source, harness
         )

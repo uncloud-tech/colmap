@@ -46,8 +46,7 @@ inline void WriteCheckedMatWith(const Mat<float>& mat,
   SetFullPrecTextStream(stream);
   stream << mat.GetWidth() << "&" << mat.GetHeight() << "&" << mat.GetDepth()
          << "&";
-  WriteBinaryLittleEndian<float>(&stream,
-                                 {mat.GetPtr(), mat.GetData().size()});
+  WriteBinaryLittleEndian<float>(&stream, {mat.GetPtr(), mat.GetData().size()});
   stream.flush();
   if (close) {
     close();

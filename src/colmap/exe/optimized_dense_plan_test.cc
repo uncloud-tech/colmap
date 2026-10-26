@@ -22,8 +22,8 @@
     defined(__linux__)
 #define COLMAP_DENSE_PLAN_NATIVE_TEST
 #include "colmap/exe/mvs.h"
-#include "colmap/mvs/patch_match.h"
 #include "colmap/mvs/optimized_photo_runner.h"
+#include "colmap/mvs/patch_match.h"
 #include "colmap/mvs/resident_contract.h"
 #include "colmap/sensor/bitmap.h"
 #include "colmap/util/logging.h"
@@ -46,21 +46,23 @@ void Write(const std::filesystem::path& path, const std::string& text) {
 #endif
 TEST(OptimizedDensePlan, RealCommandRejectsUnknownOptionsWithoutWrites) {
   const auto root = CreateTestDir();
-  EXPECT_NE(RunDensePlanCommand({"--log_path", (root / "must-not-exist").string()}), 0);
+  EXPECT_NE(
+      RunDensePlanCommand({"--log_path", (root / "must-not-exist").string()}),
+      0);
   EXPECT_TRUE(std::filesystem::is_empty(root));
 }
 TEST(OptimizedDensePlan, RealCommandRejectsMissingWorkspaceWithoutOutput) {
   const auto root = CreateTestDir();
   EXPECT_NE(RunDensePlanCommand({"--workspace_path",
-                 (root / "missing").string(),
-                 "--source_cap",
-                 "20",
-                 "--num_samples",
-                 "7",
-                 "--gpu_index",
-                 "0",
-                 "--output_path",
-                 (root / "new.json").string()}),
+                                 (root / "missing").string(),
+                                 "--source_cap",
+                                 "20",
+                                 "--num_samples",
+                                 "7",
+                                 "--gpu_index",
+                                 "0",
+                                 "--output_path",
+                                 (root / "new.json").string()}),
             0);
   EXPECT_TRUE(std::filesystem::is_empty(root));
 }
@@ -100,15 +102,15 @@ TEST(OptimizedDensePlan, UnavailableNativeBuildIsActionableWithoutFallback) {
   const auto root = CreateTestDir();
   ::testing::internal::CaptureStderr();
   const auto result = RunDensePlanCommand({"--workspace_path",
-                           root.string(),
-                           "--source_cap",
-                           "8",
-                           "--num_samples",
-                           "15",
-                           "--gpu_index",
-                           "0",
-                           "--output_path",
-                           (root / "plan.json").string()});
+                                           root.string(),
+                                           "--source_cap",
+                                           "8",
+                                           "--num_samples",
+                                           "15",
+                                           "--gpu_index",
+                                           "0",
+                                           "--output_path",
+                                           (root / "plan.json").string()});
   const auto diagnostic = ::testing::internal::GetCapturedStderr();
   EXPECT_NE(result, 0);
   EXPECT_NE(diagnostic.find("requires Linux CUDA MVS"), std::string::npos);

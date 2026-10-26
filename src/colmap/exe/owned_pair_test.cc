@@ -129,8 +129,8 @@ class OwnedPairTest : public testing::Test {
     const auto config = root_ / ("config " + Value(j) + ".cfg");
     Put(config, reference + "\n__all__\n");
     Put(Ini(j),
-        "workspace_path=" + workspace.string() + "\nconfig_path=" +
-            config.string() + "\n" + extra +
+        "workspace_path=" + workspace.string() +
+            "\nconfig_path=" + config.string() + "\n" + extra +
             "[PatchMatchStereo]\nnum_threads=1\ncache_size=0.000001\n"
             "geom_consistency=false\ngpu_index=0\n");
   }
@@ -161,16 +161,27 @@ class OwnedPairTest : public testing::Test {
     return path;
   }
   std::vector<std::string> Args() const {
-    return {"owned_pair_test", "--dispatch", "pair",
-            "--host_budget_bytes", "4000000",
-            "--device_budget_bytes", "1024",
-            "--job_a_host_charge_bytes", "1048576",
-            "--job_b_host_charge_bytes", "2097152",
-            "--job_a_device_charge_bytes", "128",
-            "--job_b_device_charge_bytes", "256",
-            "--process_host_charge_bytes", "16",
-            "--process_device_charge_bytes", "16",
-            "--io_threads_limit", "1"};
+    return {"owned_pair_test",
+            "--dispatch",
+            "pair",
+            "--host_budget_bytes",
+            "4000000",
+            "--device_budget_bytes",
+            "1024",
+            "--job_a_host_charge_bytes",
+            "1048576",
+            "--job_b_host_charge_bytes",
+            "2097152",
+            "--job_a_device_charge_bytes",
+            "128",
+            "--job_b_device_charge_bytes",
+            "256",
+            "--process_host_charge_bytes",
+            "16",
+            "--process_device_charge_bytes",
+            "16",
+            "--io_threads_limit",
+            "1"};
   }
   std::vector<std::string> ListArgs(const std::vector<size_t>& jobs) {
     auto args = Args();
@@ -184,19 +195,20 @@ class OwnedPairTest : public testing::Test {
     return RunPairs(static_cast<int>(argv.size()), argv.data(), run_job);
   }
   template <class RunJob, class PrepareJob>
-  int InvokePrepared(std::vector<std::string> args, RunJob run_job,
+  int InvokePrepared(std::vector<std::string> args,
+                     RunJob run_job,
                      PrepareJob prepare_job) {
     std::vector<char*> argv;
     for (auto& arg : args) argv.push_back(arg.data());
-    return RunPairs(static_cast<int>(argv.size()), argv.data(),
-                    run_job, prepare_job);
+    return RunPairs(
+        static_cast<int>(argv.size()), argv.data(), run_job, prepare_job);
   }
   void Reject(std::vector<std::string> args) {
     std::atomic<size_t> calls{0};
     EventCapture capture;
-    EXPECT_THROW(Invoke(std::move(args), [&](auto&, auto&, size_t, const auto&) {
-      ++calls;
-    }), std::exception);
+    EXPECT_THROW(Invoke(std::move(args),
+                        [&](auto&, auto&, size_t, const auto&) { ++calls; }),
+                 std::exception);
     EXPECT_EQ(calls.load(), 0);
     for (const auto& record : Records(capture.Read())) {
       EXPECT_NE(record.at("event"), "admitted");
@@ -218,7 +230,11 @@ class OwnedPairTest : public testing::Test {
     images.reserve(slot + 1);
     images.resize(slot);
     images.emplace_back(job.workspace / "images" / job.reference_name,
-                        1, 1, identity, identity, translation);
+                        1,
+                        1,
+                        identity,
+                        identity,
+                        translation);
     mvs::PatchMatch::Problem problem;
     problem.ref_image_idx = static_cast<int>(slot);
     problem.images = &images;
@@ -243,19 +259,25 @@ TEST_F(OwnedPairTest, RuntimeTileDefaultExplicitAndMetadata) {
     for (const std::string tile : {"", "8", "16", "32"}) {
       auto args = ListArgs({0, 1, 2, 3});
       args[2] = mode;
-      if (!tile.empty()) args.insert(args.end(), {"--owned_tile_threads", tile});
+      if (!tile.empty())
+        args.insert(args.end(), {"--owned_tile_threads", tile});
       const int expected = tile.empty() ? 32 : std::stoi(tile);
       std::atomic<size_t> calls{0};
       EventCapture capture;
-      EXPECT_EQ(Invoke(args, [&](auto& job, auto& coordinator, size_t slot,
-                                const auto& hooks) {
-        EXPECT_EQ(hooks.owned_tile_threads, expected);
-        pair::DispatchOwnedTile(hooks.owned_tile_threads, [&](auto selected) {
-          EXPECT_EQ(decltype(selected)::value, expected);
-          ++calls;
-        });
-        Complete(job, coordinator, slot, hooks);
-      }), EXIT_SUCCESS);
+      EXPECT_EQ(Invoke(args,
+                       [&](auto& job,
+                           auto& coordinator,
+                           size_t slot,
+                           const auto& hooks) {
+                         EXPECT_EQ(hooks.owned_tile_threads, expected);
+                         pair::DispatchOwnedTile(
+                             hooks.owned_tile_threads, [&](auto selected) {
+                               EXPECT_EQ(decltype(selected)::value, expected);
+                               ++calls;
+                             });
+                         Complete(job, coordinator, slot, hooks);
+                       }),
+                EXIT_SUCCESS);
       EXPECT_EQ(calls.load(), 4);
       size_t validated = 0, metadata = 0;
       for (const auto& record : Records(capture.Read())) {
@@ -273,13 +295,15 @@ TEST_F(OwnedPairTest, RuntimeTileDefaultExplicitAndMetadata) {
 }
 
 TEST_F(OwnedPairTest, InvalidRuntimeTileRejectsBeforeOwners) {
-  for (const std::string tile : {"0", "4", "64", "-8", "+8", "08", "16 ", "", "auto"}) {
+  for (const std::string tile :
+       {"0", "4", "64", "-8", "+8", "08", "16 ", "", "auto"}) {
     auto args = ListArgs({0, 1});
     args.insert(args.end(), {"--owned_tile_threads", tile});
     Reject(args);
   }
   auto args = ListArgs({0, 1});
-  args.insert(args.end(), {"--owned_tile_threads", "16", "--owned_tile_threads", "32"});
+  args.insert(args.end(),
+              {"--owned_tile_threads", "16", "--owned_tile_threads", "32"});
   Reject(args);
 }
 
@@ -289,17 +313,24 @@ TEST_F(OwnedPairTest, StaticThreeRealParserOwnerAndEventContract) {
   }
   for (const auto* permits : {"2", "3"}) {
     auto args = ListArgs({0, 1, 2});
-    args.insert(args.end(), {"--static_three_solver_permits", permits,
-                            "--job_c_host_charge_bytes", "524288",
-                            "--job_c_device_charge_bytes", "128"});
+    args.insert(args.end(),
+                {"--static_three_solver_permits",
+                 permits,
+                 "--job_c_host_charge_bytes",
+                 "524288",
+                 "--job_c_device_charge_bytes",
+                 "128"});
     EventCapture capture;
     std::atomic<size_t> calls{0};
-    EXPECT_EQ(Invoke(args, [&](auto& job, auto& coordinator, size_t slot,
-                              const auto& hooks) {
-      ++calls;
-      EXPECT_EQ(coordinator.JobCount(), 3);
-      Complete(job, coordinator, slot, hooks);
-    }), EXIT_SUCCESS);
+    EXPECT_EQ(
+        Invoke(
+            args,
+            [&](auto& job, auto& coordinator, size_t slot, const auto& hooks) {
+              ++calls;
+              EXPECT_EQ(coordinator.JobCount(), 3);
+              Complete(job, coordinator, slot, hooks);
+            }),
+        EXIT_SUCCESS);
     EXPECT_EQ(calls.load(), 3);
     const auto records = Records(capture.Read());
     std::set<std::string> ready;
@@ -337,17 +368,25 @@ TEST_F(OwnedPairTest, StaticThreeTwoEpochsCloseBeforeSuccessorAdmission) {
   }
   for (const auto* permits : {"2", "3"}) {
     auto args = ListArgs({0, 1, 2, 3, 4, 5});
-    args.insert(args.end(), {"--static_three_solver_permits", permits,
-                            "--job_c_host_charge_bytes", "524288",
-                            "--job_c_device_charge_bytes", "128"});
+    args.insert(args.end(),
+                {"--static_three_solver_permits",
+                 permits,
+                 "--job_c_host_charge_bytes",
+                 "524288",
+                 "--job_c_device_charge_bytes",
+                 "128"});
     EventCapture capture;
     std::atomic<size_t> calls{0};
-    EXPECT_EQ(Invoke(args, [&](auto& job, auto& coordinator, size_t slot,
-                              const auto& hooks) {
-      const size_t ordinal = calls.fetch_add(1);
-      EXPECT_EQ(job.workspace, Workspace(slot + (ordinal >= 3 ? 3 : 0)));
-      Complete(job, coordinator, slot, hooks);
-    }), EXIT_SUCCESS);
+    EXPECT_EQ(
+        Invoke(
+            args,
+            [&](auto& job, auto& coordinator, size_t slot, const auto& hooks) {
+              const size_t ordinal = calls.fetch_add(1);
+              EXPECT_EQ(job.workspace,
+                        Workspace(slot + (ordinal >= 3 ? 3 : 0)));
+              Complete(job, coordinator, slot, hooks);
+            }),
+        EXIT_SUCCESS);
     EXPECT_EQ(calls.load(), 6);
     const auto records = Records(capture.Read());
     std::string batch;
@@ -393,19 +432,26 @@ TEST_F(OwnedPairTest, StaticThreeFailureClosesAndStopsSuccessor) {
   }
   for (size_t failing : {0, 2, 3, 5}) {
     auto args = ListArgs({0, 1, 2, 3, 4, 5});
-    args.insert(args.end(), {"--static_three_solver_permits", "3",
-                            "--job_c_host_charge_bytes", "524288",
-                            "--job_c_device_charge_bytes", "128"});
+    args.insert(args.end(),
+                {"--static_three_solver_permits",
+                 "3",
+                 "--job_c_host_charge_bytes",
+                 "524288",
+                 "--job_c_device_charge_bytes",
+                 "128"});
     EventCapture capture;
     std::atomic<size_t> calls{0};
-    EXPECT_THROW(Invoke(args, [&](auto& job, auto& coordinator, size_t slot,
-                                 const auto& hooks) {
-      ++calls;
-      if (job.workspace == Workspace(failing)) {
-        throw std::runtime_error("injected triple failure");
-      }
-      Complete(job, coordinator, slot, hooks);
-    }), std::runtime_error);
+    EXPECT_THROW(
+        Invoke(
+            args,
+            [&](auto& job, auto& coordinator, size_t slot, const auto& hooks) {
+              ++calls;
+              if (job.workspace == Workspace(failing)) {
+                throw std::runtime_error("injected triple failure");
+              }
+              Complete(job, coordinator, slot, hooks);
+            }),
+        std::runtime_error);
     const size_t epochs = failing < 3 ? 1 : 2;
     EXPECT_EQ(calls.load(), epochs * 3);
     size_t admitted = 0, retired = 0, joined = 0, released = 0, failed = 0;
@@ -433,13 +479,18 @@ TEST_F(OwnedPairTest, StaticThreeFailureClosesAndStopsSuccessor) {
 TEST_F(OwnedPairTest, StaticThreeRejectsUnsupportedModesBeforeOwners) {
   auto triple = [&](std::vector<size_t> slots) {
     auto args = ListArgs(slots);
-    args.insert(args.end(), {"--static_three_solver_permits", "2",
-                            "--job_c_host_charge_bytes", "524288",
-                            "--job_c_device_charge_bytes", "128"});
+    args.insert(args.end(),
+                {"--static_three_solver_permits",
+                 "2",
+                 "--job_c_host_charge_bytes",
+                 "524288",
+                 "--job_c_device_charge_bytes",
+                 "128"});
     return args;
   };
-  Reject(triple({0, 1, 2})); // photometric
-  for (size_t j = 0; j < 4; ++j) SetPatchMatchOption(j, "geom_consistency", "true");
+  Reject(triple({0, 1, 2}));  // photometric
+  for (size_t j = 0; j < 4; ++j)
+    SetPatchMatchOption(j, "geom_consistency", "true");
   Reject(triple({0, 1}));
   Reject(triple({0, 1, 2, 3}));
   auto args = triple({0, 1, 2});
@@ -468,8 +519,11 @@ TEST_F(OwnedPairTest, RejectsEmptyOddAndDuplicateLists) {
 
 TEST_F(OwnedPairTest, RejectsMixedMissingAndAmbiguousArguments) {
   auto mixed = ListArgs({0, 1});
-  mixed.insert(mixed.end(), {"--job_a_project_path", Ini(0).string(),
-                             "--job_b_project_path", Ini(1).string()});
+  mixed.insert(mixed.end(),
+               {"--job_a_project_path",
+                Ini(0).string(),
+                "--job_b_project_path",
+                Ini(1).string()});
   Reject(mixed);
   auto partial = Args();
   partial.insert(partial.end(), {"--job_a_project_path", Ini(0).string()});
@@ -490,31 +544,36 @@ TEST_F(OwnedPairTest, PreservesLiteralEdgeSpacesAndCrLfListPaths) {
   const auto spaced = Ini(0).parent_path() / " leading and trailing.ini ";
   fs::copy_file(Ini(0), spaced);
   auto args = ListArgs({0, 1});
-  Put(List({0, 1}), spaced.filename().string() + "\r\n" +
-                        Ini(1).string() + "\r\n");
+  Put(List({0, 1}),
+      spaced.filename().string() + "\r\n" + Ini(1).string() + "\r\n");
   std::atomic<size_t> calls{0};
   EventCapture capture;
-  EXPECT_EQ(Invoke(args, [&](auto& job, auto& coordinator, size_t slot,
-                             const auto& hooks) {
-    ++calls;
-    Complete(job, coordinator, slot, hooks);
-  }), EXIT_SUCCESS);
+  EXPECT_EQ(
+      Invoke(args,
+             [&](auto& job, auto& coordinator, size_t slot, const auto& hooks) {
+               ++calls;
+               Complete(job, coordinator, slot, hooks);
+             }),
+      EXIT_SUCCESS);
   EXPECT_EQ(calls.load(), 2);
 }
 
 TEST_F(OwnedPairTest, InvalidLaterIniPreventsAllOwners) {
-  Put(Ini(3), "workspace_path=" + Workspace(3).string() +
-                  "\n[PatchMatchStereo]\nnot_an_option=1\n");
+  Put(Ini(3),
+      "workspace_path=" + Workspace(3).string() +
+          "\n[PatchMatchStereo]\nnot_an_option=1\n");
   Reject(ListArgs({0, 1, 2, 3}));
 }
 
-TEST_F(OwnedPairTest, LaterConflictingGlobalsDeviceAndReferencePreventAllOwners) {
+TEST_F(OwnedPairTest,
+       LaterConflictingGlobalsDeviceAndReferencePreventAllOwners) {
   WriteJob(3, "default_random_seed=123\n");
   Reject(ListArgs({0, 1, 2, 3}));
   WriteJob(3);
   std::ifstream file(Ini(3));
   std::string text((std::istreambuf_iterator<char>(file)), {});
-  text.replace(text.find("gpu_index=0"), std::string("gpu_index=0").size(),
+  text.replace(text.find("gpu_index=0"),
+               std::string("gpu_index=0").size(),
                "gpu_index=1");
   file.close();
   Put(Ini(3), text);
@@ -542,16 +601,21 @@ TEST_F(OwnedPairTest, CoordinatorConstructionFailurePreventsOwners) {
 
 TEST_F(OwnedPairTest, LegacyTwoIniStillUsesProductionOwners) {
   auto args = Args();
-  args.insert(args.end(), {"--job_a_project_path", Ini(0).string(),
-                           "--job_b_project_path", Ini(1).string()});
+  args.insert(args.end(),
+              {"--job_a_project_path",
+               Ini(0).string(),
+               "--job_b_project_path",
+               Ini(1).string()});
   std::atomic<size_t> calls{0};
   EventCapture capture;
-  EXPECT_EQ(Invoke(args, [&](auto& job, auto& coordinator, size_t slot,
-                             const auto& hooks) {
-    EXPECT_TRUE(job.patch_match_stereo->filter);
-    ++calls;
-    Complete(job, coordinator, slot, hooks);
-  }), EXIT_SUCCESS);
+  EXPECT_EQ(
+      Invoke(args,
+             [&](auto& job, auto& coordinator, size_t slot, const auto& hooks) {
+               EXPECT_TRUE(job.patch_match_stereo->filter);
+               ++calls;
+               Complete(job, coordinator, slot, hooks);
+             }),
+      EXIT_SUCCESS);
   EXPECT_EQ(calls.load(), 2);
   size_t filter_options = 0;
   for (const auto& record : Records(capture.Read())) {
@@ -571,13 +635,15 @@ TEST_F(OwnedPairTest, CoordinateSeedReachesOwnersAndMetadata) {
     }
     std::atomic<size_t> calls{0};
     EventCapture capture;
-    EXPECT_EQ(Invoke(ListArgs({0, 1, 2, 3}),
-                     [&](auto& job, auto& coordinator, size_t slot,
-                         const auto& hooks) {
-      EXPECT_EQ(job.patch_match_stereo->random_seed, seed);
-      ++calls;
-      Complete(job, coordinator, slot, hooks);
-    }), EXIT_SUCCESS);
+    EXPECT_EQ(
+        Invoke(
+            ListArgs({0, 1, 2, 3}),
+            [&](auto& job, auto& coordinator, size_t slot, const auto& hooks) {
+              EXPECT_EQ(job.patch_match_stereo->random_seed, seed);
+              ++calls;
+              Complete(job, coordinator, slot, hooks);
+            }),
+        EXIT_SUCCESS);
     EXPECT_EQ(calls.load(), 4);
     size_t seed_options = 0;
     for (const auto& record : Records(capture.Read())) {
@@ -599,13 +665,16 @@ TEST_F(OwnedPairTest, ExplicitUnfilteredPhotoReachesBothEpochsAndMetadata) {
     args[2] = dispatch;
     std::atomic<size_t> calls{0};
     EventCapture capture;
-    EXPECT_EQ(Invoke(args, [&](auto& job, auto& coordinator, size_t slot,
-                               const auto& hooks) {
-      EXPECT_FALSE(job.patch_match_stereo->filter);
-      EXPECT_FALSE(job.patch_match_stereo->geom_consistency);
-      ++calls;
-      Complete(job, coordinator, slot, hooks);
-    }), EXIT_SUCCESS);
+    EXPECT_EQ(
+        Invoke(
+            args,
+            [&](auto& job, auto& coordinator, size_t slot, const auto& hooks) {
+              EXPECT_FALSE(job.patch_match_stereo->filter);
+              EXPECT_FALSE(job.patch_match_stereo->geom_consistency);
+              ++calls;
+              Complete(job, coordinator, slot, hooks);
+            }),
+        EXIT_SUCCESS);
     EXPECT_EQ(calls.load(), 4);
     size_t filter_options = 0, finished = 0;
     for (const auto& record : Records(capture.Read())) {
@@ -639,19 +708,24 @@ TEST_F(OwnedPairTest, GeometryRequiresSamePhaseJobsWithoutLookahead) {
     args[2] = dispatch;
     std::atomic<size_t> calls{0};
     EventCapture capture;
-    EXPECT_EQ(Invoke(args, [&](auto& job, auto& coordinator, size_t slot,
-                               const auto& hooks) {
-      EXPECT_TRUE(job.patch_match_stereo->geom_consistency);
-      EXPECT_TRUE(job.patch_match_stereo->filter);
-      EXPECT_EQ(job.outputs[0].filename(), job.reference_name + ".geometric.bin");
-      ++calls;
-      Complete(job, coordinator, slot, hooks);
-    }), EXIT_SUCCESS);
+    EXPECT_EQ(
+        Invoke(
+            args,
+            [&](auto& job, auto& coordinator, size_t slot, const auto& hooks) {
+              EXPECT_TRUE(job.patch_match_stereo->geom_consistency);
+              EXPECT_TRUE(job.patch_match_stereo->filter);
+              EXPECT_EQ(job.outputs[0].filename(),
+                        job.reference_name + ".geometric.bin");
+              ++calls;
+              Complete(job, coordinator, slot, hooks);
+            }),
+        EXIT_SUCCESS);
     EXPECT_EQ(calls.load(), 2);
   }
   auto args = ListArgs({0, 1});
-  args.insert(args.end(), {"--host_lookahead", "1",
-                          "--host_lookahead_charge_bytes", "100"});
+  args.insert(
+      args.end(),
+      {"--host_lookahead", "1", "--host_lookahead_charge_bytes", "100"});
   Reject(args);  // Even the no-next-epoch fallback must not permit geometry.
   for (size_t j : {2, 3}) SetPatchMatchOption(j, "geom_consistency", "true");
   {
@@ -684,8 +758,8 @@ TEST_F(OwnedPairTest, EarlyGeometryPermitsAdmissionAndMetadata) {
     }
     EXPECT_TRUE(validated);
   }
-  args.insert(args.end(), {"--host_lookahead", "1",
-                           "--host_lookahead_charge_bytes", "1"});
+  args.insert(args.end(),
+              {"--host_lookahead", "1", "--host_lookahead_charge_bytes", "1"});
   Reject(args);
   auto photo = ListArgs({2, 3});
   photo.insert(photo.end(), {"--geometry_early_permits", "0"});
@@ -696,8 +770,10 @@ TEST_F(OwnedPairTest, EarlyGeometryPermitsAdmissionAndMetadata) {
 TEST_F(OwnedPairTest, GeometryBadFlagsAndExistingOutputRejectBeforeDispatch) {
   for (size_t j : {0, 1}) SetPatchMatchOption(j, "geom_consistency", "true");
   for (const auto& option : std::vector<std::pair<std::string, std::string>>{
-           {"filter", "false"}, {"write_consistency_graph", "true"},
-           {"allow_missing_files", "true"}, {"window_radius", "4"},
+           {"filter", "false"},
+           {"write_consistency_graph", "true"},
+           {"allow_missing_files", "true"},
+           {"window_radius", "4"},
            {"window_step", "2"}}) {
     SetPatchMatchOption(1, option.first, option.second);
     Reject(ListArgs({0, 1}));
@@ -705,8 +781,8 @@ TEST_F(OwnedPairTest, GeometryBadFlagsAndExistingOutputRejectBeforeDispatch) {
     SetPatchMatchOption(1, "geom_consistency", "true");
   }
   for (const auto* folder : {"depth_maps", "normal_maps"}) {
-    const auto path = Workspace(1) / "stereo" / folder /
-                      "reference 1.jpg.geometric.bin";
+    const auto path =
+        Workspace(1) / "stereo" / folder / "reference 1.jpg.geometric.bin";
     Put(path, "partial output");
     Reject(ListArgs({0, 1}));
     fs::remove(path);
@@ -714,7 +790,8 @@ TEST_F(OwnedPairTest, GeometryBadFlagsAndExistingOutputRejectBeforeDispatch) {
   JobOptions job;
   job.patch_match_stereo->geom_consistency = true;
   std::atomic<bool> cancelled{false};
-  EXPECT_THROW(PrepareFutureHostJob(job, 0, {1, 1}, cancelled), std::invalid_argument);
+  EXPECT_THROW(PrepareFutureHostJob(job, 0, {1, 1}, cancelled),
+               std::invalid_argument);
 }
 
 TEST_F(OwnedPairTest, GeometryEnvelopeUsesActualDimensionsAndPhotoIsUnchanged) {
@@ -738,7 +815,8 @@ TEST_F(OwnedPairTest, GeometryEnvelopeUsesActualDimensionsAndPhotoIsUnchanged) {
       fs::create_directories(workspace / "stereo" / folder);
     }
     depth.Write(workspace / "stereo/depth_maps" / (name + ".photometric.bin"));
-    normal.Write(workspace / "stereo/normal_maps" / (name + ".photometric.bin"));
+    normal.Write(workspace / "stereo/normal_maps" /
+                 (name + ".photometric.bin"));
   }
   mvs::PatchMatch::Problem problem;
   problem.images = &images;
@@ -770,21 +848,26 @@ TEST_F(OwnedPairTest, GeometryEnvelopeUsesActualDimensionsAndPhotoIsUnchanged) {
   const uint64_t photo_host = q + 2 * q + u;
   const uint64_t photo_device = rotation + u + 2 * a + 688 * 2 + 32;
   fs::remove_all(workspace / "stereo");  // Photo needs no seeds.
-  EXPECT_NO_THROW(CheckInputs(options, problem, {photo_host, photo_device}, workspace));
-  EXPECT_THROW(CheckInputs(options, problem, {photo_host - 1, photo_device}, workspace),
-               std::invalid_argument);
-  EXPECT_THROW(CheckInputs(options, problem, {photo_host, photo_device - 1}, workspace),
-               std::invalid_argument);
+  EXPECT_NO_THROW(
+      CheckInputs(options, problem, {photo_host, photo_device}, workspace));
+  EXPECT_THROW(
+      CheckInputs(options, problem, {photo_host - 1, photo_device}, workspace),
+      std::invalid_argument);
+  EXPECT_THROW(
+      CheckInputs(options, problem, {photo_host, photo_device - 1}, workspace),
+      std::invalid_argument);
   options.cache_size = (q - 1) / 1073741824.0;
-  EXPECT_THROW(CheckInputs(options, problem, {photo_host, photo_device}, workspace),
-               std::invalid_argument);
+  EXPECT_THROW(
+      CheckInputs(options, problem, {photo_host, photo_device}, workspace),
+      std::invalid_argument);
 }
 
-TEST_F(OwnedPairTest, SeedHeaderPreflightRejectsMissingMalformedAndMismatchedMaps) {
+TEST_F(OwnedPairTest,
+       SeedHeaderPreflightRejectsMissingMalformedAndMismatchedMaps) {
   const auto path = root_ / "seed.bin";
   EXPECT_THROW(CheckSeedMap(path, 2, 3, 1), std::invalid_argument);
-  for (const std::string header : {"", "2&3&", "-2&3&1&", "2x3&1&",
-                                  "2&3&3&", "3&2&1&", "2&3&1&"}) {
+  for (const std::string header :
+       {"", "2&3&", "-2&3&1&", "2x3&1&", "2&3&3&", "3&2&1&", "2&3&1&"}) {
     Put(path, header);
     EXPECT_THROW(CheckSeedMap(path, 2, 3, 1), std::invalid_argument);
   }
@@ -802,13 +885,12 @@ TEST_F(OwnedPairTest, InvalidFilterDoesNotSilentlyUseDefault) {
 }
 
 TEST_F(OwnedPairTest, TwoEpochsJoinReleaseAndFinishBeforeNextAdmission) {
-  for (const auto& mode : {
-           std::make_tuple(false, false, "serial"),
-           std::make_tuple(false, false, "pair"),
-           std::make_tuple(true, false, "serial"),
-           std::make_tuple(true, false, "pair"),
-           std::make_tuple(true, true, "serial"),
-           std::make_tuple(true, true, "pair")}) {
+  for (const auto& mode : {std::make_tuple(false, false, "serial"),
+                           std::make_tuple(false, false, "pair"),
+                           std::make_tuple(true, false, "serial"),
+                           std::make_tuple(true, false, "pair"),
+                           std::make_tuple(true, true, "serial"),
+                           std::make_tuple(true, true, "pair")}) {
     const bool geometry = std::get<0>(mode);
     const bool early = std::get<1>(mode);
     const std::string dispatch = std::get<2>(mode);
@@ -829,24 +911,29 @@ TEST_F(OwnedPairTest, TwoEpochsJoinReleaseAndFinishBeforeNextAdmission) {
       ~Resource() { ++destroyed; }
     };
     EventCapture capture;
-    ASSERT_EQ(Invoke(args, [&](auto& job, auto& coordinator, size_t slot,
-                               const auto& hooks) {
-      Resource resource{destroyed};
-      if (job.reference_name == "reference 2.jpg" ||
-          job.reference_name == "reference 3.jpg") {
-        EXPECT_GE(destroyed.load(), 2);
-      }
-      EXPECT_EQ(coordinator.ReservedBytes().host, 3145744);
-      EXPECT_EQ(coordinator.ReservedBytes().device, 400);
-      {
-        std::lock_guard<std::mutex> lock(mutex);
-        seen[slot].push_back(job.reference_name);
-      }
-      Complete(job, coordinator, slot, hooks);
-    }), EXIT_SUCCESS);
+    ASSERT_EQ(
+        Invoke(
+            args,
+            [&](auto& job, auto& coordinator, size_t slot, const auto& hooks) {
+              Resource resource{destroyed};
+              if (job.reference_name == "reference 2.jpg" ||
+                  job.reference_name == "reference 3.jpg") {
+                EXPECT_GE(destroyed.load(), 2);
+              }
+              EXPECT_EQ(coordinator.ReservedBytes().host, 3145744);
+              EXPECT_EQ(coordinator.ReservedBytes().device, 400);
+              {
+                std::lock_guard<std::mutex> lock(mutex);
+                seen[slot].push_back(job.reference_name);
+              }
+              Complete(job, coordinator, slot, hooks);
+            }),
+        EXIT_SUCCESS);
     EXPECT_EQ(destroyed.load(), 4);
-    EXPECT_EQ(seen[0], (std::vector<std::string>{"reference 0.jpg", "reference 2.jpg"}));
-    EXPECT_EQ(seen[1], (std::vector<std::string>{"reference 1.jpg", "reference 3.jpg"}));
+    EXPECT_EQ(seen[0],
+              (std::vector<std::string>{"reference 0.jpg", "reference 2.jpg"}));
+    EXPECT_EQ(seen[1],
+              (std::vector<std::string>{"reference 1.jpg", "reference 3.jpg"}));
     const auto records = Records(capture.Read());
     size_t admitted = 0, joined = 0, released = 0, finished = 0;
     std::vector<std::string> batches;
@@ -882,12 +969,15 @@ TEST_F(OwnedPairTest, TwoEpochsJoinReleaseAndFinishBeforeNextAdmission) {
   }
 }
 
-TEST_F(OwnedPairTest, CallbackFailuresAbortLaterEpochsAndDestroyOwnerResources) {
-  for (size_t j = 0; j < 4; ++j) SetPatchMatchOption(j, "geom_consistency", "true");
+TEST_F(OwnedPairTest,
+       CallbackFailuresAbortLaterEpochsAndDestroyOwnerResources) {
+  for (size_t j = 0; j < 4; ++j)
+    SetPatchMatchOption(j, "geom_consistency", "true");
   // Thread-factory injection is intentionally not added to RunPairs. These
   // faults cover controller construction, owner work, output and cleanup via
   // its supported callback seam, not OS thread-construction failure.
-  for (const std::string phase : {"construction", "owner", "output", "cleanup"}) {
+  for (const std::string phase :
+       {"construction", "owner", "output", "cleanup"}) {
     SCOPED_TRACE(phase);
     auto args = ListArgs({0, 1, 2, 3});
     args.insert(args.end(), {"--geometry_early_permits", "1"});
@@ -897,32 +987,35 @@ TEST_F(OwnedPairTest, CallbackFailuresAbortLaterEpochsAndDestroyOwnerResources) 
       ~Resource() { ++destroyed; }
     };
     EventCapture capture;
-    EXPECT_THROW(Invoke(args, [&](auto& job, auto& coordinator,
-                                 size_t slot, const auto& hooks) {
-      ++calls;
-      Resource resource{destroyed};
-      EXPECT_NE(job.reference_name, "reference 2.jpg");
-      EXPECT_NE(job.reference_name, "reference 3.jpg");
-      if (slot == 0 && phase == "construction") {
-        throw std::runtime_error("injected construction failure");
-      }
-      if (slot == 0 && phase == "owner") {
-        coordinator.BeginPreparation(slot);
-        throw std::runtime_error("injected owner failure");
-      }
-      if (slot == 0 && phase == "output") {
-        auto failing_hooks = hooks;
-        failing_hooks.output_phase = [](size_t, const char*) {
-          throw std::runtime_error("injected output failure");
-        };
-        Complete(job, coordinator, slot, failing_hooks);
-      } else {
-        Complete(job, coordinator, slot, hooks);
-      }
-      if (slot == 0 && phase == "cleanup") {
-        throw std::runtime_error("injected cleanup failure");
-      }
-    }), std::runtime_error);
+    EXPECT_THROW(
+        Invoke(
+            args,
+            [&](auto& job, auto& coordinator, size_t slot, const auto& hooks) {
+              ++calls;
+              Resource resource{destroyed};
+              EXPECT_NE(job.reference_name, "reference 2.jpg");
+              EXPECT_NE(job.reference_name, "reference 3.jpg");
+              if (slot == 0 && phase == "construction") {
+                throw std::runtime_error("injected construction failure");
+              }
+              if (slot == 0 && phase == "owner") {
+                coordinator.BeginPreparation(slot);
+                throw std::runtime_error("injected owner failure");
+              }
+              if (slot == 0 && phase == "output") {
+                auto failing_hooks = hooks;
+                failing_hooks.output_phase = [](size_t, const char*) {
+                  throw std::runtime_error("injected output failure");
+                };
+                Complete(job, coordinator, slot, failing_hooks);
+              } else {
+                Complete(job, coordinator, slot, hooks);
+              }
+              if (slot == 0 && phase == "cleanup") {
+                throw std::runtime_error("injected cleanup failure");
+              }
+            }),
+        std::runtime_error);
     EXPECT_LE(calls.load(), 2);
     EXPECT_EQ(destroyed.load(), calls.load());
     size_t admissions = 0, joins = 0, finishes = 0;
@@ -949,13 +1042,15 @@ TEST_F(OwnedPairTest, HostLookaheadParserRejectsInvalidOrMissingReservation) {
 
 TEST_F(OwnedPairTest, HostLookaheadInsufficientBudgetFallsBackSynchronously) {
   auto args = ListArgs({0, 1, 2, 3});
-  args.insert(args.end(), {"--host_lookahead", "1",
-                           "--host_lookahead_charge_bytes", "4000000"});
+  args.insert(
+      args.end(),
+      {"--host_lookahead", "1", "--host_lookahead_charge_bytes", "4000000"});
   EventCapture capture;
   EXPECT_EQ(Invoke(args, Complete), EXIT_SUCCESS);
   const auto log = capture.Read();
-  EXPECT_NE(log.find("event=fallback enabled=0 reserved_host=0 reason=host_budget"),
-            std::string::npos);
+  EXPECT_NE(
+      log.find("event=fallback enabled=0 reserved_host=0 reason=host_budget"),
+      std::string::npos);
   std::istringstream lines(log);
   for (std::string line; std::getline(lines, line);) {
     if (line.find("OWNED_HOST_LOOKAHEAD ") != std::string::npos) {
@@ -967,25 +1062,35 @@ TEST_F(OwnedPairTest, HostLookaheadInsufficientBudgetFallsBackSynchronously) {
 TEST_F(OwnedPairTest, HostLookaheadRealDriverConsumesOnlyAfterNextAdmission) {
   if (AffinityCount() < 2) GTEST_SKIP() << "lookahead requires two CPU slots";
   auto args = ListArgs({0, 1, 2, 3});
-  args.insert(args.end(), {"--host_lookahead", "1",
-                           "--host_lookahead_charge_bytes", "100"});
+  args.insert(
+      args.end(),
+      {"--host_lookahead", "1", "--host_lookahead_charge_bytes", "100"});
   std::atomic<size_t> preparations{0}, consumed{0};
   EventCapture capture;
-  EXPECT_EQ(InvokePrepared(args,
-      [&](auto& job, auto& coordinator, size_t slot, const auto& hooks,
-          std::unique_ptr<PreparedHostJob> prepared) {
-        if (job.reference_name == "reference 2.jpg" ||
-            job.reference_name == "reference 3.jpg") {
-          EXPECT_NE(prepared, nullptr);
-          ++consumed;
-        } else EXPECT_EQ(prepared, nullptr);
-        Complete(job, coordinator, slot, hooks);
-      },
-      [&](auto&, size_t, pair::ByteCharge, const std::atomic<bool>& cancelled) {
-        EXPECT_FALSE(cancelled.load());
-        ++preparations;
-        return std::make_unique<PreparedHostJob>();
-      }), EXIT_SUCCESS);
+  EXPECT_EQ(InvokePrepared(
+                args,
+                [&](auto& job,
+                    auto& coordinator,
+                    size_t slot,
+                    const auto& hooks,
+                    std::unique_ptr<PreparedHostJob> prepared) {
+                  if (job.reference_name == "reference 2.jpg" ||
+                      job.reference_name == "reference 3.jpg") {
+                    EXPECT_NE(prepared, nullptr);
+                    ++consumed;
+                  } else
+                    EXPECT_EQ(prepared, nullptr);
+                  Complete(job, coordinator, slot, hooks);
+                },
+                [&](auto&,
+                    size_t,
+                    pair::ByteCharge,
+                    const std::atomic<bool>& cancelled) {
+                  EXPECT_FALSE(cancelled.load());
+                  ++preparations;
+                  return std::make_unique<PreparedHostJob>();
+                }),
+            EXIT_SUCCESS);
   EXPECT_EQ(preparations.load(), 2);
   EXPECT_EQ(consumed.load(), 2);
   const auto log = capture.Read();
@@ -999,26 +1104,35 @@ TEST_F(OwnedPairTest, HostLookaheadRealDriverConsumesOnlyAfterNextAdmission) {
     admissions += record.at("event") == "admitted";
   }
   EXPECT_EQ(admissions, 4);
-  EXPECT_NE(log.find("event=release enabled=1 reserved_host=0"), std::string::npos);
+  EXPECT_NE(log.find("event=release enabled=1 reserved_host=0"),
+            std::string::npos);
 }
 
 TEST_F(OwnedPairTest, HostPreparationFailureStopsNextEpochBeforeAdmission) {
   if (AffinityCount() < 2) GTEST_SKIP() << "lookahead requires two CPU slots";
   auto args = ListArgs({0, 1, 2, 3});
-  args.insert(args.end(), {"--host_lookahead", "1",
-                           "--host_lookahead_charge_bytes", "100"});
+  args.insert(
+      args.end(),
+      {"--host_lookahead", "1", "--host_lookahead_charge_bytes", "100"});
   EventCapture capture;
-  EXPECT_THROW(InvokePrepared(args, Complete,
-      [](auto&, size_t slot, pair::ByteCharge, const std::atomic<bool>&) {
-        if (slot == 1) throw std::runtime_error("injected CPU preparation error");
-        return std::make_unique<PreparedHostJob>();
-      }), std::runtime_error);
+  EXPECT_THROW(
+      InvokePrepared(
+          args,
+          Complete,
+          [](auto&, size_t slot, pair::ByteCharge, const std::atomic<bool>&) {
+            if (slot == 1)
+              throw std::runtime_error("injected CPU preparation error");
+            return std::make_unique<PreparedHostJob>();
+          }),
+      std::runtime_error);
   const auto log = capture.Read();
   size_t admissions = 0;
-  for (const auto& record : Records(log)) admissions += record.at("event") == "admitted";
+  for (const auto& record : Records(log))
+    admissions += record.at("event") == "admitted";
   EXPECT_EQ(admissions, 2);
   EXPECT_NE(log.find("event=failed"), std::string::npos);
-  EXPECT_NE(log.find("event=release enabled=1 reserved_host=0"), std::string::npos);
+  EXPECT_NE(log.find("event=release enabled=1 reserved_host=0"),
+            std::string::npos);
 }
 
 TEST_F(OwnedPairTest, ResidentModeRejectsNonRollingAndInvalidCharges) {
@@ -1028,8 +1142,9 @@ TEST_F(OwnedPairTest, ResidentModeRejectsNonRollingAndInvalidCharges) {
   args.back() = "resident";
   Reject(args);  // No rolling mode, reviewed forecasts or explicit bank charge.
   args.back() = "private";
-  args.insert(args.end(), {"--bank_host_charge_bytes", "1",
-                           "--bank_device_charge_bytes", "1"});
+  args.insert(
+      args.end(),
+      {"--bank_host_charge_bytes", "1", "--bank_device_charge_bytes", "1"});
   Reject(args);  // Private must not silently accept resident reservations.
 }
 
@@ -1073,23 +1188,37 @@ TEST_F(OwnedPairTest, P08MappingForecastsAndDrain) {
   // Production retains the complete bank slice outside the private ledger.
   settings.capacity.host -= settings.bank_charge.host;
   settings.capacity.device -= settings.bank_charge.device;
-  const std::vector<pair::ByteCharge> selected{full_forecasts[16], full_forecasts[17]};
+  const std::vector<pair::ByteCharge> selected{full_forecasts[16],
+                                               full_forecasts[17]};
   for (bool fail : {false, true}) {
     EventCapture capture;
     std::atomic<size_t> calls{0};
-    auto execute = [&](JobOptions& job, pair::PairCoordinator& coordinator,
-                       size_t generation, const auto& hooks) {
+    auto execute = [&](JobOptions& job,
+                       pair::PairCoordinator& coordinator,
+                       size_t generation,
+                       const auto& hooks) {
       ++calls;
       EXPECT_EQ(&job, jobs.at(indices.at(generation)).get());
       if (fail) throw std::runtime_error("selected owner failure");
       Complete(job, coordinator, generation, hooks);
     };
     if (fail) {
-      EXPECT_THROW(RunRollingFeed(jobs, settings, selected, execute,
-          PrivateInputCheck{}, nullptr, indices), std::runtime_error);
+      EXPECT_THROW(RunRollingFeed(jobs,
+                                  settings,
+                                  selected,
+                                  execute,
+                                  PrivateInputCheck{},
+                                  nullptr,
+                                  indices),
+                   std::runtime_error);
     } else {
-      RunRollingFeed(jobs, settings, selected, execute,
-          PrivateInputCheck{}, nullptr, indices);
+      RunRollingFeed(jobs,
+                     settings,
+                     selected,
+                     execute,
+                     PrivateInputCheck{},
+                     nullptr,
+                     indices);
       EXPECT_EQ(calls.load(), 2);
     }
     bool joined = false;
@@ -1108,39 +1237,61 @@ TEST_F(OwnedPairTest, P08MappingForecastsAndDrain) {
     if (!fail) EXPECT_EQ(bounds, 2);
   }
   auto noop = [](auto&, auto&, size_t, const auto&) {};
-  EXPECT_THROW(RunRollingFeed(jobs, settings, selected, noop,
-      PrivateInputCheck{}, nullptr, {16, 76}), std::invalid_argument);
-  EXPECT_EQ(jobs.size(), 76);  // Mapping never shrinks or reorders the bank inputs.
+  EXPECT_THROW(RunRollingFeed(jobs,
+                              settings,
+                              selected,
+                              noop,
+                              PrivateInputCheck{},
+                              nullptr,
+                              {16, 76}),
+               std::invalid_argument);
+  EXPECT_EQ(jobs.size(),
+            76);  // Mapping never shrinks or reorders the bank inputs.
 }
 
 TEST_F(OwnedPairTest, ResidentRealParserInvokesCpuSeamWithoutCacheGate) {
-  if (AffinityCount() < 3) GTEST_SKIP() << "rolling requires three CPU equivalents";
+  if (AffinityCount() < 3)
+    GTEST_SKIP() << "rolling requires three CPU equivalents";
   for (size_t j = 0; j < 3; ++j) {
     SetPatchMatchOption(j, "geom_consistency", "true");
-    SetPatchMatchOption(j, "cache_size", "100");  // Eliminated private input cache.
+    SetPatchMatchOption(
+        j, "cache_size", "100");  // Eliminated private input cache.
   }
   const auto forecasts = root_ / "resident-private-forecasts.txt";
   Put(forecasts, "100 100\n100 100\n100 100\n");
   auto args = ListArgs({0, 1, 2});
-  args.insert(args.end(), {"--static_three_solver_permits", "3",
-                          "--job_c_host_charge_bytes", "524288",
-                          "--job_c_device_charge_bytes", "128",
-                          "--owned_feed_mode", "rolling",
-                          "--job_forecast_list_path", forecasts.string(),
-                          "--owned_input_mode", "resident",
-                          "--bank_host_charge_bytes", "64",
-                          "--bank_device_charge_bytes", "64"});
+  args.insert(args.end(),
+              {"--static_three_solver_permits",
+               "3",
+               "--job_c_host_charge_bytes",
+               "524288",
+               "--job_c_device_charge_bytes",
+               "128",
+               "--owned_feed_mode",
+               "rolling",
+               "--job_forecast_list_path",
+               forecasts.string(),
+               "--owned_input_mode",
+               "resident",
+               "--bank_host_charge_bytes",
+               "64",
+               "--bank_device_charge_bytes",
+               "64"});
   std::vector<char*> argv;
   for (auto& arg : args) argv.push_back(arg.data());
   size_t calls = 0;
-  EXPECT_EQ(RunPairs(static_cast<int>(argv.size()), argv.data(), Complete,
-      &PrepareFutureHostJob, [&](auto& jobs, auto settings, auto bounds) {
-        ++calls;
-        EXPECT_EQ(jobs.size(), 3);
-        EXPECT_TRUE(settings.resident_inputs);
-        EXPECT_EQ(settings.bank_charge.host, 64);
-        EXPECT_EQ(bounds.size(), 3);
-      }), EXIT_SUCCESS);
+  EXPECT_EQ(RunPairs(static_cast<int>(argv.size()),
+                     argv.data(),
+                     Complete,
+                     &PrepareFutureHostJob,
+                     [&](auto& jobs, auto settings, auto bounds) {
+                       ++calls;
+                       EXPECT_EQ(jobs.size(), 3);
+                       EXPECT_TRUE(settings.resident_inputs);
+                       EXPECT_EQ(settings.bank_charge.host, 64);
+                       EXPECT_EQ(bounds.size(), 3);
+                     }),
+            EXIT_SUCCESS);
   EXPECT_EQ(calls, 1);
   // Resident is COLMAP-only; reject PMVS before resolution, loading or GPU.
   {
@@ -1148,20 +1299,29 @@ TEST_F(OwnedPairTest, ResidentRealParserInvokesCpuSeamWithoutCacheGate) {
     ASSERT_TRUE(input);
     const std::string original((std::istreambuf_iterator<char>(input)), {});
     Put(Ini(2), "workspace_format=PMVS\n" + original);
-    EXPECT_THROW(RunPairs(static_cast<int>(argv.size()), argv.data(), Complete,
-        &PrepareFutureHostJob, [&](auto&, auto, auto) { ++calls; }), std::invalid_argument);
+    EXPECT_THROW(RunPairs(static_cast<int>(argv.size()),
+                          argv.data(),
+                          Complete,
+                          &PrepareFutureHostJob,
+                          [&](auto&, auto, auto) { ++calls; }),
+                 std::invalid_argument);
     EXPECT_EQ(calls, 1);
     Put(Ini(2), original);
   }
   // Unsupported phase/device are rejected before the injected execution seam.
   SetPatchMatchOption(2, "gpu_index", "1");
-  EXPECT_THROW(RunPairs(static_cast<int>(argv.size()), argv.data(), Complete,
-      &PrepareFutureHostJob, [&](auto&, auto, auto) { ++calls; }), std::invalid_argument);
+  EXPECT_THROW(RunPairs(static_cast<int>(argv.size()),
+                        argv.data(),
+                        Complete,
+                        &PrepareFutureHostJob,
+                        [&](auto&, auto, auto) { ++calls; }),
+               std::invalid_argument);
   EXPECT_EQ(calls, 1);
 }
 
 TEST_F(OwnedPairTest, BoundedNormalLookaheadParserReservesAndRejects) {
-  if (AffinityCount() < 3) GTEST_SKIP() << "rolling requires three CPU equivalents";
+  if (AffinityCount() < 3)
+    GTEST_SKIP() << "rolling requires three CPU equivalents";
   for (size_t j = 0; j < 3; ++j) {
     SetPatchMatchOption(j, "geom_consistency", "true");
     SetPatchMatchOption(j, "cache_size", "100");
@@ -1170,61 +1330,101 @@ TEST_F(OwnedPairTest, BoundedNormalLookaheadParserReservesAndRejects) {
   Put(forecasts, "100 100\n100 100\n100 100\n");
   const auto base_args = [&] {
     auto args = ListArgs({0, 1, 2});
-    args.insert(args.end(), {"--static_three_solver_permits", "3",
-                            "--job_c_host_charge_bytes", "524288",
-                            "--job_c_device_charge_bytes", "128",
-                            "--owned_feed_mode", "rolling",
-                            "--job_forecast_list_path", forecasts.string(),
-                            "--owned_input_mode", "resident",
-                            "--bank_host_charge_bytes", "64",
-                            "--bank_device_charge_bytes", "64"});
+    args.insert(args.end(),
+                {"--static_three_solver_permits",
+                 "3",
+                 "--job_c_host_charge_bytes",
+                 "524288",
+                 "--job_c_device_charge_bytes",
+                 "128",
+                 "--owned_feed_mode",
+                 "rolling",
+                 "--job_forecast_list_path",
+                 forecasts.string(),
+                 "--owned_input_mode",
+                 "resident",
+                 "--bank_host_charge_bytes",
+                 "64",
+                 "--bank_device_charge_bytes",
+                 "64"});
     return args;
   };
-  const auto expect_mode = [&](std::vector<std::string> extra, bool bounded,
-                               size_t future) {
-    auto args = base_args();
-    args.insert(args.end(), extra.begin(), extra.end());
-    std::vector<char*> argv;
-    for (auto& arg : args) argv.push_back(arg.data());
-    size_t calls = 0;
-    EXPECT_EQ(RunPairs(static_cast<int>(argv.size()), argv.data(), Complete,
-        &PrepareFutureHostJob, [&](auto&, const auto& settings, auto) {
-          ++calls;
-          EXPECT_EQ(settings.normal_bounded, bounded);
-          EXPECT_EQ(settings.normal_future, future);
-        }), EXIT_SUCCESS);
-    EXPECT_EQ(calls, 1);
-  };
+  const auto expect_mode =
+      [&](std::vector<std::string> extra, bool bounded, size_t future) {
+        auto args = base_args();
+        args.insert(args.end(), extra.begin(), extra.end());
+        std::vector<char*> argv;
+        for (auto& arg : args) argv.push_back(arg.data());
+        size_t calls = 0;
+        EXPECT_EQ(RunPairs(static_cast<int>(argv.size()),
+                           argv.data(),
+                           Complete,
+                           &PrepareFutureHostJob,
+                           [&](auto&, const auto& settings, auto) {
+                             ++calls;
+                             EXPECT_EQ(settings.normal_bounded, bounded);
+                             EXPECT_EQ(settings.normal_future, future);
+                           }),
+                  EXIT_SUCCESS);
+        EXPECT_EQ(calls, 1);
+      };
   expect_mode({}, false, 0);
-  expect_mode({"--owned_normal_lookahead", "1",
-               "--owned_normal_lookahead_depth", "2",
-               "--normal_lookahead_charge_bytes", "40000"}, true, 2);
-  expect_mode({"--owned_normal_lookahead", "1",
-               "--owned_normal_lookahead_depth", "1",
-               "--normal_lookahead_charge_bytes", "40000"}, true, 1);
+  expect_mode({"--owned_normal_lookahead",
+               "1",
+               "--owned_normal_lookahead_depth",
+               "2",
+               "--normal_lookahead_charge_bytes",
+               "40000"},
+              true,
+              2);
+  expect_mode({"--owned_normal_lookahead",
+               "1",
+               "--owned_normal_lookahead_depth",
+               "1",
+               "--normal_lookahead_charge_bytes",
+               "40000"},
+              true,
+              1);
   const auto reject = [&](std::vector<std::string> extra) {
     auto args = base_args();
     args.insert(args.end(), extra.begin(), extra.end());
     Reject(std::move(args));
   };
   reject({"--owned_normal_lookahead", "1"});  // Charge is mandatory.
-  reject({"--owned_normal_lookahead", "1",
-          "--normal_lookahead_charge_bytes", "40000",
-          "--owned_normal_lookahead_depth", "3"});  // Depth beyond 1-2.
-  reject({"--owned_normal_lookahead", "1",
-          "--normal_lookahead_charge_bytes", "0"});  // Positive charge only.
-  reject({"--owned_normal_lookahead", "0",
-          "--normal_lookahead_charge_bytes", "64"});  // Off mode takes nothing.
-  reject({"--owned_normal_lookahead", "2",
-          "--normal_lookahead_charge_bytes", "64"});  // Binary flag only.
-  reject({"--owned_normal_lookahead", "1",
-          "--normal_lookahead_charge_bytes", "40000",
-          "--host_lookahead", "1", "--host_lookahead_charge_bytes", "1"});
+  reject({"--owned_normal_lookahead",
+          "1",
+          "--normal_lookahead_charge_bytes",
+          "40000",
+          "--owned_normal_lookahead_depth",
+          "3"});  // Depth beyond 1-2.
+  reject({"--owned_normal_lookahead",
+          "1",
+          "--normal_lookahead_charge_bytes",
+          "0"});  // Positive charge only.
+  reject({"--owned_normal_lookahead",
+          "0",
+          "--normal_lookahead_charge_bytes",
+          "64"});  // Off mode takes nothing.
+  reject({"--owned_normal_lookahead",
+          "2",
+          "--normal_lookahead_charge_bytes",
+          "64"});  // Binary flag only.
+  reject({"--owned_normal_lookahead",
+          "1",
+          "--normal_lookahead_charge_bytes",
+          "40000",
+          "--host_lookahead",
+          "1",
+          "--host_lookahead_charge_bytes",
+          "1"});
   // Private (non-resident) mode must reject the normal lookahead outright.
   {
     auto args = ListArgs({0, 1});
-    args.insert(args.end(), {"--owned_normal_lookahead", "1",
-                             "--normal_lookahead_charge_bytes", "64"});
+    args.insert(args.end(),
+                {"--owned_normal_lookahead",
+                 "1",
+                 "--normal_lookahead_charge_bytes",
+                 "64"});
     Reject(std::move(args));
   }
 }

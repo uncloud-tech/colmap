@@ -38,8 +38,8 @@ bool ParseImagePathArgument(int argc, char** argv, std::string* image_path) {
         return false;
       }
       value = std::string_view(argv[++i]);
-    } else if (arg.compare(0, kImagePathAssignment.size(),
-                           kImagePathAssignment) == 0) {
+    } else if (arg.compare(
+                   0, kImagePathAssignment.size(), kImagePathAssignment) == 0) {
       value = arg.substr(kImagePathAssignment.size());
     } else {
       std::cerr << "Unsupported option `" << arg

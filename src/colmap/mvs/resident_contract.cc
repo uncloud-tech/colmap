@@ -8,9 +8,9 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cinttypes>
 #include <cmath>
 #include <cstdint>
-#include <cinttypes>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -59,11 +59,10 @@ std::string HexEncode(const std::string& bytes) {
 void AppendString(std::string* out,
                   const std::string& key,
                   const std::string& value) {
-  AppendLine(out,
-             StringPrintf("%s %zu %s",
-                          key.c_str(),
-                          value.size(),
-                          HexEncode(value).c_str()));
+  AppendLine(
+      out,
+      StringPrintf(
+          "%s %zu %s", key.c_str(), value.size(), HexEncode(value).c_str()));
 }
 
 // Strict hex decode; returns false so the parser can produce line context.
@@ -94,8 +93,7 @@ std::string EncodeDouble(const double value) {
   // 1.5 -> "3ff8000000000000", independent of stream formatting or locale.
   uint64_t bits = 0;
   std::memcpy(&bits, &value, sizeof(bits));
-  return StringPrintf("%016llx",
-                      static_cast<unsigned long long>(bits));
+  return StringPrintf("%016llx", static_cast<unsigned long long>(bits));
 }
 
 std::string EncodeFloat(const float value) {
@@ -108,8 +106,8 @@ double DecodeDouble(const std::string& hex) {
   THROW_CHECK_EQ(hex.size(), 16)
       << "Invalid double bit representation: " << hex;
   uint64_t bits = 0;
-  const auto result = std::from_chars(
-      hex.data(), hex.data() + hex.size(), bits, 16);
+  const auto result =
+      std::from_chars(hex.data(), hex.data() + hex.size(), bits, 16);
   THROW_CHECK(result.ec == std::errc() && result.ptr == hex.data() + hex.size())
       << "Invalid double bit representation: " << hex;
   double value = 0;
@@ -118,11 +116,10 @@ double DecodeDouble(const std::string& hex) {
 }
 
 float DecodeFloat(const std::string& hex) {
-  THROW_CHECK_EQ(hex.size(), 8)
-      << "Invalid float bit representation: " << hex;
+  THROW_CHECK_EQ(hex.size(), 8) << "Invalid float bit representation: " << hex;
   uint32_t bits = 0;
-  const auto result = std::from_chars(
-      hex.data(), hex.data() + hex.size(), bits, 16);
+  const auto result =
+      std::from_chars(hex.data(), hex.data() + hex.size(), bits, 16);
   THROW_CHECK(result.ec == std::errc() && result.ptr == hex.data() + hex.size())
       << "Invalid float bit representation: " << hex;
   float value = 0;
@@ -143,10 +140,9 @@ std::string SerializePatchMatchOptions(const PatchMatchOptions& options) {
     AppendLine(&out, StringPrintf("opt_bool %s %s", key, EncodeBool(value)));
   };
   const auto real = [&out](const char* key, const double value) {
-    AppendLine(&out,
-               StringPrintf("opt_double %s %s",
-                            key,
-                            EncodeDouble(value).c_str()));
+    AppendLine(
+        &out,
+        StringPrintf("opt_double %s %s", key, EncodeDouble(value).c_str()));
   };
   const auto string = [&out](const char* key, const std::string& value) {
     AppendLine(&out,
@@ -205,9 +201,9 @@ struct FloatMapHeader {
 };
 
 uintmax_t CheckedFloatMapPayloadBytes(const size_t width,
-                                     const size_t height,
-                                     const size_t depth,
-                                     const std::filesystem::path& path) {
+                                      const size_t height,
+                                      const size_t depth,
+                                      const std::filesystem::path& path) {
   THROW_CHECK_LE(width, std::numeric_limits<size_t>::max() / height)
       << "Float map dims overflow: " << path;
   const size_t area = width * height;
@@ -285,12 +281,8 @@ FloatMapHeader ReadFloatMapHeader(const std::filesystem::path& path,
   THROW_CHECK_GT(width, 0) << path;
   THROW_CHECK_GT(height, 0) << path;
   // Production-exact shape admission, header-only (see MapShapeAdmitted).
-  THROW_CHECK(MapShapeAdmitted(path,
-                               width,
-                               height,
-                               image_width,
-                               image_height,
-                               max_image_size))
+  THROW_CHECK(MapShapeAdmitted(
+      path, width, height, image_width, image_height, max_image_size))
       << "Float map header does not match the production shape handling for "
          "the effective image dims: "
       << path;
@@ -375,17 +367,15 @@ class ContractLexer {
     return tokens_.empty() ? empty_ : tokens_.front();
   }
 
-  void Fail(const std::string& message) const {
-    ThrowParseError(message);
-  }
+  void Fail(const std::string& message) const { ThrowParseError(message); }
 
  private:
   void ThrowParseError(const std::string& message) const {
-    throw std::runtime_error(StringPrintf(
-        "Malformed owned bank contract at line %zu (%s): %s",
-        line_no_,
-        line_.c_str(),
-        message.c_str()));
+    throw std::runtime_error(
+        StringPrintf("Malformed owned bank contract at line %zu (%s): %s",
+                     line_no_,
+                     line_.c_str(),
+                     message.c_str()));
   }
 
   void SplitTokens() {
@@ -393,8 +383,8 @@ class ContractLexer {
     size_t cursor = 0;
     while (true) {
       const size_t end = line_.find(' ', cursor);
-      tokens_.push_back(line_.substr(
-          cursor, end == std::string::npos ? end : end - cursor));
+      tokens_.push_back(
+          line_.substr(cursor, end == std::string::npos ? end : end - cursor));
       if (end == std::string::npos) break;
       cursor = end + 1;
     }
@@ -416,8 +406,7 @@ class ContractLexer {
 int64_t ParseInt64(const ContractLexer& lexer,
                    const std::string& token,
                    const std::string& key) {
-  if (token.empty() || token == "-" ||
-      token.find('+') != std::string::npos ||
+  if (token.empty() || token == "-" || token.find('+') != std::string::npos ||
       (token.size() > 1 && token.front() == '0') ||
       (token.size() > 2 && token[0] == '-' && token[1] == '0')) {
     lexer.Fail("non-canonical integer spelling for " + key);
@@ -425,8 +414,7 @@ int64_t ParseInt64(const ContractLexer& lexer,
   int64_t value = 0;
   const auto result =
       std::from_chars(token.data(), token.data() + token.size(), value, 10);
-  if (result.ec != std::errc() ||
-      result.ptr != token.data() + token.size()) {
+  if (result.ec != std::errc() || result.ptr != token.data() + token.size()) {
     lexer.Fail("invalid integer for " + key);
   }
   return value;
@@ -457,8 +445,7 @@ uint64_t ParseUint64(const ContractLexer& lexer,
   uint64_t value = 0;
   const auto result =
       std::from_chars(token.data(), token.data() + token.size(), value, 10);
-  if (result.ec != std::errc() ||
-      result.ptr != token.data() + token.size()) {
+  if (result.ec != std::errc() || result.ptr != token.data() + token.size()) {
     lexer.Fail("invalid unsigned integer for " + key);
   }
   return value;
@@ -514,8 +501,8 @@ void ParseBoolInto(const ContractLexer& lexer,
 std::string DecodeHexValue(const ContractLexer& lexer,
                            const std::string& key,
                            const size_t token_index) {
-  const size_t length = ParseUnsigned(
-      lexer, lexer.Token(token_index), key + " length", false);
+  const size_t length =
+      ParseUnsigned(lexer, lexer.Token(token_index), key + " length", false);
   if (length == 0) {
     lexer.Fail("empty string for " + key);
   }
@@ -569,18 +556,18 @@ void ParseIdentityInto(const ContractLexer& lexer,
     lexer.Fail("identity record field count for " + key);
   }
   identity->path = std::filesystem::path(path);
-  identity->size = ParseUintMax(
-      lexer, lexer.Token(token_index + 2), key + " size");
-  identity->device = ParseUintMax(
-      lexer, lexer.Token(token_index + 3), key + " device");
-  identity->inode = ParseUintMax(
-      lexer, lexer.Token(token_index + 4), key + " inode");
+  identity->size =
+      ParseUintMax(lexer, lexer.Token(token_index + 2), key + " size");
+  identity->device =
+      ParseUintMax(lexer, lexer.Token(token_index + 3), key + " device");
+  identity->inode =
+      ParseUintMax(lexer, lexer.Token(token_index + 4), key + " inode");
   identity->modified_seconds = ParseInt64(
       lexer, lexer.Token(token_index + 5), key + " modified seconds");
   identity->modified_nanoseconds = ParseInt64(
       lexer, lexer.Token(token_index + 6), key + " modified nanoseconds");
-  identity->changed_seconds = ParseInt64(
-      lexer, lexer.Token(token_index + 7), key + " changed seconds");
+  identity->changed_seconds =
+      ParseInt64(lexer, lexer.Token(token_index + 7), key + " changed seconds");
   identity->changed_nanoseconds = ParseInt64(
       lexer, lexer.Token(token_index + 8), key + " changed nanoseconds");
 }
@@ -670,8 +657,7 @@ OwnedBankContract MakeOwnedBankContract(
 }
 
 OwnedBankContractProblem CaptureOwnedBankContractProblem(
-    const owned::BankJob& job,
-    const std::vector<std::string>& image_names) {
+    const owned::BankJob& job, const std::vector<std::string>& image_names) {
   THROW_CHECK_LT(job.reference_image_idx, static_cast<int>(image_names.size()));
   THROW_CHECK(!job.inputs.empty());
   OwnedBankContractProblem problem;
@@ -747,17 +733,14 @@ std::string SerializeOwnedBankContract(const OwnedBankContract& contract) {
   std::string out;
   AppendLine(&out, "owned-bank-contract");
   AppendLine(&out, StringPrintf("version %d", contract.version));
-  AppendLine(
-      &out,
-      StringPrintf("build_cuda_enabled %s",
-                   EncodeBool(contract.build_cuda_enabled)));
-  AppendLine(
-      &out,
-      StringPrintf("build_hip_enabled %s",
-                   EncodeBool(contract.build_hip_enabled)));
-  AppendString(&out,
-               "allocation_compatibility",
-               contract.allocation_compatibility);
+  AppendLine(&out,
+             StringPrintf("build_cuda_enabled %s",
+                          EncodeBool(contract.build_cuda_enabled)));
+  AppendLine(&out,
+             StringPrintf("build_hip_enabled %s",
+                          EncodeBool(contract.build_hip_enabled)));
+  AppendString(
+      &out, "allocation_compatibility", contract.allocation_compatibility);
   out.append("invocation_options\n");
   out.append(SerializePatchMatchOptions(contract.invocation_options));
   AppendString(&out, "stereo_folder", contract.stereo_folder);
@@ -786,11 +769,9 @@ std::string SerializeOwnedBankContract(const OwnedBankContract& contract) {
           StringPrintf("is_reference %s", EncodeBool(input.is_reference)));
       AppendLine(&out, StringPrintf("image_idx %d", input.image_idx));
       AppendString(&out, "image_name", input.image_name);
-      AppendLine(
-          &out,
-          StringPrintf("image_dims %zu %zu", input.width, input.height));
       AppendLine(&out,
-                 StringPrintf("max_image_size %d", input.max_image_size));
+                 StringPrintf("image_dims %zu %zu", input.width, input.height));
+      AppendLine(&out, StringPrintf("max_image_size %d", input.max_image_size));
       std::string parts;
       for (const float value : input.K) {
         parts += " " + EncodeFloat(value);
@@ -807,22 +788,21 @@ std::string SerializeOwnedBankContract(const OwnedBankContract& contract) {
       }
       AppendLine(&out, "calib_t" + parts);
       AppendString(&out, "image_path", input.image_path.string());
-      const auto identity =
-          [&out](const char* key, const owned::BankFileIdentity& identity) {
-            out.append(StringPrintf(
-                "%s %zu %s %ju %ju %ju %" PRIi64 " %" PRIi64 " %" PRIi64
-                " %" PRIi64 "\n",
-                key,
-                identity.path.string().size(),
-                HexEncode(identity.path.string()).c_str(),
-                identity.size,
-                identity.device,
-                identity.inode,
-                identity.modified_seconds,
-                identity.modified_nanoseconds,
-                identity.changed_seconds,
-                identity.changed_nanoseconds));
-          };
+      const auto identity = [&out](const char* key,
+                                   const owned::BankFileIdentity& identity) {
+        out.append(StringPrintf("%s %zu %s %ju %ju %ju %" PRIi64 " %" PRIi64
+                                " %" PRIi64 " %" PRIi64 "\n",
+                                key,
+                                identity.path.string().size(),
+                                HexEncode(identity.path.string()).c_str(),
+                                identity.size,
+                                identity.device,
+                                identity.inode,
+                                identity.modified_seconds,
+                                identity.modified_nanoseconds,
+                                identity.changed_seconds,
+                                identity.changed_nanoseconds));
+      };
       identity("image_identity", input.image_identity);
       AppendString(&out, "depth_path", input.depth_path.string());
       identity("depth_identity", input.depth_identity);
@@ -870,12 +850,14 @@ OwnedBankContract ParseOwnedBankContract(const std::string& bytes) {
 
   next_line("build_cuda_enabled");
   if (lexer.TokenCount() != 2) lexer.Fail("build_cuda_enabled field count");
-  ParseBoolInto(lexer, lexer.Token(1), "build_cuda_enabled",
+  ParseBoolInto(lexer,
+                lexer.Token(1),
+                "build_cuda_enabled",
                 &contract.build_cuda_enabled);
   next_line("build_hip_enabled");
   if (lexer.TokenCount() != 2) lexer.Fail("build_hip_enabled field count");
-  ParseBoolInto(lexer, lexer.Token(1), "build_hip_enabled",
-                &contract.build_hip_enabled);
+  ParseBoolInto(
+      lexer, lexer.Token(1), "build_hip_enabled", &contract.build_hip_enabled);
 
   next_line("allocation_compatibility");
   if (lexer.TokenCount() != 3) {
@@ -895,10 +877,10 @@ OwnedBankContract ParseOwnedBankContract(const std::string& bytes) {
   if (lexer.TokenCount() != 2) lexer.Fail("problem_count field count");
   // Bounded before any reserve(): a declared count must be backed by the
   // remaining bytes (each problem record needs far more than 256 bytes).
-  const size_t problem_count = lexer.BoundCount(
-      "problem_count",
-      ParseSize(lexer, lexer.Token(1), "problem_count"),
-      /*min_record_bytes=*/256);
+  const size_t problem_count =
+      lexer.BoundCount("problem_count",
+                       ParseSize(lexer, lexer.Token(1), "problem_count"),
+                       /*min_record_bytes=*/256);
   contract.problems.reserve(problem_count);
 
   for (size_t i = 0; i < problem_count; ++i) {
@@ -932,10 +914,10 @@ OwnedBankContract ParseOwnedBankContract(const std::string& bytes) {
     if (lexer.TokenCount() != 2) lexer.Fail("input_count field count");
     // Bounded before any reserve(): each input record needs far more than
     // 128 bytes.
-    const size_t input_count = lexer.BoundCount(
-        "input_count",
-        ParseSize(lexer, lexer.Token(1), "input_count"),
-        /*min_record_bytes=*/128);
+    const size_t input_count =
+        lexer.BoundCount("input_count",
+                         ParseSize(lexer, lexer.Token(1), "input_count"),
+                         /*min_record_bytes=*/128);
     problem.inputs.reserve(input_count);
     for (size_t k = 0; k < input_count; ++k) {
       next_line("input");
@@ -964,10 +946,9 @@ OwnedBankContract ParseOwnedBankContract(const std::string& bytes) {
       if (lexer.TokenCount() != 2) lexer.Fail("max_image_size field count");
       input.max_image_size =
           ParseInt32(lexer, lexer.Token(1), "max_image_size");
-      const auto parse_floats = [&lexer, &next_line](
-                                    const std::string& key,
-                                    const size_t count,
-                                    float* out) {
+      const auto parse_floats = [&lexer, &next_line](const std::string& key,
+                                                     const size_t count,
+                                                     float* out) {
         next_line(key);
         if (lexer.TokenCount() != 1 + count) lexer.Fail(key + " field count");
         std::vector<float> values;
@@ -1014,8 +995,7 @@ OwnedBankContract ParseOwnedBankContract(const std::string& bytes) {
           lexer.Key() != "normal_identity") {
         lexer.Fail("expected normal_identity");
       }
-      ParseIdentityInto(
-          lexer, "normal_identity", 1, &input.normal_identity);
+      ParseIdentityInto(lexer, "normal_identity", 1, &input.normal_identity);
       next_line("normal_header");
       if (lexer.TokenCount() != 4) lexer.Fail("normal_header field count");
       input.normal_header_width =

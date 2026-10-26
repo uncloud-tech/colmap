@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #include "colmap/mvs/owned_input_bank.h"
+
 #include "colmap/mvs/patch_match.h"
 #include "colmap/mvs/workspace.h"
-
 #include "colmap/util/testing.h"
-
 
 // Instrumented-test-only allocator meter with ownership tracking. It observes
 // BOTH the C++ allocations and VLFeat's allocations (vl_imsmooth_f's
@@ -18,11 +17,11 @@
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
-#include <map>
 #include <fstream>
 #include <limits>
-#include <system_error>
+#include <map>
 #include <stdexcept>
+#include <system_error>
 #include <type_traits>
 
 #include <gtest/gtest.h>
@@ -111,16 +110,24 @@ TEST_F(HostInputBankTest, CanonicalAliasDeduplicatesButCopiedWorkspaceDoesNot) {
   const auto link = root_ / "alias.png";
   std::filesystem::create_symlink(job_.images[0].GetPath(), link);
   const auto& image = job_.images[0];
-  alias.images[0] = Image(link, image.GetWidth(), image.GetHeight(),
-                          image.GetK(), image.GetR(), image.GetT());
+  alias.images[0] = Image(link,
+                          image.GetWidth(),
+                          image.GetHeight(),
+                          image.GetK(),
+                          image.GetR(),
+                          image.GetT());
   alias.inputs[0].image = alias.images[0];
   std::vector<BankJob> jobs = {job_, alias};
   HostInputBank shared(jobs, HostInputBank::Estimate(jobs));
   EXPECT_EQ(shared.Layers().size(), 3);
   const auto copy = root_ / "copied.png";
   std::filesystem::copy_file(image.GetPath(), copy);
-  alias.images[0] = Image(copy, image.GetWidth(), image.GetHeight(),
-                          image.GetK(), image.GetR(), image.GetT());
+  alias.images[0] = Image(copy,
+                          image.GetWidth(),
+                          image.GetHeight(),
+                          image.GetK(),
+                          image.GetR(),
+                          image.GetT());
   alias.inputs[0].image = alias.images[0];
   jobs = {job_, alias};
   HostInputBank distinct(jobs, HostInputBank::Estimate(jobs));
@@ -165,8 +172,12 @@ TEST_F(HostInputBankTest, RejectsPayloadInMetadataAndDuplicateSources) {
 TEST_F(HostInputBankTest, CheckedWholeBankArithmetic) {
   auto job = job_;
   const auto& old = job.images[0];
-  job.images[0] = Image(old.GetPath(), std::numeric_limits<size_t>::max(), 2,
-                        old.GetK(), old.GetR(), old.GetT());
+  job.images[0] = Image(old.GetPath(),
+                        std::numeric_limits<size_t>::max(),
+                        2,
+                        old.GetK(),
+                        old.GetR(),
+                        old.GetT());
   job.inputs[0].image = job.images[0];
   EXPECT_THROW(HostInputBank::Estimate({job}), std::overflow_error);
 }
@@ -199,8 +210,8 @@ TEST_F(HostInputBankTest, BoundedModeSkipsNormalLoadsAndLoadsOnDemand) {
 
 TEST_F(HostInputBankTest, BoundedLoadDetectsIdentityChange) {
   const std::vector<BankJob> jobs{job_};
-  HostInputBank bank(jobs, HostInputBank::EstimateBounded(jobs),
-                     BankNormals::kBounded);
+  HostInputBank bank(
+      jobs, HostInputBank::EstimateBounded(jobs), BankNormals::kBounded);
   {
     std::ofstream stream(job_.inputs[0].normal_path,
                          std::ios::binary | std::ios::app);
@@ -270,13 +281,16 @@ TEST_F(HostInputBankTest, SnapshotBindingValidatesInputOrdinalAndSharedLayers) {
   EXPECT_EQ(snapshot.at(0).at(0).image.path, a.inputs.at(0).image.GetPath());
   // Job B's first admitted input is image 0.
   EXPECT_EQ(snapshot.at(1).at(0).image.path, b.inputs.at(0).image.GetPath());
-  HostInputBank bank(jobs, HostInputBank::Estimate(jobs),
-                     BankNormals::kEager, snapshot.data(), snapshot.size());
+  HostInputBank bank(jobs,
+                     HostInputBank::Estimate(jobs),
+                     BankNormals::kEager,
+                     snapshot.data(),
+                     snapshot.size());
   ASSERT_EQ(bank.Layers().size(), size_t(2));
   // Image-index space stays the reference/source resolution space.
-  EXPECT_EQ(bank.ReferenceLayer(0), 0);                  // A ref image 2
+  EXPECT_EQ(bank.ReferenceLayer(0), 0);                    // A ref image 2
   EXPECT_EQ(bank.SourceLayers(0), (std::vector<int>{1}));  // A image 0
-  EXPECT_EQ(bank.ReferenceLayer(1), 1);                  // B ref image 0
+  EXPECT_EQ(bank.ReferenceLayer(1), 1);                    // B ref image 0
   EXPECT_EQ(bank.SourceLayers(1), (std::vector<int>{0}));  // B image 2
 }
 
@@ -292,25 +306,28 @@ TEST_F(HostInputBankTest, SnapshotBindingRejectsSameShapedReplacement) {
   // mtime/ctime), so this test never relies on such timing. No hash or
   // content immutability is claimed.
   const auto target = job_.inputs[1].depth_path;
-  const auto staged = target.parent_path() /
-                      (target.filename().string() + ".staged");
+  const auto staged =
+      target.parent_path() / (target.filename().string() + ".staged");
   ASSERT_FALSE(std::filesystem::exists(staged));
   DepthMap replacement(4, 2, 1, 10);
   replacement.Fill(9);
   replacement.Write(staged);
   std::filesystem::rename(staged, target);
   // The re-admission must reject the replaced object before any payload.
-  EXPECT_THROW((HostInputBank(jobs, HostInputBank::Estimate(jobs),
-                              BankNormals::kEager, snapshot.data(),
-                              snapshot.size())), std::runtime_error);
+  EXPECT_THROW((HostInputBank(jobs,
+                              HostInputBank::Estimate(jobs),
+                              BankNormals::kEager,
+                              snapshot.data(),
+                              snapshot.size())),
+               std::runtime_error);
 }
 
 TEST_F(HostInputBankTest, BoundedSnapshotLoadRejectsReplacedNormal) {
   const std::vector<BankJob> jobs{job_};
   const auto bounded = HostInputBank::EstimateBounded(jobs);
   const auto snapshot = HostInputBank::CaptureJobIdentities(jobs);
-  HostInputBank bank(jobs, bounded, BankNormals::kBounded,
-                     snapshot.data(), snapshot.size());
+  HostInputBank bank(
+      jobs, bounded, BankNormals::kBounded, snapshot.data(), snapshot.size());
   NormalMap replacement(4, 2);
   replacement.Fill(0.25f);
   replacement.Write(job_.inputs[0].normal_path);
@@ -321,10 +338,11 @@ TEST_F(HostInputBankTest, RejectsInconsistentSnapshotBindingArguments) {
   const std::vector<BankJob> jobs{job_};
   const auto limits = HostInputBank::Estimate(jobs);
   const auto snapshot = HostInputBank::CaptureJobIdentities(jobs);
-  EXPECT_THROW((HostInputBank(jobs, limits, BankNormals::kEager,
-                              nullptr, 1)), std::invalid_argument);
-  EXPECT_THROW((HostInputBank(jobs, limits, BankNormals::kEager,
-                              snapshot.data(), 0)), std::invalid_argument);
+  EXPECT_THROW((HostInputBank(jobs, limits, BankNormals::kEager, nullptr, 1)),
+               std::invalid_argument);
+  EXPECT_THROW(
+      (HostInputBank(jobs, limits, BankNormals::kEager, snapshot.data(), 0)),
+      std::invalid_argument);
   // (nullptr, 0) is the legacy unbound path and remains valid.
   HostInputBank unbound(jobs, limits);
   EXPECT_EQ(unbound.NumJobs(), size_t(1));
@@ -366,7 +384,8 @@ void MeterNoteAlloc(void* pointer, size_t size) {
   --g_meter_ops;
   const size_t now = g_live_bytes->live.fetch_add(size) + size;
   size_t peak = g_live_bytes->peak.load();
-  while (peak < now && !g_live_bytes->peak.compare_exchange_weak(peak, now)) {}
+  while (peak < now && !g_live_bytes->peak.compare_exchange_weak(peak, now)) {
+  }
 }
 
 void MeterNoteFree(void* pointer) {
@@ -495,8 +514,8 @@ TEST_F(HostInputBankTest, DownsizingRescaleAllocationOverlap) {
   // the stock allocator configuration) is observable below.
   ScopedLiveMeter meter;
   const size_t src_w = 64, src_h = 32, dst_w = 8, dst_h = 4;
-  const size_t src_bytes = 4 * src_w * src_h;           // one full-source temp
-  const size_t dst = 3 * 4 * dst_w * dst_h;             // one destination map
+  const size_t src_bytes = 4 * src_w * src_h;  // one full-source temp
+  const size_t dst = 3 * 4 * dst_w * dst_h;    // one destination map
   const float sigma = 0.5f * (8.0f - 1.0f);
   const double samples = std::ceil(static_cast<double>(sigma) * 3.0);
   const size_t filters = 4 * (2 * static_cast<size_t>(samples) + 1);
@@ -552,7 +571,6 @@ TEST_F(HostInputBankTest, DownsizingRescaleAllocationOverlap) {
 // pointer (null outside any window) and the stock VLFeat allocator
 // configuration; both are exercised by construction of the RAII above.
 
-
 #if defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
 TEST_F(HostInputBankTest, RejectsPmvsBeforeWorkspaceRead) {
   PatchMatchOptions options;
@@ -561,8 +579,12 @@ TEST_F(HostInputBankTest, RejectsPmvsBeforeWorkspaceRead) {
   options.gpu_index = "0";
   options.num_threads = 1;
   // Missing path proves rejection precedes workspace import/metadata reads.
-  PatchMatchController controller(options, root_ / "missing", "PMVS", "option",
-                                  "", PatchMatchExecution::kOwnedCuda);
+  PatchMatchController controller(options,
+                                  root_ / "missing",
+                                  "PMVS",
+                                  "option",
+                                  "",
+                                  PatchMatchExecution::kOwnedCuda);
   try {
     controller.ResolveOwnedBankJob();
     FAIL() << "PMVS resident mode unexpectedly accepted";

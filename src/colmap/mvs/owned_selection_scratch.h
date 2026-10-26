@@ -8,14 +8,13 @@ namespace colmap::mvs::owned {
 // Actual allocation inventory only. Keep the legacy layout used by admission
 // forecasts conservative until the candidate has separate physical
 // qualification.
-inline OwnedRotationLayout BuildOwnedScratchRotationLayout(size_t width,
-                                                           size_t height,
-                                                           size_t sources,
-                                                           bool retain_mask = true) {
+inline OwnedRotationLayout BuildOwnedScratchRotationLayout(
+    size_t width, size_t height, size_t sources, bool retain_mask = true) {
   auto layout = BuildOwnedRotationLayout(width, height, sources);
   for (auto it = layout.slots.begin(); it != layout.slots.end();) {
     if ((it->role == RotationRole::kSelectionCurrent && it->parity == 1) ||
-        (it->role == RotationRole::kMask && (!retain_mask || it->parity == 0))) {
+        (it->role == RotationRole::kMask &&
+         (!retain_mask || it->parity == 0))) {
       layout.logical_bytes -= it->requested_span_bytes;
       it = layout.slots.erase(it);
     } else {

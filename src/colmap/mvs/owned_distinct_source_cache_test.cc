@@ -69,8 +69,7 @@ TEST(OwnedDistinctSourceCache, RealSolverFinalMaps) {
       for (const auto& test : cases) {
         SCOPED_TRACE(::testing::Message()
                      << "geometry=" << geometry << " filter=" << filter
-                     << " tile=" << test.tile
-                     << " samples=" << test.samples
+                     << " tile=" << test.tile << " samples=" << test.samples
                      << " sources=" << test.sources);
         std::vector<Image> images;
         std::vector<DepthMap> depths;

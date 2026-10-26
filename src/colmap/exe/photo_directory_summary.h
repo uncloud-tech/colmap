@@ -188,8 +188,9 @@ inline std::string WritePhotoDirectorySummaryJson(
     json += std::to_string(build.stock_prng_state->bytes);
     json += ",\"alignment\":";
     json += std::to_string(build.stock_prng_state->alignment);
-    json += ",\"type\":\"curandState\","
-            "\"provenance\":\"cuda_translation_unit_compile_time\"}";
+    json +=
+        ",\"type\":\"curandState\","
+        "\"provenance\":\"cuda_translation_unit_compile_time\"}";
   } else {
     json += "null";
   }

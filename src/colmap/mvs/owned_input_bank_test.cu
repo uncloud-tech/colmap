@@ -7,8 +7,10 @@
 
 namespace colmap::mvs::owned {
 namespace {
-__global__ void Sample(cudaTextureObject_t direct, cudaTextureObject_t bank,
-                       const int* layers, GpuMatView<float> result) {
+__global__ void Sample(cudaTextureObject_t direct,
+                       cudaTextureObject_t bank,
+                       const int* layers,
+                       GpuMatView<float> result) {
   const int i = threadIdx.x;
   if (i >= result.GetWidth()) return;
   // Includes negative border, fractional edge, padded region and far border.
@@ -31,13 +33,15 @@ cudaTextureDesc Description(cudaTextureFilterMode filter,
 TEST(ResidentInputBankSampler, PaddingMappingAndReferenceInitialization) {
   OwnedCudaStream stream;
   const std::vector<uint8_t> gray = {17, 80, 240, 90, 1, 255};
-  const std::vector<uint8_t> padded = {17, 80, 240, 0, 0,
-                                       90, 1, 255, 0, 0,
-                                       0, 0, 0, 0, 0,
-                                       0, 0, 0, 0, 0};
+  const std::vector<uint8_t> padded = {17, 80, 240, 0, 0, 90, 1, 255, 0, 0,
+                                       0,  0,  0,   0, 0, 0,  0, 0,   0, 0};
   auto direct = CudaArrayLayeredTexture<uint8_t>::FromHostArray(
       Description(cudaFilterModeLinear, cudaReadModeNormalizedFloat),
-      3, 2, 1, gray.data(), stream.Get());
+      3,
+      2,
+      1,
+      gray.data(),
+      stream.Get());
   auto bank = std::make_unique<CudaArrayLayeredTexture<uint8_t>>(
       Description(cudaFilterModeLinear, cudaReadModeNormalizedFloat), 5, 4, 3);
   // Nonidentity mapping with deliberately different neighboring layers.
@@ -50,8 +54,8 @@ TEST(ResidentInputBankSampler, PaddingMappingAndReferenceInitialization) {
   mapping.CopyToDevice(&layer, sizeof(int), stream.Get());
   GpuMat<float> sampled(32, 1, 2);
   ScopedStreamCompletion completion(stream.Get());
-  Sample<<<1, 32, 0, stream.Get()>>>(direct->GetObj(), bank->GetObj(),
-                                  mapping.GetPtr(), sampled.View());
+  Sample<<<1, 32, 0, stream.Get()>>>(
+      direct->GetObj(), bank->GetObj(), mapping.GetPtr(), sampled.View());
   auto values = sampled.CopyToMat(stream.Get());
   for (size_t i = 0; i < 32; ++i) {
     EXPECT_EQ(values.GetData()[i], values.GetData()[32 + i]);
@@ -62,8 +66,8 @@ TEST(ResidentInputBankSampler, PaddingMappingAndReferenceInitialization) {
   GpuMatRefImage private_ref(3, 2);
   GpuMatRefImage resident_ref(3, 2);
   private_ref.Filter(gray.data(), 2, 1, 3.0f, 0.2f, stream.Get());
-  resident_ref.FilterResident(point->GetObj(), 2, 2, 1, 3.0f, 0.2f,
-                              stream.Get());
+  resident_ref.FilterResident(
+      point->GetObj(), 2, 2, 1, 3.0f, 0.2f, stream.Get());
   EXPECT_EQ(private_ref.image->CopyToMat(stream.Get()).GetData(),
             resident_ref.image->CopyToMat(stream.Get()).GetData());
   EXPECT_EQ(private_ref.sum_image->CopyToMat(stream.Get()).GetData(),
@@ -76,10 +80,9 @@ TEST(ResidentInputBankSampler, PaddingMappingAndReferenceInitialization) {
 TEST(ResidentInputBankSampler, DepthElementTypeAndPadding) {
   OwnedCudaStream stream;
   const std::vector<float> depth = {1.25f, 7.0f, 2.5f, 19.0f, 4.0f, 8.0f};
-  const std::vector<float> padded = {1.25f, 7.0f, 2.5f, 0, 0,
-                                     19.0f, 4.0f, 8.0f, 0, 0,
-                                     0, 0, 0, 0, 0,
-                                     0, 0, 0, 0, 0};
+  const std::vector<float> padded = {1.25f, 7.0f, 2.5f, 0, 0, 19.0f, 4.0f,
+                                     8.0f,  0,    0,    0, 0, 0,     0,
+                                     0,     0,    0,    0, 0, 0};
   const auto desc = Description(cudaFilterModePoint, cudaReadModeElementType);
   auto direct = CudaArrayLayeredTexture<float>::FromHostArray(
       desc, 3, 2, 1, depth.data(), stream.Get());
@@ -90,8 +93,8 @@ TEST(ResidentInputBankSampler, DepthElementTypeAndPadding) {
   mapping.CopyToDevice(&layer, sizeof(int), stream.Get());
   GpuMat<float> sampled(32, 1, 2);
   ScopedStreamCompletion completion(stream.Get());
-  Sample<<<1, 32, 0, stream.Get()>>>(direct->GetObj(), bank->GetObj(),
-                                  mapping.GetPtr(), sampled.View());
+  Sample<<<1, 32, 0, stream.Get()>>>(
+      direct->GetObj(), bank->GetObj(), mapping.GetPtr(), sampled.View());
   auto values = sampled.CopyToMat(stream.Get());
   for (size_t i = 0; i < 32; ++i) {
     EXPECT_EQ(values.GetData()[i], values.GetData()[32 + i]);

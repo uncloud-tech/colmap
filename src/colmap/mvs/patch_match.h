@@ -5,9 +5,9 @@
 #include "colmap/mvs/depth_map.h"
 #include "colmap/mvs/image.h"
 #include "colmap/mvs/normal_map.h"
-#include "colmap/mvs/patch_match_options.h"
 #include "colmap/mvs/owned_input_bank.h"
 #include "colmap/mvs/patch_match_execution.h"
+#include "colmap/mvs/patch_match_options.h"
 #include "colmap/mvs/resident_contract.h"
 #ifndef __CUDACC__
 #include "colmap/util/base_controller.h"
@@ -39,7 +39,7 @@ class GraphLaunchControl;
 class HostInputBank;
 class ResidentInputBank;
 struct BankJob;
-}
+}  // namespace owned
 #if !defined(COLMAP_HIP_ENABLED)
 namespace owned {
 class PatchMatchCuda;
@@ -165,8 +165,12 @@ class PatchMatchController : public BaseController {
     std::shared_ptr<owned::GraphLaunchControl> graph_coordinator;
     size_t graph_owner = 0;
     std::function<void(size_t, const char*, uint64_t)> stage_timing;
-    std::function<void(size_t, const PatchMatchOptions&, const PatchMatch::Problem&)> check_inputs;
-    std::function<void(size_t, const PatchMatchOptions&, const PatchMatch::Problem&)> metadata;
+    std::function<void(
+        size_t, const PatchMatchOptions&, const PatchMatch::Problem&)>
+        check_inputs;
+    std::function<void(
+        size_t, const PatchMatchOptions&, const PatchMatch::Problem&)>
+        metadata;
     std::function<void(size_t, int, int)> sweep;
     std::function<void(size_t, const char*)> output_phase;
   };
@@ -178,12 +182,13 @@ class PatchMatchController : public BaseController {
     std::filesystem::path normal_map_path;
   };
 
-  PatchMatchController(const PatchMatchOptions& options,
-                       const std::filesystem::path& workspace_path,
-                       const std::string& workspace_format,
-                       const std::string& pmvs_option_name,
-                       const std::filesystem::path& config_path = "",
-                       PatchMatchExecution execution = PatchMatchExecution::kStock);
+  PatchMatchController(
+      const PatchMatchOptions& options,
+      const std::filesystem::path& workspace_path,
+      const std::string& workspace_format,
+      const std::string& pmvs_option_name,
+      const std::filesystem::path& config_path = "",
+      PatchMatchExecution execution = PatchMatchExecution::kStock);
   void Run();
   // Synchronous owner-thread path; caller retains controller through join and
   // retires its reservation only after this controller has been destroyed.
@@ -275,9 +280,10 @@ class PatchMatchController : public BaseController {
       int,
       std::optional<NativeRunDeadline>,
       const std::string&,
-      const std::function<std::vector<PhotoPhaseV1Binding>(const std::string&)>&,
-      const std::function<void(const std::function<void(
-          size_t, const PatchMatch::Problem&)>&)>&);
+      const std::function<
+          std::vector<PhotoPhaseV1Binding>(const std::string&)>&,
+      const std::function<void(
+          const std::function<void(size_t, const PatchMatch::Problem&)>&)>&);
 
   // Execute an independently owned prepared engine under the caller's existing
   // coordinator lease. The shared-controller PHOTO runner holds that lease
@@ -294,8 +300,7 @@ class PatchMatchController : public BaseController {
   // `expected_problems` is non-null, the exact configured problem count is
   // enforced before any traversal (one-reference wrapper guard).
   std::vector<owned::BankJob> ResolveOwnedBankJobsImpl(
-      OwnedBankContract* contract,
-      const size_t* expected_problems = nullptr);
+      OwnedBankContract* contract, const size_t* expected_problems = nullptr);
   owned::BankJob CaptureOwnedBankJobMetadata(
       size_t problem_idx,
       const std::vector<std::string>& image_names,

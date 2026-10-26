@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #pragma once
 #include "colmap/mvs/optimized_photo_dispatch.h"
-#include "colmap/mvs/optimized_photo_options.h"
-#include "colmap/mvs/optimized_photo_prepared.h"
 #include "colmap/mvs/optimized_photo_input_probe.h"
+#include "colmap/mvs/optimized_photo_options.h"
 #include "colmap/mvs/optimized_photo_paths.h"
+#include "colmap/mvs/optimized_photo_prepared.h"
 #include "colmap/mvs/optimized_photo_reservation.h"
 #include "colmap/mvs/owned_pair_image.h"
 #include "colmap/mvs/owned_pair_run.h"
@@ -32,11 +32,10 @@ inline std::string ReadOptimizedBytes(const fs::path& path) {
   if (input.bad()) throw std::runtime_error("optimized input read failed");
   return bytes;
 }
-inline void CheckOptimizedPhotoInputs(
-    const mvs::PatchMatchOptions& options,
-    const mvs::PatchMatch::Problem& problem,
-    const OptimizedPhotoDispatch& dispatch,
-    size_t generation) {
+inline void CheckOptimizedPhotoInputs(const mvs::PatchMatchOptions& options,
+                                      const mvs::PatchMatch::Problem& problem,
+                                      const OptimizedPhotoDispatch& dispatch,
+                                      size_t generation) {
   const auto& images = *problem.images;
   const auto& ref = images.at(problem.ref_image_idx);
   const uint64_t a = owned::ReadPairBitmapPixels(
@@ -64,11 +63,16 @@ inline void CheckOptimizedPhotoInputs(
   const uint64_t cache = owned::CacheBytes(options.cache_size);
   const uint64_t staging =
       owned::CheckedMultiply(s, owned::CheckedMultiply(max_w, max_h));
-  dispatch.WithCheckedInputs(
-      generation, problem.ref_image_idx, problem.src_image_idxs,
-      {cache, q, staging, static_cast<uint64_t>(ref.GetWidth()),
-       static_cast<uint64_t>(ref.GetHeight()), s},
-      [] {});
+  dispatch.WithCheckedInputs(generation,
+                             problem.ref_image_idx,
+                             problem.src_image_idxs,
+                             {cache,
+                              q,
+                              staging,
+                              static_cast<uint64_t>(ref.GetWidth()),
+                              static_cast<uint64_t>(ref.GetHeight()),
+                              s},
+                             [] {});
 }
 
 #if defined(COLMAP_CUDA_ENABLED) && defined(COLMAP_DOWNLOAD_ENABLED) && \
@@ -93,7 +97,8 @@ inline OptimizedConcurrencyObservation RunOptimizedPhoto(
     input_probe([&](size_t generation, const PatchMatch::Problem& problem) {
       CheckOptimizedPhotoInputs(options, problem, dispatch, generation);
     });
-    throw std::invalid_argument("PHOTO input probe completed without execution");
+    throw std::invalid_argument(
+        "PHOTO input probe completed without execution");
   }
   const auto& launch = dispatch.launch;
   const auto& phase_bindings = dispatch.bindings;
@@ -212,7 +217,8 @@ inline OptimizedConcurrencyObservation RunOptimizedPhoto(
                              const PatchMatchOptions& effective,
                              const PatchMatch::Problem& problem) {
       if (effective.geom_consistency)
-        throw std::invalid_argument("PHOTO effective options are not photometric");
+        throw std::invalid_argument(
+            "PHOTO effective options are not photometric");
       prepared_effective_options =
           OptimizedPhotoOptions(effective, workspace, job.config);
       unchanged();
@@ -250,11 +256,14 @@ inline OptimizedConcurrencyObservation RunOptimizedPhoto(
                              .count());
       // Bind this engine to the producer/generation and the effective PHOTO
       // snapshot captured during preparation, before dereference or CUDA work.
-      CheckOptimizedPhotoPreparedJob(
-          prepared, &controller, generation, prepared_effective_options,
-          [&](const PatchMatchOptions& effective) {
-            return OptimizedPhotoOptions(effective, workspace, job.config);
-          });
+      CheckOptimizedPhotoPreparedJob(prepared,
+                                     &controller,
+                                     generation,
+                                     prepared_effective_options,
+                                     [&](const PatchMatchOptions& effective) {
+                                       return OptimizedPhotoOptions(
+                                           effective, workspace, job.config);
+                                     });
       // The serialized selection boundary mutates under WithSelection above
       // (preparation/capture). Graph sweep execution runs OUTSIDE that lease,
       // exactly like the accepted prepared-job thread execution path.

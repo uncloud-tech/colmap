@@ -5,9 +5,8 @@
 // opens image headers via OpenImageIO); it is compiled only where that
 // library is available and is never stubbed into place.
 
-#include "colmap/mvs/resident_forecast.h"
-
 #include "colmap/mvs/owned_resident_minima.h"
+#include "colmap/mvs/resident_forecast.h"
 #include "colmap/util/logging.h"
 
 #include <algorithm>

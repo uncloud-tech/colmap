@@ -176,9 +176,13 @@ class ValidatedCohortPlan {
 
  private:
   friend ValidatedCohortPlan ValidateCohortPlan(
-      const owned::CohortPlan&, const std::vector<size_t>&,
-      const std::vector<ByteCharge>&, const owned::CohortTerms&, ByteCharge,
-      size_t, const owned::CohortBankEstimator&,
+      const owned::CohortPlan&,
+      const std::vector<size_t>&,
+      const std::vector<ByteCharge>&,
+      const owned::CohortTerms&,
+      ByteCharge,
+      size_t,
+      const owned::CohortBankEstimator&,
       const std::vector<owned::BankJobIdentities>&);
   ValidatedCohortPlan() = default;
 
@@ -205,7 +209,8 @@ inline void CohortBoundaryRequire(bool ok, const std::string& message) {
 // (checked additions), so an overflow in the irrelevant remainder of the
 // member list can never occur while the required reserve itself fits.
 inline ByteCharge LargestKSum(const std::vector<ByteCharge>& values,
-                              size_t k, const char* const context) {
+                              size_t k,
+                              const char* const context) {
   CohortBoundaryRequire(!values.empty(),
                         std::string(context) + ": empty member list");
   CohortBoundaryRequire(k >= 1, std::string(context) + ": zero sum window");
@@ -230,10 +235,14 @@ inline ByteCharge LargestKSum(const std::vector<ByteCharge>& values,
     }
     return sum;
   }
-  std::partial_sort(host.begin(), host.begin() + static_cast<long>(k),
-                    host.end(), std::greater<uint64_t>());
-  std::partial_sort(device.begin(), device.begin() + static_cast<long>(k),
-                    device.end(), std::greater<uint64_t>());
+  std::partial_sort(host.begin(),
+                    host.begin() + static_cast<long>(k),
+                    host.end(),
+                    std::greater<uint64_t>());
+  std::partial_sort(device.begin(),
+                    device.begin() + static_cast<long>(k),
+                    device.end(),
+                    std::greater<uint64_t>());
   for (size_t j = 0; j < k; ++j) {
     sum.host = owned::CheckedAdd(sum.host, host[j]);
     sum.device = owned::CheckedAdd(sum.device, device[j]);
@@ -305,21 +314,21 @@ inline ValidatedCohortPlan ValidateCohortPlan(
     const std::vector<owned::BankJobIdentities>& invocation_identities) {
   detail::CohortBoundaryRequire(!selection.empty(),
                                 "validation requires a nonempty selection");
-  detail::CohortBoundaryRequire(
-      forecasts.size() == selection.size(),
-      "forecast count " + std::to_string(forecasts.size()) +
-          " does not match the selection count " +
-          std::to_string(selection.size()));
+  detail::CohortBoundaryRequire(forecasts.size() == selection.size(),
+                                "forecast count " +
+                                    std::to_string(forecasts.size()) +
+                                    " does not match the selection count " +
+                                    std::to_string(selection.size()));
   for (size_t k = 0; k < selection.size(); ++k) {
-    detail::CohortBoundaryRequire(
-        forecasts[k].host && forecasts[k].device,
-        "zero private forecast (bank_job_index=" +
-            std::to_string(selection[k]) + ")");
+    detail::CohortBoundaryRequire(forecasts[k].host && forecasts[k].device,
+                                  "zero private forecast (bank_job_index=" +
+                                      std::to_string(selection[k]) + ")");
     if (k) {
       detail::CohortBoundaryRequire(
           selection[k] > selection[k - 1],
           "selection is not a strictly ordered FIFO identity (fail at "
-          "selection_ordinal=" + std::to_string(k) + ")");
+          "selection_ordinal=" +
+              std::to_string(k) + ")");
     }
   }
   detail::CohortBoundaryRequire(
@@ -390,8 +399,7 @@ inline ValidatedCohortPlan ValidateCohortPlan(
   // singleton/complete-plan preflight, packing and admission arithmetic are
   // the only accepted preflight evidence; nothing invented here.
   const owned::CohortPlan planned =
-      owned::PlanCohorts(selection, forecasts, terms, capacity,
-                         bank_estimator);
+      owned::PlanCohorts(selection, forecasts, terms, capacity, bank_estimator);
   detail::CohortBoundaryRequire(
       detail::PlannerPlansIdentical(planned, plan),
       "the submitted plan is not exactly the plan the real FIFO cohort "
@@ -404,12 +412,14 @@ inline ValidatedCohortPlan ValidateCohortPlan(
     detail::CohortBoundaryRequire(
         entry.first == covered,
         "cohort does not start at the dense FIFO coverage boundary "
-        "(selection_ordinal=" + std::to_string(covered) + ")");
+        "(selection_ordinal=" +
+            std::to_string(covered) + ")");
     detail::CohortBoundaryRequire(
         entry.count >= 1 && entry.count <= selection.size() - covered,
         "cohort count violates the remaining selection bounds "
-        "(covered=" + std::to_string(covered) + ", count=" +
-            std::to_string(entry.count) + ") — overlong entries refuse");
+        "(covered=" +
+            std::to_string(covered) + ", count=" + std::to_string(entry.count) +
+            ") — overlong entries refuse");
     covered += entry.count;
   }
 
@@ -450,7 +460,8 @@ inline ValidatedCohortPlan ValidateCohortPlan(
               entry.bank_estimate.device <= terms.reviewed_bank.device,
           "cohort " + std::to_string(c) +
               " bank estimate exceeds the explicit reviewed bank reservation "
-              "(estimate host=" + std::to_string(entry.bank_estimate.host) +
+              "(estimate host=" +
+              std::to_string(entry.bank_estimate.host) +
               " device=" + std::to_string(entry.bank_estimate.device) +
               "; reservation host=" + std::to_string(terms.reviewed_bank.host) +
               " device=" + std::to_string(terms.reviewed_bank.device) + ")");
@@ -462,17 +473,16 @@ inline ValidatedCohortPlan ValidateCohortPlan(
     // allowance-inclusive (the single canonical margin already covers the
     // composed allowance); no extra allowance term is invented.
     ByteCharge ledger = {
-        owned::CheckedAdd(bank_charge.host,
-                          owned::CheckedAdd(terms.process.host,
-                                            terms.queue_transient.host)),
+        owned::CheckedAdd(
+            bank_charge.host,
+            owned::CheckedAdd(terms.process.host, terms.queue_transient.host)),
         owned::CheckedAdd(bank_charge.device, terms.process.device)};
 
     // MANDATORY admitted concurrency: active_jobs in [1, member_count]. A
     // cohort whose member count is below the declared run-level concurrency
     // admits exactly member_count owners; the wire declares this per-cohort
     // value.
-    const size_t active_jobs =
-        std::min(max_concurrent_solvers, count);
+    const size_t active_jobs = std::min(max_concurrent_solvers, count);
     const ByteCharge rolling_reserve = detail::LargestKSum(
         member_forecasts, active_jobs, "cohort rolling reserve");
     ValidatedCohortEntry validated_entry;
@@ -487,31 +497,32 @@ inline ValidatedCohortPlan ValidateCohortPlan(
         owned::CheckedAdd(terms.process.host, terms.queue_transient.host),
         terms.process.device};
     validated_entry.ledger_bank_charge = bank_charge;
-    validated_entry.ledger = ledger = {
-        owned::CheckedAdd(ledger.host, rolling_reserve.host),
-        owned::CheckedAdd(ledger.device, rolling_reserve.device)};
+    validated_entry.ledger =
+        ledger = {owned::CheckedAdd(ledger.host, rolling_reserve.host),
+                  owned::CheckedAdd(ledger.device, rolling_reserve.device)};
     // HARD GATE, both sides, per cohort independently. Underfunded
     // admitted concurrency refuses: there is no dynamic throttle, no
     // degraded mode and no informational reserve.
-    const bool fits = ledger.host <= capacity.host &&
-                      ledger.device <= capacity.device;
+    const bool fits =
+        ledger.host <= capacity.host && ledger.device <= capacity.device;
     validated_entry.ledger_fits_capacity = fits;
     detail::CohortBoundaryRequire(
         fits,
         "cohort " + std::to_string(c) +
             " COMPLETE ledger does not fit the total CLI capacity (hard "
             "admitted-concurrency gate; no throttling): ledger host=" +
-            std::to_string(ledger.host) + " device=" +
-            std::to_string(ledger.device) + "; capacity host=" +
-            std::to_string(capacity.host) + " device=" +
-            std::to_string(capacity.device) + "; bank_charge host=" +
-            std::to_string(bank_charge.host) + " device=" +
-            std::to_string(bank_charge.device) + "; active_jobs=" +
-            std::to_string(active_jobs) + "; rolling_reserve host=" +
-            std::to_string(rolling_reserve.host) + " device=" +
-            std::to_string(rolling_reserve.device) + "; ledger_terms host=" +
-            std::to_string(validated_entry.ledger_terms.host) + " device=" +
-            std::to_string(validated_entry.ledger_terms.device));
+            std::to_string(ledger.host) +
+            " device=" + std::to_string(ledger.device) +
+            "; capacity host=" + std::to_string(capacity.host) +
+            " device=" + std::to_string(capacity.device) +
+            "; bank_charge host=" + std::to_string(bank_charge.host) +
+            " device=" + std::to_string(bank_charge.device) +
+            "; active_jobs=" + std::to_string(active_jobs) +
+            "; rolling_reserve host=" + std::to_string(rolling_reserve.host) +
+            " device=" + std::to_string(rolling_reserve.device) +
+            "; ledger_terms host=" +
+            std::to_string(validated_entry.ledger_terms.host) +
+            " device=" + std::to_string(validated_entry.ledger_terms.device));
     validated.cohorts_.push_back(std::move(validated_entry));
 
     for (size_t k = 0; k < count; ++k) {
