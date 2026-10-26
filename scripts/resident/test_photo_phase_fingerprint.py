@@ -53,7 +53,8 @@ class PhotoFingerprintTest(unittest.TestCase):
                 target.write_bytes(b'TEST-EVIDENCE\n')
             # The production lookup header must be checked even when only
             # that header changes; its implementation is compiled by the TU.
-            (root / 'src/colmap/mvs/owned_source_cache.h').write_bytes(b'TEST-EVIDENCE\n')
+            cache_header = root / 'src/colmap/mvs/owned_source_cache.h'
+            cache_header.write_bytes(b'TEST-EVIDENCE\n')
             git('add', 'src')
             git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
                 'commit', '-qm', 'fixture')
