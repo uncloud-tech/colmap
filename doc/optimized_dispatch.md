@@ -75,13 +75,21 @@ Project-file overrides cannot be combined with these modes.
   PHOTO `N>1` refuses. Capability metadata keeps claiming PHOTO concurrency 1
   (`compiled_supported_not_qualified`) until PHOTO `N>1` is actually qualified;
   a supplied ceiling is launch admission, not capability.
-  Production V3 execution additionally requires a delivered `PhotoPhaseV1Binding`
-  (profile/source identity, exact launch bytes, k and caps); absent delivery
-  refuses before owner allocation. The current CLI has no delivery adapter yet,
-  so V3 execution remains unavailable, including V3 N1. V2 N1 is unchanged.
-  `ParseOptimizedPhotoLaunch` alone is only the synthetic wire qualification seam.
-  See `qualification/photo-concurrency-slice3/ownerhost-prefire.md` for the
-  adapter contract, CPU lifecycle harness and deferred UID0/GPU commands.
+  Production V3 execution requires forecast data followed by one
+  `[BINDING]` block per scheduled job, not per admitted solver. The CLI's wire
+  delivery adapter validates each binding's profile, lineage, compiled source
+  commit/fingerprint, options, ordered image identities and resource charges
+  before preparing an owner. The native API can instead provide a typed delivery.
+  Absent or mismatched delivery refuses before owner allocation. V2 N1 is
+  unchanged. Parser success alone does not establish execution or output quality.
+
+### Optional CUDA execution
+
+`--PatchMatchStereo.owned_cuda_graphs true` enables per-owner chained CUDA
+Graphs in the optimized owned solver. The default remains ordinary stream
+submission (`false`). Graph mode keeps each owner's dependency order without
+waiting for peer owners to drain a shared batch. It is an execution option,
+not evidence of a speedup or a replacement for resource admission.
 
 ### Read-only planned native graph
 
