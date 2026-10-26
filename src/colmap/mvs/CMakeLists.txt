@@ -560,6 +560,14 @@ endif()
 
 # Dependency-free topology/argument packing regression, including CUDA-off builds.
 if(TESTS_ENABLED)
+    add_executable(owned_source_cache_cpu_test owned_source_cache_test.cc)
+    target_include_directories(owned_source_cache_cpu_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+    target_compile_features(owned_source_cache_cpu_test PRIVATE cxx_std_17)
+    target_compile_options(owned_source_cache_cpu_test PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-UNDEBUG>
+        $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>)
+    add_test(NAME mvs/owned_source_cache_cpu_test COMMAND owned_source_cache_cpu_test)
+
     add_executable(owned_graph_cpu_test owned_graph_test.cc)
     target_include_directories(owned_graph_cpu_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
     target_compile_features(owned_graph_cpu_test PRIVATE cxx_std_17)
