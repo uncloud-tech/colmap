@@ -1088,6 +1088,8 @@ struct CacheTraceRecord {
   int written;
   int source;
   int winner;
+  int reused;
+  int recomputed;
   float costs[5];
 };
 
@@ -1097,6 +1099,19 @@ struct CacheTrace {
   int width;
   int height;
   int samples;
+  bool reuse_winner = true;
+  int forced_winner = -1;
+  int skipped_draws = 0;
+
+  __device__ void RecordWinnerCost(int row, int col, bool reused) const {
+    const size_t index =
+        (static_cast<size_t>(row) * width + col) * (samples + 1) + samples;
+    if (!records || index >= capacity) return;
+    if (reused)
+      ++records[index].reused;
+    else
+      ++records[index].recomputed;
+  }
 
   __device__ void Record(int row,
                          int col,
@@ -1114,6 +1129,8 @@ struct CacheTrace {
     CacheTraceRecord& record = records[index];
     record.source = source;
     record.winner = winner;
+    record.reused = 0;
+    record.recomputed = 0;
     for (int i = 0; i < 5; ++i) record.costs[i] = costs[i];
     record.written = 1;
   }
@@ -1340,6 +1357,11 @@ __global__ void SweepFromTopToBottom(
                                        rand_param_state.normal,
                                        curr_param_state.normal};
 
+    // Keep the same shared planes visible through the winner update. The
+    // cache-OFF specialization does not access them.
+    __shared__ typename SourceCache::Values cache_values;
+    __shared__ typename SourceCache::Sources cache_sources;
+    int cache_size = 0;
     if constexpr (kDistinctSourceCache) {
       // Per-thread lanes, no cross-thread communication or barriers. Each row
       // starts with cache_size = 0, so no explicit value reset is needed:
@@ -1354,9 +1376,6 @@ __global__ void SweepFromTopToBottom(
       // existing reference tile (2112/4224 B for window11). Neither this
       // cache nor the thread-local texture lookahead adds synchronization;
       // inactive border lanes still participate in the reference Read barrier.
-      __shared__ typename SourceCache::Values cache_values;
-      __shared__ typename SourceCache::Sources cache_sources;
-      int cache_size = 0;
       for (int sample = 0; sample < options.num_samples; ++sample) {
         const float rand_prob = curand_uniform(&rand_state) - FLT_EPSILON;
 
@@ -1369,6 +1388,10 @@ __global__ void SweepFromTopToBottom(
           }
         }
 
+#if defined(COLMAP_OWNED_CACHE_TRACE_TEST)
+        // Deterministic empty/partial-cache cases retain every real RNG draw.
+        if (sample < trace.skipped_draws) pcc_computer.src_image_idx = -1;
+#endif
         if (pcc_computer.src_image_idx == -1) {
 #if defined(COLMAP_OWNED_CACHE_TRACE_TEST)
           trace.Record(row, col, sample, -1, -1, costs);
@@ -1445,6 +1468,10 @@ __global__ void SweepFromTopToBottom(
           }
         }
 
+#if defined(COLMAP_OWNED_CACHE_TRACE_TEST)
+        // Deterministic empty/partial-cache cases retain every real RNG draw.
+        if (sample < trace.skipped_draws) pcc_computer.src_image_idx = -1;
+#endif
         if (pcc_computer.src_image_idx == -1) {
 #if defined(COLMAP_OWNED_CACHE_TRACE_TEST)
           trace.Record(row, col, sample, -1, -1, costs);
@@ -1492,7 +1519,11 @@ __global__ void SweepFromTopToBottom(
     }
 
     // Find the parameters of the minimum cost.
-    const int min_cost_idx = FindMinCost<kNumCosts>(costs);
+    const int min_cost_idx =
+#if defined(COLMAP_OWNED_CACHE_TRACE_TEST)
+        trace.forced_winner >= 0 ? trace.forced_winner :
+#endif
+                                 FindMinCost<kNumCosts>(costs);
 #if defined(COLMAP_OWNED_CACHE_TRACE_TEST)
     trace.Record(row, col, options.num_samples, -1, min_cost_idx, costs);
 #endif
@@ -1514,7 +1545,23 @@ __global__ void SweepFromTopToBottom(
         cost = cost_map.Get(row, col, image_idx);
       } else {
         pcc_computer.src_image_idx = image_idx;
-        cost = pcc_computer.Compute();
+        bool reused = false;
+        if constexpr (kDistinctSourceCache) {
+#if defined(COLMAP_OWNED_CACHE_TRACE_TEST)
+          if (trace.reuse_winner)
+#endif
+            reused = SourceCache::FindWinningPhotoCost(cache_sources,
+                                                       cache_values,
+                                                       cache_size,
+                                                       threadIdx.x,
+                                                       min_cost_idx,
+                                                       image_idx,
+                                                       cost);
+        }
+        if (!reused) cost = pcc_computer.Compute();
+#if defined(COLMAP_OWNED_CACHE_TRACE_TEST)
+        trace.RecordWinnerCost(row, col, reused);
+#endif
         cost_map.Set(row, col, image_idx, cost);
       }
 

@@ -46,6 +46,7 @@ void ExpectState(const curandState& a, const curandState& b) {
 
 struct SweepOutput {
   Mat<float> cost, depth, normal, probability;
+  Mat<uint8_t> mask;
   std::vector<curandState> rng;
   std::vector<CacheTraceRecord> trace;
 };
@@ -54,8 +55,18 @@ struct SweepOutput {
 // computations execute the included production template with real textures.
 // kLookahead corresponds to the solver's owned_tex_lookahead toggle; the
 // experimental pair keeps the distinct-source cache ON in both arms.
-template <int kTile, bool kCache, bool kGeometry, bool kLookahead = false>
-SweepOutput RunSweep(int seed, int sources, bool flat, bool coincident) {
+template <int kTile,
+          bool kCache,
+          bool kGeometry,
+          bool kLookahead = false,
+          bool kFilter = false>
+SweepOutput RunSweep(int seed,
+                     int sources,
+                     bool flat,
+                     bool coincident,
+                     bool reuse_winner = true,
+                     int forced_winner = -1,
+                     int skipped_draws = 0) {
   constexpr int kWidth = 35;
   constexpr int kHeight = 3;
   constexpr int kSamples = 15;
@@ -146,6 +157,7 @@ SweepOutput RunSweep(int seed, int sources, bool flat, bool coincident) {
   depth.FillWithScalar(3.0f, stream.Get());
   normal.CopyToDevice(normals.data(), kWidth * sizeof(float), stream.Get());
   previous.FillWithScalar(0.5f, stream.Get());
+  mask.FillWithScalar(0, stream.Get());
   trace.CopyToDevice(
       empty.data(), kRecords * sizeof(CacheTraceRecord), stream.Get());
   const dim3 grid((kWidth + kTile - 1) / kTile);
@@ -169,14 +181,22 @@ SweepOutput RunSweep(int seed, int sources, bool flat, bool coincident) {
   options.num_samples = kSamples;
   options.sigma_spatial = 5;
   options.sigma_color = 0.2f;
-  // Geometry is real; no draw, CDF, cost or winner override is provided.
-  const CacheTrace capture{trace.GetPtr(), kRecords, kWidth, kHeight, kSamples};
+  // Geometry and costs are real. Targeted cases may force a winner/skip prefix
+  // via inclusion-test-only controls; default cases use natural selection.
+  const CacheTrace capture{trace.GetPtr(),
+                           kRecords,
+                           kWidth,
+                           kHeight,
+                           kSamples,
+                           reuse_winner,
+                           forced_winner,
+                           skipped_draws};
   SweepFromTopToBottom<11,
                        1,
                        kTile,
                        kGeometry,
-                       false,
-                       false,
+                       kFilter,
+                       kFilter && kGeometry,
                        kCache,
                        kLookahead>
       <<<grid, kTile, 0, stream.Get()>>>(calibration,
@@ -203,6 +223,7 @@ SweepOutput RunSweep(int seed, int sources, bool flat, bool coincident) {
   output.depth = depth.CopyToMat(stream.Get());
   output.normal = normal.CopyToMat(stream.Get());
   output.probability = probability.CopyToMat(stream.Get());
+  output.mask = mask.CopyToMat(stream.Get());
   output.rng.resize(boundary.Count());
   output.trace.resize(kRecords);
   boundary_rng.CopyToHost(
@@ -238,6 +259,7 @@ void Compare(const SweepOutput& a, const SweepOutput& b, Coverage& coverage) {
   ASSERT_NO_FATAL_FAILURE(ExpectMap(a.depth, b.depth));
   ASSERT_NO_FATAL_FAILURE(ExpectMap(a.normal, b.normal));
   ASSERT_NO_FATAL_FAILURE(ExpectMap(a.probability, b.probability));
+  EXPECT_EQ(a.mask.GetData(), b.mask.GetData());
   ASSERT_EQ(a.rng.size(), b.rng.size());
   for (size_t i = 0; i < a.rng.size(); ++i) {
     ExpectState(a.rng[i], b.rng[i]);
@@ -303,9 +325,12 @@ void CheckSweeps() {
                    << "seed=" << seed << " scenario=" << scenario);
       const auto baseline =
           RunSweep<kTile, false, kGeometry>(seed, sources, flat, coincident);
+      const auto recomputed = RunSweep<kTile, true, kGeometry>(
+          seed, sources, flat, coincident, false);
       const auto cached =
           RunSweep<kTile, true, kGeometry>(seed, sources, flat, coincident);
-      ASSERT_NO_FATAL_FAILURE(Compare(baseline, cached, coverage));
+      ASSERT_NO_FATAL_FAILURE(Compare(baseline, recomputed, coverage));
+      ASSERT_NO_FATAL_FAILURE(Compare(recomputed, cached, coverage));
       // The lookahead toggle must be arithmetic-neutral: identical ordered
       // maps, RNG states, draws, per-sample costs, winners and skips.
       const auto lookahead = RunSweep<kTile, true, kGeometry, true>(
@@ -331,6 +356,65 @@ void CheckSweeps() {
                                   coverage.mixed_skip ? 1 : 0);
   ::testing::Test::RecordProperty("observed_all_skip",
                                   coverage.all_skip ? 1 : 0);
+}
+
+// This pair keeps the distinct-source cache ON in both arms. Only winner
+// recomputation differs. Test-only overrides select each winner and skip prefix
+// deterministically; textures, cost computations, all draws, recurrence and
+// filtering remain real production code. Natural selection is tested above.
+template <int kTile, bool kGeometry>
+void CheckWinnerReuse() {
+  for (int winner = 0; winner < 5; ++winner) {
+    for (int skipped : {0, 7, 15}) {
+      SCOPED_TRACE(::testing::Message()
+                   << "winner=" << winner << " skipped=" << skipped);
+      // Twenty sources guarantee misses; at most fifteen can be cached.
+      const auto baseline = RunSweep<kTile, true, kGeometry, false, true>(
+          0, 20, false, false, false, winner, skipped);
+      const auto reused = RunSweep<kTile, true, kGeometry, false, true>(
+          0, 20, false, false, true, winner, skipped);
+      Coverage coverage;
+      ASSERT_NO_FATAL_FAILURE(Compare(baseline, reused, coverage));
+      int hits = 0;
+      for (size_t pixel = 0; pixel < reused.trace.size() / 16; ++pixel) {
+        std::array<bool, 20> sampled{};
+        int distinct = 0;
+        for (int draw = 0; draw < 15; ++draw) {
+          const int source = reused.trace[pixel * 16 + draw].source;
+          if (source >= 0 && !sampled[source]) {
+            sampled[source] = true;
+            ++distinct;
+          }
+        }
+        const auto& old = baseline.trace[pixel * 16 + 15];
+        const auto& now = reused.trace[pixel * 16 + 15];
+        EXPECT_EQ(now.winner, winner);
+        EXPECT_EQ(old.reused, 0);
+        EXPECT_EQ(old.recomputed, winner == 0 ? 0 : 20);
+        EXPECT_EQ(now.reused, winner == 0 ? 0 : distinct);
+        EXPECT_EQ(now.recomputed, winner == 0 ? 0 : 20 - distinct);
+        hits += now.reused;
+      }
+      if (skipped == 0) EXPECT_TRUE(coverage.repeat);
+      if (skipped == 7) EXPECT_TRUE(coverage.mixed_skip);
+      if (skipped == 15) EXPECT_TRUE(coverage.all_skip);
+      if (skipped == 15 || winner == 0) EXPECT_EQ(hits, 0);
+      if (skipped != 15 && winner != 0) EXPECT_GT(hits, 0);
+    }
+  }
+}
+
+TEST(OwnedDistinctSourceCacheTrace, WinnerReusePhoto) {
+  CheckWinnerReuse<16, false>();
+}
+TEST(OwnedDistinctSourceCacheTrace, WinnerReuseGeometry) {
+  CheckWinnerReuse<16, true>();
+}
+TEST(OwnedDistinctSourceCacheTrace, WinnerReusePhoto32) {
+  CheckWinnerReuse<32, false>();
+}
+TEST(OwnedDistinctSourceCacheTrace, WinnerReuseGeometry32) {
+  CheckWinnerReuse<32, true>();
 }
 
 TEST(OwnedDistinctSourceCacheTrace, Photometric) { CheckSweeps<16, false>(); }
