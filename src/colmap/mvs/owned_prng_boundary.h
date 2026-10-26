@@ -66,14 +66,15 @@ inline OwnedRotationLayout BuildOwnedBoundaryRotationLayout(
   auto layout =
       BuildOwnedScratchRotationLayout(width, height, sources, retain_mask);
   const PrngBoundaryLayout boundary(width, height);
-  for (auto it = layout.slots.begin(); it != layout.slots.end();) {
+  for (auto it = layout.slot_layouts.begin();
+       it != layout.slot_layouts.end();) {
     if (it->role != RotationRole::kPrng) {
       ++it;
       continue;
     }
     layout.logical_bytes -= it->requested_span_bytes;
     if (it->parity == 1) {
-      it = layout.slots.erase(it);
+      it = layout.slot_layouts.erase(it);
     } else {
       it->width = boundary.Count();
       it->height = 1;

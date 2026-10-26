@@ -1,0 +1,89 @@
+name: MVS (Linux contracts and CUDA compile)
+
+on:
+  pull_request:
+    branches: [dev/streaming-workflow]
+    types: [assigned, opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpu:
+    name: CPU contracts and format
+    # Never execute external-fork PR code on these self-hosted runners.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check changed-file format
+        env:
+          FORMAT_BASE: ${{ github.event.pull_request.base.sha || 'HEAD^' }}
+        run: |
+          set -euo pipefail
+          python3 -m pip install ruff==0.15.20 clang-format==22.1.5
+          bash scripts/ci/check_mvs_format.sh "$FORMAT_BASE"
+      - name: Run standalone production CPU contracts and packaging regressions
+        run: bash scripts/ci/run_mvs_cpu.sh
+
+  cuda-compile:
+    name: Native CUDA compile and link (no GPU execution)
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 60
+    container:
+      image: nvidia/cuda:12.8.1-devel-ubuntu24.04@sha256:4b9ed5fa8361736996499f64ecebf25d4ec37ff56e4d11323ccde10aa36e0c43
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      # Git must exist BEFORE checkout, not after its archive fallback.
+      - name: Install checkout prerequisites
+        run: |
+          apt-get update
+          apt-get install -y git ca-certificates
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Trust only the checked-out workspace in this container
+        # Checkout's temporary global config does not persist into run steps.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Install headless build dependencies
+        run: |
+          apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build python3 pkg-config \
+            libboost-program-options-dev libboost-graph-dev libboost-system-dev \
+            libeigen3-dev libceres-dev libopenimageio-dev openimageio-tools \
+            libsuitesparse-dev libmetis-dev libgoogle-glog-dev \
+            libgtest-dev libgmock-dev libsqlite3-dev libcgal-dev libglew-dev \
+            libunwind-dev libcurl4-openssl-dev libopenblas-dev liblapack-dev
+          mkdir -p /usr/include/opencv4
+      - name: Configure and build current head (compile/link only)
+        run: |
+          set -euo pipefail
+          mkdir -p build-mvs-ci
+          bash scripts/ci/build_mvs_cuda.sh 2>&1 | tee build-mvs-ci/build.log
+      - name: Upload native build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mvs-cuda-compile-diagnostics
+          path: |
+            build-mvs-ci/build.log
+            build-mvs-ci/CMakeCache.txt
+            build-mvs-ci/CMakeFiles/CMakeConfigureLog.yaml
+          retention-days: 7

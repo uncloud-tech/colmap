@@ -100,6 +100,14 @@ target_include_directories(colmap_mvs PUBLIC
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>")
 add_dependencies(colmap_mvs resident_allocation_fingerprint photo_phase_fingerprint)
 
+# Public MVS headers include these build-generated fingerprints. The library
+# dependencies above generate them for the normal build/install target, even
+# when CUDA is disabled; ship the same bytes at their public include paths.
+install(FILES
+    "${PHOTO_PHASE_HEADER}"
+    "${RESIDENT_ALLOCATION_HEADER}"
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/colmap/mvs/generated")
+
 COLMAP_ADD_TEST(
     NAME owned_prng_seed_test
     SRCS owned_prng_seed_test.cc

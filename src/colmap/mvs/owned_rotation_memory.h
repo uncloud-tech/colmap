@@ -25,7 +25,7 @@ inline OwnedRotationMemoryPhases BuildOwnedRotationMemoryPhases(
   const auto retained =
       BuildOwnedBoundaryRotationLayout(width, height, sources, retain_mask);
   size_t initialization = 0;
-  for (const auto& slot : retained.slots) {
+  for (const auto& slot : retained.slot_layouts) {
     if (slot.parity == 0) {
       initialization =
           detail::CheckedAdd(initialization, slot.requested_span_bytes);
