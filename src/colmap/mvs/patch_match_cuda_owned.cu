@@ -993,8 +993,11 @@ __global__ void InitNormalMap(const ReferenceCalibration calibration,
   }
 }
 
-// Rotate normals by 90deg around z-axis in counter-clockwise direction.
-__global__ void RotateNormalMap(GpuMatView<float> normal_map) {
+// Fuse the normal-basis change with the counter-clockwise spatial rotation.
+// Input and output are distinct persistent owners, with independent pitches and
+// plane strides (pitch * height). The old input is dead after the owner flip.
+__global__ void RotateNormalMap(const GpuMatView<float> normal_map,
+                                GpuMatView<float> output) {
   const int row = blockDim.y * blockIdx.y + threadIdx.y;
   const int col = blockDim.x * blockIdx.x + threadIdx.x;
   if (col < normal_map.GetWidth() && row < normal_map.GetHeight()) {
@@ -1004,7 +1007,7 @@ __global__ void RotateNormalMap(GpuMatView<float> normal_map) {
     rotated_normal[0] = normal[1];
     rotated_normal[1] = -normal[0];
     rotated_normal[2] = normal[2];
-    normal_map.SetSlice(row, col, rotated_normal);
+    output.SetSlice(normal_map.GetWidth() - 1 - col, row, rotated_normal);
   }
 }
 
@@ -2506,11 +2509,15 @@ void PatchMatchCuda::Rotate() {
   depth_map_->Rotate(depth_map_.Alternate(), stream_->Get(), wait);
   depth_map_.Flip();
 
-  RotateNormalMap<<<elem_wise_grid_size_,
-                    elem_wise_block_size_,
-                    0,
-                    stream_->Get()>>>(normal_map_->View());
-  normal_map_->Rotate(normal_map_.Alternate(), stream_->Get(), wait);
+  {
+    ScopedStreamCompletion completion(stream_->Get());
+    RotateNormalMap<<<elem_wise_grid_size_,
+                      elem_wise_block_size_,
+                      0,
+                      stream_->Get()>>>(normal_map_->View(),
+                                        normal_map_.Alternate()->View());
+    completion.Wait(wait);
+  }
   normal_map_.Flip();
 
   ref_image_->image->Rotate(
