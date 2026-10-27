@@ -524,6 +524,7 @@ HostGrayscaleBank::HostGrayscaleBank(
   for (const auto& input : inputs) CheckSnapshotIdentity(input.identity);
   check_cancelled();
 }
+size_t HostGrayscaleBank::NumJobs() const { return sources_.size(); }
 size_t HostGrayscaleBank::Width() const { return width_; }
 size_t HostGrayscaleBank::Height() const { return height_; }
 const std::vector<std::shared_ptr<const GrayscaleLayer>>&

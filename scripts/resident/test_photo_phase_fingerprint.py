@@ -20,6 +20,9 @@ spec.loader.exec_module(generator)
 class PhotoFingerprintTest(unittest.TestCase):
     def test_graph_allocation_and_host_boundary_sources_are_attested(self):
         required = {
+            "src/colmap/mvs/owned_input_bank.h",
+            "src/colmap/mvs/owned_input_bank.cc",
+            "src/colmap/mvs/owned_input_bank.cu",
             "src/colmap/mvs/owned_cuda_execution.h",
             "src/colmap/mvs/cuda_texture.h",
             "src/colmap/mvs/owned_graph.h",
@@ -88,7 +91,7 @@ class PhotoFingerprintTest(unittest.TestCase):
             self.assertIn(
                 hashlib.sha256(encoded).hexdigest(), output.read_text()
             )
-            self.assertEqual(len(generator.CLOSURE), 25)
+            self.assertEqual(len(generator.CLOSURE), 28)
             self.assertIn(
                 f'kPhotoPhaseV1SourceCommit[] = "{lineage}"', output.read_text()
             )

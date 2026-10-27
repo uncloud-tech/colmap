@@ -21,6 +21,78 @@ cudaTextureDesc TextureDescription(cudaTextureFilterMode filter,
 }
 }  // namespace
 
+struct ResidentGrayscaleBank::Impl {
+  int device;
+  size_t width;
+  size_t height;
+  struct Layer {
+    BankFileIdentity identity;
+    size_t width;
+    size_t height;
+  };
+  std::vector<Layer> layers;
+  std::vector<std::vector<int>> jobs;
+  // Stream dies last; upload completion precedes publication of any binding.
+  std::unique_ptr<OwnedCudaStream> stream;
+  std::unique_ptr<CudaArrayLayeredTexture<uint8_t>> grayscale;
+
+  Impl(const HostGrayscaleBank& host, int device_index)
+      : device(device_index), width(host.Width()), height(host.Height()) {
+    THROW_CHECK_GE(device, 0);
+    CUDA_SAFE_CALL(cudaSetDevice(device));
+    stream = std::make_unique<OwnedCudaStream>();
+    try {
+      grayscale = std::make_unique<CudaArrayLayeredTexture<uint8_t>>(
+          TextureDescription(cudaFilterModeLinear, cudaReadModeNormalizedFloat),
+          width,
+          height,
+          host.Layers().size());
+      for (size_t i = 0; i < host.Layers().size(); ++i) {
+        const auto& layer = *host.Layers()[i];
+        grayscale->CopyLayerFromHost(i, layer.pixels.data(), stream->Get());
+        layers.push_back({layer.identity, layer.width, layer.height});
+      }
+      for (size_t job = 0; job < host.NumJobs(); ++job) {
+        jobs.push_back(host.SourceLayers(job));
+      }
+      stream->Synchronize();
+    } catch (...) {
+      stream->DrainBeforeDestruction();
+      throw;
+    }
+  }
+  ~Impl() { stream->DrainBeforeDestruction(); }
+};
+
+ResidentGrayscaleBank::ResidentGrayscaleBank(const HostGrayscaleBank& host,
+                                             int device_index)
+    : impl_(std::make_unique<Impl>(host, device_index)) {}
+ResidentGrayscaleBank::~ResidentGrayscaleBank() = default;
+PhotoGrayscaleBinding ResidentGrayscaleBank::BindJob(size_t job) const {
+  return {shared_from_this(), impl_->jobs.at(job)};
+}
+size_t ResidentGrayscaleBank::Width() const { return impl_->width; }
+size_t ResidentGrayscaleBank::Height() const { return impl_->height; }
+int ResidentGrayscaleBank::DeviceIndex() const { return impl_->device; }
+uint64_t ResidentGrayscaleBank::GrayscaleTexture() const {
+  return impl_->grayscale->GetObj();
+}
+void ResidentGrayscaleBank::ValidateSources(const std::vector<int>& layers,
+                                            const std::vector<Image>& sources,
+                                            int device_index) const {
+  THROW_CHECK_EQ(device_index, impl_->device);
+  THROW_CHECK_GT(layers.size(), 0);
+  THROW_CHECK_EQ(layers.size(), sources.size());
+  for (size_t i = 0; i < layers.size(); ++i) {
+    THROW_CHECK_GE(layers[i], 0);
+    const auto& layer = impl_->layers.at(layers[i]);
+    THROW_CHECK_EQ(layer.width, sources[i].GetWidth());
+    THROW_CHECK_EQ(layer.height, sources[i].GetHeight());
+    THROW_CHECK(SameIdentity(layer.identity,
+                             CaptureFileIdentity(sources[i].GetPath())));
+  }
+}
+
 struct ResidentInputBank::Impl {
   int device;
   size_t width;

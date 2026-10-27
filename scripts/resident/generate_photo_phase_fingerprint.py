@@ -30,6 +30,9 @@ CLOSURE = (
     "src/colmap/mvs/owned_pair_coordinator.h",
     "src/colmap/mvs/owned_pair_validation.h",
     # Opt-in graph/pool allocation and the common host preparation boundary.
+    "src/colmap/mvs/owned_input_bank.h",
+    "src/colmap/mvs/owned_input_bank.cc",
+    "src/colmap/mvs/owned_input_bank.cu",
     "src/colmap/mvs/owned_cuda_execution.h",
     "src/colmap/mvs/cuda_texture.h",
     "src/colmap/mvs/owned_graph.h",

@@ -11,6 +11,17 @@
 namespace colmap {
 namespace mvs {
 
+#if defined(__CUDACC__) && !defined(COLMAP_HIP_ENABLED)
+// Common PHOTO source sampling boundary for private and resident arrays.
+__device__ inline float SampleSourceGrayscale(cudaTextureObject_t texture,
+                                              float x,
+                                              float y,
+                                              int source,
+                                              const int* layers) {
+  return tex2DLayered<float>(texture, x, y, layers ? layers[source] : source);
+}
+#endif
+
 #if !defined(COLMAP_HIP_ENABLED)
 // Owns only a texture object; the array owner must outlive this view.
 class CudaArrayTextureView {

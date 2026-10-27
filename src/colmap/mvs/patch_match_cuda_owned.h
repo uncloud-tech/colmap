@@ -98,6 +98,9 @@ class PatchMatchCuda {
 
   const PatchMatchOptions options_;
   const int owned_tile_threads_;
+  // Strong PHOTO binding dies after stream/resources. Constructor failure and
+  // destruction explicitly drain the owner stream before either can unwind;
+  // the shared_ptr alone is not a GPU completion fence.
   const PatchMatch::Problem problem_;
 
   // Created after device selection; drained before resources, destroyed last.
@@ -133,8 +136,9 @@ class PatchMatchCuda {
   cudaTextureObject_t borrowed_src_depth_ = 0;
   std::unique_ptr<GpuMat<int>> source_layers_;
   cudaTextureObject_t SourceImagesTexture() const {
-    return problem_.resident_bank ? borrowed_src_images_
-                                  : src_images_texture_->GetObj();
+    return (problem_.resident_bank || problem_.photo_grayscale.bank)
+               ? borrowed_src_images_
+               : src_images_texture_->GetObj();
   }
   cudaTextureObject_t SourceDepthTexture() const {
     return problem_.resident_bank

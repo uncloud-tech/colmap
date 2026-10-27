@@ -177,6 +177,7 @@ class HostGrayscaleBank {
   // bank or other borrowers are destroyed. This is NOT GPU stream lifetime.
   std::vector<std::shared_ptr<const GrayscaleLayer>> BindJob(size_t job) const;
   const BankWorkCounts& WorkCounts() const;
+  size_t NumJobs() const;
 
  private:
   size_t width_ = 0;
@@ -263,6 +264,42 @@ class HostInputBank {
   // Only after completed GPU upload. Metadata and eager reference normals
   // survive.
   void ReleaseUploadPayloads();
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+class ResidentGrayscaleBank;
+
+// Exact source ordinals plus strong GPU ownership. Consumers must drain their
+// streams (including graph launches) before releasing this binding.
+struct PhotoGrayscaleBinding {
+  std::shared_ptr<const ResidentGrayscaleBank> bank;
+  std::vector<int> layers;
+};
+
+// Grayscale-only PHOTO upload. Construct with make_shared, then bind jobs
+// before capture. No reference image, depth/normal maps or mutable solver
+// state.
+class ResidentGrayscaleBank
+    : public std::enable_shared_from_this<ResidentGrayscaleBank> {
+ public:
+  ResidentGrayscaleBank(const HostGrayscaleBank& host, int device_index);
+  ~ResidentGrayscaleBank();
+  ResidentGrayscaleBank(const ResidentGrayscaleBank&) = delete;
+  ResidentGrayscaleBank& operator=(const ResidentGrayscaleBank&) = delete;
+
+  PhotoGrayscaleBinding BindJob(size_t job) const;
+  size_t Width() const;
+  size_t Height() const;
+  int DeviceIndex() const;
+  uint64_t GrayscaleTexture() const;
+  // Setup-only validation against actual ordered invocation images, including
+  // file object identity, not merely matching dimensions.
+  void ValidateSources(const std::vector<int>& layers,
+                       const std::vector<Image>& sources,
+                       int device_index) const;
 
  private:
   struct Impl;
