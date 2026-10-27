@@ -11,6 +11,8 @@
 #include <array>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
+#include <cstring>
 #include <future>
 #include <mutex>
 #include <stdexcept>
@@ -19,6 +21,47 @@
 
 namespace colmap::mvs::owned {
 namespace {
+::testing::AssertionResult SameFloatBits(const std::vector<float>& expected,
+                                         const std::vector<float>& actual) {
+  static_assert(sizeof(float) == sizeof(uint32_t));
+  if (expected.size() != actual.size()) {
+    return ::testing::AssertionFailure() << "Different float-vector sizes";
+  }
+  for (size_t i = 0; i < expected.size(); ++i) {
+    uint32_t expected_bits = 0;
+    uint32_t actual_bits = 0;
+    std::memcpy(&expected_bits, &expected[i], sizeof(expected_bits));
+    std::memcpy(&actual_bits, &actual[i], sizeof(actual_bits));
+    if (expected_bits != actual_bits) {
+      return ::testing::AssertionFailure()
+             << "Different float bits at element " << i << ": " << expected_bits
+             << " vs " << actual_bits;
+    }
+  }
+  return ::testing::AssertionSuccess();
+}
+
+// Host-only guard: float equality would miss signed-zero differences and reject
+// identical NaN payloads. The GPU comparisons below require byte identity.
+TEST(ResidentGrayscaleBank, FloatBitsComparisonGuard) {
+  const std::array<uint32_t, 2> bits = {0u, 0x7fc12345u};
+  std::vector<float> expected(2);
+  std::vector<float> actual(2);
+  std::memcpy(expected.data(), bits.data(), bits.size() * sizeof(uint32_t));
+  std::memcpy(actual.data(), bits.data(), bits.size() * sizeof(uint32_t));
+  EXPECT_TRUE(SameFloatBits(expected, actual));
+  const uint32_t negative_zero = 0x80000000u;
+  std::memcpy(&actual[0], &negative_zero, sizeof(negative_zero));
+  EXPECT_FALSE(SameFloatBits(expected, actual));
+  std::memcpy(actual.data(), bits.data(), bits.size() * sizeof(uint32_t));
+  const uint32_t other_nan = 0x7fc12346u;
+  std::memcpy(&actual[1], &other_nan, sizeof(other_nan));
+  EXPECT_FALSE(SameFloatBits(expected, actual));
+  actual.pop_back();
+  EXPECT_FALSE(SameFloatBits(expected, actual));
+  EXPECT_TRUE(SameFloatBits({}, {}));
+}
+
 __global__ void Sample(cudaTextureObject_t direct,
                        cudaTextureObject_t bank,
                        const int* layers,
@@ -176,10 +219,12 @@ TEST(ResidentGrayscaleBank, OrderedPhotoSourcesAndLifetime) {
     PatchMatch shared(options, problem, PatchMatchExecution::kOwnedCuda);
     EXPECT_NO_THROW(shared.Check());
     shared.Run();
-    EXPECT_EQ(direct.GetDepthMap().GetData(), shared.GetDepthMap().GetData());
-    EXPECT_EQ(direct.GetNormalMap().GetData(), shared.GetNormalMap().GetData());
-    EXPECT_EQ(direct.GetSelProbMap().GetData(),
-              shared.GetSelProbMap().GetData());
+    EXPECT_TRUE(SameFloatBits(direct.GetDepthMap().GetData(),
+                              shared.GetDepthMap().GetData()));
+    EXPECT_TRUE(SameFloatBits(direct.GetNormalMap().GetData(),
+                              shared.GetNormalMap().GetData()));
+    EXPECT_TRUE(SameFloatBits(direct.GetSelProbMap().GetData(),
+                              shared.GetSelProbMap().GetData()));
 
     auto invalid = problem;
     std::reverse(invalid.photo_grayscale.layers.begin(),
@@ -398,12 +443,12 @@ TEST(ResidentGrayscaleBank, ConcurrentPhotoConsumersOwnBindings) {
       EXPECT_TRUE(std::any_of(expected_depth.GetData().begin(),
                               expected_depth.GetData().end(),
                               [](float depth) { return depth > 0; }));
-      EXPECT_EQ(expected_depth.GetData(),
-                consumers[job]->GetDepthMap().GetData());
-      EXPECT_EQ(controls[job]->GetNormalMap().GetData(),
-                consumers[job]->GetNormalMap().GetData());
-      EXPECT_EQ(controls[job]->GetSelProbMap().GetData(),
-                consumers[job]->GetSelProbMap().GetData());
+      EXPECT_TRUE(SameFloatBits(expected_depth.GetData(),
+                                consumers[job]->GetDepthMap().GetData()));
+      EXPECT_TRUE(SameFloatBits(controls[job]->GetNormalMap().GetData(),
+                                consumers[job]->GetNormalMap().GetData()));
+      EXPECT_TRUE(SameFloatBits(controls[job]->GetSelProbMap().GetData(),
+                                consumers[job]->GetSelProbMap().GetData()));
     }
     // RunPreparedOwned's completion contract fences each stream. Destroy the
     // first completed consumer while the second production binding still owns
