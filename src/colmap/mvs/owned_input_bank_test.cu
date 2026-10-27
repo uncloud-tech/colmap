@@ -213,8 +213,11 @@ TEST(ResidentGrayscaleBank, OrderedPhotoSourcesAndLifetime) {
     if (job == 1)
       std::reverse(problem.photo_grayscale.layers.begin(),
                    problem.photo_grayscale.layers.end());
-    for (int idx : problem.src_image_idxs)
-      private_images[idx].SetBitmap(Bitmap());
+    for (int idx : problem.src_image_idxs) {
+      // Restore metadata-only images: SetBitmap rejects empty dimensions.
+      private_images[idx] = images[idx];
+      ASSERT_TRUE(private_images[idx].GetBitmap().IsEmpty());
+    }
     options.owned_cuda_graphs = true;
     PatchMatch shared(options, problem, PatchMatchExecution::kOwnedCuda);
     EXPECT_NO_THROW(shared.Check());
