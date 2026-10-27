@@ -172,8 +172,14 @@ void CheckRotation(size_t width, size_t height, bool wait) {
         const float* expected_row =
             expected[turn].data() +
             (s * oracle->height + y) * oracle->pitch / 4;
-        EXPECT_EQ(std::memcmp(row, expected_row, actual->width * sizeof(float)),
-                  0);
+        for (size_t x = 0; x < actual->width; ++x) {
+          uint32_t actual_bits, expected_bits;
+          std::memcpy(&actual_bits, row + x, sizeof(actual_bits));
+          std::memcpy(&expected_bits, expected_row + x, sizeof(expected_bits));
+          ASSERT_EQ(actual_bits, expected_bits)
+              << "plane=" << s << " row=" << y << " col=" << x << " actual=0x"
+              << std::hex << actual_bits << " expected=0x" << expected_bits;
+        }
         for (size_t x = actual->width; x < actual->pitch / 4; ++x) {
           EXPECT_EQ(row[x], 12345.0f);
         }
