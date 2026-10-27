@@ -993,20 +993,72 @@ __global__ void InitNormalMap(const ReferenceCalibration calibration,
   }
 }
 
-// Rotate normals by 90deg around z-axis in counter-clockwise direction.
-__global__ void RotateNormalMap(GpuMatView<float> normal_map) {
-  const int row = blockDim.y * blockIdx.y + threadIdx.y;
-  const int col = blockDim.x * blockIdx.x + threadIdx.x;
-  if (col < normal_map.GetWidth() && row < normal_map.GetHeight()) {
-    float normal[3];
-    normal_map.GetSlice(row, col, normal);
-    float rotated_normal[3];
-    rotated_normal[0] = normal[1];
-    rotated_normal[1] = -normal[0];
-    rotated_normal[2] = normal[2];
-    normal_map.SetSlice(row, col, rotated_normal);
+namespace {
+
+constexpr int kNormalRotationTile = 32;
+constexpr int kNormalRotationRows = 8;
+
+// Fuse the normal-basis change with a tiled counter-clockwise rotation.
+// Input and output are distinct persistent owners with independent pitches and
+// plane strides (pitch * height). Each warp loads consecutive input columns,
+// then stores consecutive output columns after transposing through shared
+// memory. Padding avoids the stride-32 shared-memory transpose access pattern;
+// actual bank conflicts and occupancy still require native measurement.
+__global__ void RotateNormalMap(const GpuMatView<float> normal_map,
+                                GpuMatView<float> output) {
+  __shared__ unsigned int tile[3][kNormalRotationTile][kNormalRotationTile + 1];
+  const int input_col = blockIdx.x * kNormalRotationTile + threadIdx.x;
+  const int input_row = blockIdx.y * kNormalRotationTile + threadIdx.y;
+  for (int offset = 0; offset < kNormalRotationTile;
+       offset += kNormalRotationRows) {
+    if (input_col < normal_map.GetWidth() &&
+        input_row + offset < normal_map.GetHeight()) {
+      for (int s = 0; s < 3; ++s) {
+        tile[s][threadIdx.y + offset][threadIdx.x] =
+            __float_as_uint(normal_map.Get(input_row + offset, input_col, s));
+      }
+    }
+  }
+  // Every thread must reach the barrier, including the partial-tile tails.
+  __syncthreads();
+
+  const int source_row = blockIdx.y * kNormalRotationTile + threadIdx.x;
+  const int source_col = blockIdx.x * kNormalRotationTile + threadIdx.y;
+  for (int offset = 0; offset < kNormalRotationTile;
+       offset += kNormalRotationRows) {
+    if (source_row < normal_map.GetHeight() &&
+        source_col + offset < normal_map.GetWidth()) {
+      const int output_row = normal_map.GetWidth() - 1 - (source_col + offset);
+      // Match the legacy floating-point negation, including its treatment of
+      // NaNs and subnormals under the active CUDA compilation flags.
+      output.Set(output_row,
+                 source_row,
+                 0,
+                 __uint_as_float(tile[1][threadIdx.x][threadIdx.y + offset]));
+      output.Set(output_row,
+                 source_row,
+                 1,
+                 -__uint_as_float(tile[0][threadIdx.x][threadIdx.y + offset]));
+      output.Set(output_row,
+                 source_row,
+                 2,
+                 __uint_as_float(tile[2][threadIdx.x][threadIdx.y + offset]));
+    }
   }
 }
+
+// Keep production and the registered GPU regression on the same launch path.
+void LaunchNormalMapRotation(const GpuMatView<float> input,
+                             GpuMatView<float> output,
+                             cudaStream_t stream) {
+  const dim3 block(kNormalRotationTile, kNormalRotationRows);
+  const dim3 grid(
+      (input.GetWidth() + kNormalRotationTile - 1) / kNormalRotationTile,
+      (input.GetHeight() + kNormalRotationTile - 1) / kNormalRotationTile);
+  RotateNormalMap<<<grid, block, 0, stream>>>(input, output);
+}
+
+}  // namespace
 
 template <int kWindowSize, int kWindowStep, int kTileThreads>
 __global__ void ComputeInitialCost(
@@ -2506,11 +2558,12 @@ void PatchMatchCuda::Rotate() {
   depth_map_->Rotate(depth_map_.Alternate(), stream_->Get(), wait);
   depth_map_.Flip();
 
-  RotateNormalMap<<<elem_wise_grid_size_,
-                    elem_wise_block_size_,
-                    0,
-                    stream_->Get()>>>(normal_map_->View());
-  normal_map_->Rotate(normal_map_.Alternate(), stream_->Get(), wait);
+  {
+    ScopedStreamCompletion completion(stream_->Get());
+    LaunchNormalMapRotation(
+        normal_map_->View(), normal_map_.Alternate()->View(), stream_->Get());
+    completion.Wait(wait);
+  }
   normal_map_.Flip();
 
   ref_image_->image->Rotate(

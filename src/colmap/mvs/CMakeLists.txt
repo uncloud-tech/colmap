@@ -474,8 +474,15 @@ if(CUDA_ENABLED)
         SRCS owned_distinct_source_cache_trace_test.cu
         LINK_LIBS colmap_mvs_cuda
     )
+    COLMAP_ADD_TEST(
+        NAME owned_normal_rotation_test
+        SRCS owned_normal_rotation_test.cu
+        LINK_LIBS colmap_mvs_cuda
+    )
     if(TESTS_ENABLED)
         get_target_property(_owned_cache_test_archs colmap_mvs_cuda CUDA_ARCHITECTURES)
+        set_target_properties(colmap_mvs_owned_normal_rotation_test
+            PROPERTIES CUDA_ARCHITECTURES "${_owned_cache_test_archs}")
         set_target_properties(colmap_mvs_owned_distinct_source_cache_trace_test
             PROPERTIES CUDA_ARCHITECTURES "${_owned_cache_test_archs}")
     endif()
