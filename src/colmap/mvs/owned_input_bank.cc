@@ -93,6 +93,21 @@ void CheckSnapshotIdentity(const BankFileIdentity& expected) {
         "Resident input does not match the captured invocation identity");
   }
 }
+Bitmap ReadGrayscale(const Image& image,
+                     int max_image_size,
+                     const BankFileIdentity& identity) {
+  CheckIdentity(identity);
+  Bitmap grayscale;
+  THROW_CHECK(grayscale.Read(identity.path, false));
+  if (max_image_size > 0) {
+    grayscale.Rescale(image.GetWidth(), image.GetHeight());
+  }
+  THROW_CHECK(grayscale.IsGrey());
+  THROW_CHECK_EQ(static_cast<size_t>(grayscale.Width()), image.GetWidth());
+  THROW_CHECK_EQ(static_cast<size_t>(grayscale.Height()), image.GetHeight());
+  CheckIdentity(identity);
+  return grayscale;
+}
 bool SameMetadata(const BankInput& a, const BankInput& b) {
   return a.max_image_size == b.max_image_size &&
          a.image.GetWidth() == b.image.GetWidth() &&
@@ -389,6 +404,145 @@ struct HostInputBank::Impl {
   // recapture). Empty when unbound.
   std::vector<BankLayerIdentity> layer_expected;
 };
+HostGrayscaleBank::HostGrayscaleBank(
+    const std::vector<std::vector<GrayscaleInput>>& jobs,
+    const std::atomic<bool>* cancelled) {
+  const auto check_cancelled = [cancelled] {
+    if (cancelled && cancelled->load(std::memory_order_relaxed)) {
+      throw std::runtime_error("Grayscale bank construction cancelled");
+    }
+  };
+  check_cancelled();
+  if (jobs.empty()) throw std::invalid_argument("Empty grayscale bank");
+  std::vector<GrayscaleInput> inputs;
+  for (const auto& job : jobs) {
+    if (job.empty()) throw std::invalid_argument("Empty grayscale source job");
+    std::vector<int> sources;
+    for (const auto& input : job) {
+      check_cancelled();
+      const auto& image = input.image;
+      if (!image.GetBitmap().IsEmpty() || !image.GetWidth() ||
+          !image.GetHeight() ||
+          image.GetWidth() >
+              static_cast<size_t>(std::numeric_limits<int>::max()) ||
+          image.GetHeight() >
+              static_cast<size_t>(std::numeric_limits<int>::max()) ||
+          input.identity.path.empty()) {
+        throw std::invalid_argument("Invalid grayscale input metadata");
+      }
+      // The supplied admission snapshot is mandatory. Canonical aliases may
+      // share, but a new object at the same path is never silently re-admitted.
+      CheckSnapshotIdentity(input.identity);
+      if (!SameIdentity(Identify(image.GetPath()), input.identity)) {
+        throw std::invalid_argument("Grayscale input/snapshot mismatch");
+      }
+      size_t layer = 0;
+      for (; layer < inputs.size(); ++layer) {
+        if (!SameIdentity(inputs[layer].identity, input.identity)) continue;
+        if (inputs[layer].image.GetWidth() != image.GetWidth() ||
+            inputs[layer].image.GetHeight() != image.GetHeight() ||
+            inputs[layer].max_image_size != input.max_image_size) {
+          throw std::invalid_argument(
+              "Inconsistent shared grayscale representation");
+        }
+        break;
+      }
+      if (layer == inputs.size()) {
+        if (layer >= static_cast<size_t>(std::numeric_limits<int>::max())) {
+          throw std::overflow_error("Too many grayscale layers");
+        }
+        // Check the requested effective dimensions against the actual header
+        // and the private path's resizing policy before any cohort decode.
+        auto reader = OIIO::ImageInput::open(input.identity.path.u8string());
+        if (!reader) throw std::invalid_argument("Unreadable grayscale header");
+        const auto spec = reader->spec();
+        reader->close();
+        if (spec.width <= 0 || spec.height <= 0 || spec.depth != 1 ||
+            spec.nchannels < 1 || spec.nchannels > 4) {
+          throw std::invalid_argument("Invalid grayscale image dimensions");
+        }
+        // Bitmap's decoder indexes width*height*channels using int before
+        // resizing. Reject overflow in that actual allocation path, even if
+        // the requested effective image is small.
+        if (Mul(Mul(spec.width, spec.height), spec.nchannels) >
+            static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+          throw std::overflow_error("Grayscale decode exceeds bitmap range");
+        }
+        Image effective(input.identity.path,
+                        spec.width,
+                        spec.height,
+                        image.GetK(),
+                        image.GetR(),
+                        image.GetT());
+        if (input.max_image_size > 0) {
+          effective.Downsize(input.max_image_size, input.max_image_size);
+        }
+        if (effective.GetWidth() != image.GetWidth() ||
+            effective.GetHeight() != image.GetHeight()) {
+          throw std::invalid_argument(
+              "Grayscale effective dimensions mismatch");
+        }
+        CheckSnapshotIdentity(input.identity);
+        inputs.push_back(input);
+        width_ = std::max(width_, image.GetWidth());
+        height_ = std::max(height_, image.GetHeight());
+      }
+      if (std::find(sources.begin(), sources.end(), static_cast<int>(layer)) !=
+          sources.end()) {
+        throw std::invalid_argument("Duplicate grayscale source in job");
+      }
+      sources.push_back(static_cast<int>(layer));
+    }
+    sources_.push_back(std::move(sources));
+  }
+  const uint64_t layer_bytes = Mul(width_, height_);
+  // Check the entire padded union, not just each individual allocation.
+  Mul(layer_bytes, inputs.size());
+  if (layer_bytes > std::vector<uint8_t>().max_size()) {
+    throw std::overflow_error("Grayscale layer exceeds host vector range");
+  }
+  for (const auto& input : inputs) {
+    check_cancelled();
+    const auto grayscale =
+        ReadGrayscale(input.image, input.max_image_size, input.identity);
+    ++work_.grayscale_reads;
+    check_cancelled();
+    auto layer = std::make_shared<GrayscaleLayer>();
+    layer->identity = input.identity;
+    layer->width = input.image.GetWidth();
+    layer->height = input.image.GetHeight();
+    layer->row_stride = width_;
+    layer->pixels.resize(static_cast<size_t>(layer_bytes), 0);
+    for (size_t row = 0; row < layer->height; ++row) {
+      std::copy_n(grayscale.RowMajorData().data() + row * layer->width,
+                  layer->width,
+                  layer->pixels.data() + row * width_);
+    }
+    layers_.push_back(std::move(layer));
+  }
+  // Also detect replacement of an earlier layer while later layers decoded.
+  for (const auto& input : inputs) CheckSnapshotIdentity(input.identity);
+  check_cancelled();
+}
+size_t HostGrayscaleBank::Width() const { return width_; }
+size_t HostGrayscaleBank::Height() const { return height_; }
+const std::vector<std::shared_ptr<const GrayscaleLayer>>&
+HostGrayscaleBank::Layers() const {
+  return layers_;
+}
+const std::vector<int>& HostGrayscaleBank::SourceLayers(size_t job) const {
+  return sources_.at(job);
+}
+std::vector<std::shared_ptr<const GrayscaleLayer>> HostGrayscaleBank::BindJob(
+    size_t job) const {
+  std::vector<std::shared_ptr<const GrayscaleLayer>> bindings;
+  for (const int layer : SourceLayers(job)) {
+    bindings.push_back(layers_.at(layer));
+  }
+  return bindings;
+}
+const BankWorkCounts& HostGrayscaleBank::WorkCounts() const { return work_; }
+
 BankLimits HostInputBank::Estimate(const std::vector<BankJob>& jobs) {
   return Resolve(jobs).estimate;
 }
@@ -516,23 +670,15 @@ HostInputBank::HostInputBank(std::vector<BankJob> jobs,
     auto& layer = impl_->layout.layers[i];
     const auto& ids = impl_->layout.identities[i];
     for (const auto& id : ids) CheckIdentity(id);
-    THROW_CHECK(layer.grayscale.Read(ids[0].path, false));
-    ++impl_->work.grayscale_reads;
     const auto& image = layer.input.image;
-    if (layer.input.max_image_size > 0) {
-      layer.grayscale.Rescale(image.GetWidth(), image.GetHeight());
-    }
+    layer.grayscale = ReadGrayscale(image, layer.input.max_image_size, ids[0]);
+    ++impl_->work.grayscale_reads;
     layer.depth.Read(ids[1].path);
     ++impl_->work.depth_reads;
     THROW_CHECK_EQ(layer.depth.GetDepth(), 1);
     if (layer.input.max_image_size > 0) {
       layer.depth.Downsize(image.GetWidth(), image.GetHeight());
     }
-    THROW_CHECK(layer.grayscale.IsGrey());
-    THROW_CHECK_EQ(static_cast<size_t>(layer.grayscale.Width()),
-                   image.GetWidth());
-    THROW_CHECK_EQ(static_cast<size_t>(layer.grayscale.Height()),
-                   image.GetHeight());
     THROW_CHECK_EQ(layer.depth.GetWidth(), image.GetWidth());
     THROW_CHECK_EQ(layer.depth.GetHeight(), image.GetHeight());
     if (impl_->normals == BankNormals::kEager) {
