@@ -81,6 +81,8 @@ void CheckRotation(size_t width, size_t height, bool wait) {
   }
   std::vector<float> initial[2][2];
   std::vector<float> result[4], expected[4], before[4], after[4];
+  PitchedNormal roundtrip(width, height, 19);
+  std::vector<float> roundtrip_expected(roundtrip.Bytes() / sizeof(float));
   ScopedStreamCompletion completion(stream.Get());
   for (unsigned arm = 0; arm < 2; ++arm) {
     auto& pair = arm ? reference : fused;
@@ -104,6 +106,29 @@ void CheckRotation(size_t width, size_t height, bool wait) {
                                      stream.Get()));
     }
   }
+  // Four spatial rotations restore coordinates, but legacy floating-point
+  // negation need not restore raw NaN payloads or subnormals. Apply just the
+  // four legacy basis changes to an independent copy in the original layout.
+  CUDA_SAFE_CALL(cudaMemcpy2DAsync(roundtrip.ptr,
+                                   roundtrip.pitch,
+                                   reference.Current()->ptr,
+                                   reference.Current()->pitch,
+                                   width * sizeof(float),
+                                   height * 3,
+                                   cudaMemcpyDeviceToDevice,
+                                   stream.Get()));
+  const dim3 roundtrip_block(32, 16);
+  const dim3 roundtrip_grid((width + 31) / 32, (height + 15) / 16);
+  for (unsigned turn = 0; turn < 4; ++turn) {
+    OldNormalBasis<<<roundtrip_grid, roundtrip_block, 0, stream.Get()>>>(
+        roundtrip.View());
+  }
+  CUDA_SAFE_CALL(cudaMemcpyAsync(roundtrip_expected.data(),
+                                 roundtrip.ptr,
+                                 roundtrip.Bytes(),
+                                 cudaMemcpyDeviceToHost,
+                                 stream.Get()));
+  CUDA_CHECK();
   // All host buffers and device owners outlive the enclosing stream drain,
   // including on exceptions. No per-rotation synchronization in chained mode.
   for (unsigned turn = 0; turn < 4; ++turn) {
@@ -184,9 +209,11 @@ void CheckRotation(size_t width, size_t height, bool wait) {
           EXPECT_EQ(row[x], 12345.0f);
         }
         if (turn == 3) {
-          EXPECT_EQ(std::memcmp(row,
-                                original.data() + (s * height + y) * width,
-                                width * sizeof(float)),
+          EXPECT_EQ(std::memcmp(
+                        row,
+                        roundtrip_expected.data() +
+                            (s * height + y) * roundtrip.pitch / sizeof(float),
+                        width * sizeof(float)),
                     0);
         }
       }

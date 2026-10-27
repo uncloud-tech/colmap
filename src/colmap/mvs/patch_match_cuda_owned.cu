@@ -1029,7 +1029,8 @@ __global__ void RotateNormalMap(const GpuMatView<float> normal_map,
     if (source_row < normal_map.GetHeight() &&
         source_col + offset < normal_map.GetWidth()) {
       const int output_row = normal_map.GetWidth() - 1 - (source_col + offset);
-      // Bitwise sign inversion preserves signed zero and every NaN payload.
+      // Match the legacy floating-point negation, including its treatment of
+      // NaNs and subnormals under the active CUDA compilation flags.
       output.Set(output_row,
                  source_row,
                  0,
@@ -1037,8 +1038,7 @@ __global__ void RotateNormalMap(const GpuMatView<float> normal_map,
       output.Set(output_row,
                  source_row,
                  1,
-                 __uint_as_float(tile[0][threadIdx.x][threadIdx.y + offset] ^
-                                 0x80000000u));
+                 -__uint_as_float(tile[0][threadIdx.x][threadIdx.y + offset]));
       output.Set(output_row,
                  source_row,
                  2,
