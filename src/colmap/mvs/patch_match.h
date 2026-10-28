@@ -73,6 +73,11 @@ class PatchMatch {
     std::vector<int> resident_src_layers;
     const NormalMap* resident_ref_normal = nullptr;
 
+    // Optional PHOTO-only source grayscale. Owned CUDA drains before dropping
+    // this strong binding, on success, failure and destruction. Setup once,
+    // never rebound during graph capture/replay. Reference remains private.
+    owned::PhotoGrayscaleBinding photo_grayscale;
+
     // Print the configuration to stdout.
     void Print() const;
   };

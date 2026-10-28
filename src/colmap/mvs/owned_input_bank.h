@@ -6,6 +6,7 @@
 #include "colmap/mvs/normal_map.h"
 #include "colmap/mvs/patch_match_options.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -137,6 +138,55 @@ struct BankWorkCounts {
   size_t normal_reads = 0;
 };
 
+// Grayscale source role only: metadata has EFFECTIVE dimensions; positive
+// max_image_size uses the same Downsize/Rescale policy as private PatchMatch.
+// Capture identity at invocation admission, not when this cohort is built.
+struct GrayscaleInput {
+  Image image;
+  int max_image_size = -1;
+  BankFileIdentity identity;
+};
+
+// Immutable through all bank/borrower interfaces. Each layer owns one padded
+// row-major uint8 payload. Effective pixels occupy [0,width) x [0,height);
+// remaining columns/rows are zero. All layers share the bank's padded extent.
+struct GrayscaleLayer {
+  BankFileIdentity identity;
+  size_t width = 0;
+  size_t height = 0;
+  size_t row_stride = 0;
+  std::vector<uint8_t> pixels;
+};
+
+// Fixed PHOTO source cohort, independent of the GEO device bank. No depth or
+// normal files, reference transforms, GPU resources or mutable solver buffers.
+// Construction is synchronous and publishes no partial bindings. Cancellation
+// is observed between reads (an in-flight decode completes before throwing).
+class HostGrayscaleBank {
+ public:
+  explicit HostGrayscaleBank(
+      const std::vector<std::vector<GrayscaleInput>>& jobs,
+      const std::atomic<bool>* cancelled = nullptr);
+
+  size_t Width() const;
+  size_t Height() const;
+  const std::vector<std::shared_ptr<const GrayscaleLayer>>& Layers() const;
+  // Union indices in exact job source order, never sorted by identity/index.
+  const std::vector<int>& SourceLayers(size_t job) const;
+  // Ordered owning bindings; pixels remain immutable and alive even after the
+  // bank or other borrowers are destroyed. This is NOT GPU stream lifetime.
+  std::vector<std::shared_ptr<const GrayscaleLayer>> BindJob(size_t job) const;
+  const BankWorkCounts& WorkCounts() const;
+  size_t NumJobs() const;
+
+ private:
+  size_t width_ = 0;
+  size_t height_ = 0;
+  std::vector<std::shared_ptr<const GrayscaleLayer>> layers_;
+  std::vector<std::vector<int>> sources_;
+  BankWorkCounts work_;
+};
+
 struct BankLayer {
   BankInput input;
   Bitmap grayscale;
@@ -214,6 +264,42 @@ class HostInputBank {
   // Only after completed GPU upload. Metadata and eager reference normals
   // survive.
   void ReleaseUploadPayloads();
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+class ResidentGrayscaleBank;
+
+// Exact source ordinals plus strong GPU ownership. Consumers must drain their
+// streams (including graph launches) before releasing this binding.
+struct PhotoGrayscaleBinding {
+  std::shared_ptr<const ResidentGrayscaleBank> bank;
+  std::vector<int> layers;
+};
+
+// Grayscale-only PHOTO upload. Construct with make_shared, then bind jobs
+// before capture. No reference image, depth/normal maps or mutable solver
+// state.
+class ResidentGrayscaleBank
+    : public std::enable_shared_from_this<ResidentGrayscaleBank> {
+ public:
+  ResidentGrayscaleBank(const HostGrayscaleBank& host, int device_index);
+  ~ResidentGrayscaleBank();
+  ResidentGrayscaleBank(const ResidentGrayscaleBank&) = delete;
+  ResidentGrayscaleBank& operator=(const ResidentGrayscaleBank&) = delete;
+
+  PhotoGrayscaleBinding BindJob(size_t job) const;
+  size_t Width() const;
+  size_t Height() const;
+  int DeviceIndex() const;
+  uint64_t GrayscaleTexture() const;
+  // Setup-only validation against actual ordered invocation images, including
+  // file object identity, not merely matching dimensions.
+  void ValidateSources(const std::vector<int>& layers,
+                       const std::vector<Image>& sources,
+                       int device_index) const;
 
  private:
   struct Impl;

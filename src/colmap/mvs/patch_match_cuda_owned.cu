@@ -543,11 +543,11 @@ struct PhotoConsistencyCostComputer {
             norm_row_src,
             source_layers_ ? source_layers_[src_image_idx] : src_image_idx);
 #else
-        const float src_color = tex2DLayered<float>(
-            src_images_texture_,
-            norm_col_src,
-            norm_row_src,
-            source_layers_ ? source_layers_[src_image_idx] : src_image_idx);
+        const float src_color = SampleSourceGrayscale(src_images_texture_,
+                                                      norm_col_src,
+                                                      norm_row_src,
+                                                      src_image_idx,
+                                                      source_layers_);
 #endif
 
         const float bilateral_weight = bilateral_weight_computer_.Compute(
@@ -673,11 +673,11 @@ struct PhotoConsistencyCostComputer {
                 norm_row_src,
                 source_layers_ ? source_layers_[src_image_idx] : src_image_idx);
 #else
-            const float src_color = tex2DLayered<float>(
-                src_images_texture_,
-                norm_col_src,
-                norm_row_src,
-                source_layers_ ? source_layers_[src_image_idx] : src_image_idx);
+            const float src_color = SampleSourceGrayscale(src_images_texture_,
+                                                          norm_col_src,
+                                                          norm_row_src,
+                                                          src_image_idx,
+                                                          source_layers_);
 #endif
             // Preserve stepwise rounding, including the absence of an unused
             // final increment in the scalar lookahead. Never use base+i*step.
@@ -2059,6 +2059,28 @@ void PatchMatchCuda::InitRefImage() {
 }
 
 void PatchMatchCuda::InitSourceImages() {
+  if (problem_.photo_grayscale.bank) {
+    THROW_CHECK(!options_.geom_consistency);
+    THROW_CHECK(!problem_.resident_bank);
+    THROW_CHECK_EQ(problem_.resident_ref_layer, -1);
+    THROW_CHECK(problem_.resident_src_layers.empty());
+    THROW_CHECK(!problem_.resident_ref_normal);
+    THROW_CHECK(!problem_.depth_maps && !problem_.normal_maps);
+    std::vector<Image> sources;
+    for (const int idx : problem_.src_image_idxs) {
+      THROW_CHECK_GE(idx, 0);
+      sources.push_back(problem_.images->at(idx));
+    }
+    const auto& binding = problem_.photo_grayscale;
+    binding.bank->ValidateSources(
+        binding.layers, sources, std::stoi(options_.gpu_index));
+    borrowed_src_images_ = binding.bank->GrayscaleTexture();
+    source_layers_ = std::make_unique<GpuMat<int>>(binding.layers.size(), 1);
+    source_layers_->CopyToDevice(binding.layers.data(),
+                                 binding.layers.size() * sizeof(int),
+                                 stream_->Get());
+    return;
+  }
   if (problem_.resident_bank) {
     const auto& bank = *problem_.resident_bank;
     THROW_CHECK_EQ(problem_.resident_src_layers.size(),

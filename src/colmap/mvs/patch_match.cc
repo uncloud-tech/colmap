@@ -46,10 +46,18 @@ FlatHashSet<int> ResolveNativeUsedImages(const std::vector<int>& sources,
 }
 std::vector<Image> SnapshotImages(const PatchMatch::Problem& problem) {
   if (!problem.images) return {};
-  if (!problem.resident_bank) return *problem.images;
+  if (!problem.resident_bank && !problem.photo_grayscale.bank) {
+    return *problem.images;
+  }
   std::vector<Image> images;
   images.reserve(problem.images->size());
-  for (const auto& image : *problem.images) {
+  for (size_t i = 0; i < problem.images->size(); ++i) {
+    const auto& image = problem.images->at(i);
+    if (problem.photo_grayscale.bank &&
+        static_cast<int>(i) == problem.ref_image_idx) {
+      images.push_back(image);
+      continue;
+    }
     images.emplace_back(image.GetPath(),
                         image.GetWidth(),
                         image.GetHeight(),
@@ -112,7 +120,13 @@ PatchMatch::PatchMatch(const PatchMatchOptions& options,
                                    : nullptr;
         }
         return result;
-      }()) {}
+      }()) {
+  if (problem.photo_grayscale.bank) {
+    // PHOTO snapshots intentionally omit maps. Reject incompatible caller
+    // inputs before that omission can hide a mixed input mode from Check().
+    THROW_CHECK(!problem.depth_maps && !problem.normal_maps);
+  }
+}
 
 PatchMatch::~PatchMatch() {}
 
@@ -137,6 +151,29 @@ void PatchMatch::Check() const {
   THROW_CHECK_GE(gpu_indices[0], -1);
 
   THROW_CHECK_NOTNULL(problem_.images);
+  if (problem_.photo_grayscale.bank) {
+#if defined(COLMAP_HIP_ENABLED)
+    THROW_CHECK(false) << "PHOTO grayscale borrowing requires owned CUDA";
+#else
+    THROW_CHECK(execution_ == PatchMatchExecution::kOwnedCuda);
+    THROW_CHECK(!options_.geom_consistency);
+    THROW_CHECK(!problem_.resident_bank);
+    THROW_CHECK_EQ(problem_.resident_ref_layer, -1);
+    THROW_CHECK(problem_.resident_src_layers.empty());
+    THROW_CHECK(!problem_.resident_ref_normal);
+    THROW_CHECK(!problem_.depth_maps && !problem_.normal_maps);
+    std::vector<Image> sources;
+    for (const int idx : problem_.src_image_idxs) {
+      THROW_CHECK_GE(idx, 0);
+      sources.push_back(problem_.images->at(idx));
+    }
+    problem_.photo_grayscale.bank->ValidateSources(
+        problem_.photo_grayscale.layers, sources, gpu_indices[0]);
+#endif
+  } else {
+    THROW_CHECK(problem_.photo_grayscale.layers.empty());
+  }
+
   if (options_.geom_consistency && !problem_.resident_bank) {
     THROW_CHECK_NOTNULL(problem_.depth_maps);
     THROW_CHECK_NOTNULL(problem_.normal_maps);
@@ -187,6 +224,12 @@ void PatchMatch::Check() const {
                      problem_.resident_bank->LayerHeight(layer));
       THROW_CHECK(image.GetBitmap().IsEmpty());
 #endif
+    } else if (problem_.photo_grayscale.bank &&
+               image_idx != problem_.ref_image_idx) {
+      // Source file identity/effective dimensions were validated above. No
+      // private source bitmap is needed or uploaded for this opt-in path.
+      THROW_CHECK_GT(image.GetWidth(), 0);
+      THROW_CHECK_GT(image.GetHeight(), 0);
     } else {
       THROW_CHECK_GT(image.GetBitmap().Width(), 0) << image_idx;
       THROW_CHECK_GT(image.GetBitmap().Height(), 0) << image_idx;

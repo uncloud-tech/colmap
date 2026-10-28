@@ -67,6 +67,211 @@ class HostInputBankTest : public ::testing::Test {
   BankJob job_;
 };
 
+TEST_F(HostInputBankTest, PhotoGrayscaleSharesPixelsAndPreservesSourceOrder) {
+  // PHOTO has no depth/normal files and owns only source images, not reference
+  // transforms or solver state. Capture the invocation identities before reads.
+  std::vector<GrayscaleInput> sources;
+  for (const auto& input : job_.inputs) {
+    std::filesystem::remove(input.depth_path);
+    std::filesystem::remove(input.normal_path);
+    sources.push_back({input.image,
+                       input.max_image_size,
+                       CaptureFileIdentity(input.image.GetPath())});
+  }
+  std::vector<std::shared_ptr<const GrayscaleLayer>> borrowed;
+  std::weak_ptr<const GrayscaleLayer> lifetime;
+  {
+    HostGrayscaleBank bank(
+        {{sources[2], sources[1]}, {sources[1], sources[2]}, {sources[0]}});
+    EXPECT_EQ(bank.Layers().size(), 3);
+    EXPECT_EQ(bank.SourceLayers(0), (std::vector<int>{0, 1}));
+    EXPECT_EQ(bank.SourceLayers(1), (std::vector<int>{1, 0}));
+    EXPECT_EQ(bank.SourceLayers(2), (std::vector<int>{2}));
+    EXPECT_EQ(bank.WorkCounts().grayscale_reads, 3);
+    EXPECT_EQ(bank.WorkCounts().depth_reads, 0);
+    EXPECT_EQ(bank.WorkCounts().normal_reads, 0);
+    borrowed = bank.BindJob(0);
+    EXPECT_EQ(borrowed[0], bank.BindJob(1)[1]);
+    EXPECT_EQ(borrowed[1], bank.BindJob(1)[0]);
+    EXPECT_NE(borrowed[0], bank.BindJob(2)[0]);
+    Bitmap expected;
+    ASSERT_TRUE(expected.Read(sources[2].identity.path, false));
+    expected.Rescale(2, 1);
+    EXPECT_EQ(borrowed[0]->pixels, expected.RowMajorData());
+    lifetime = borrowed[0];
+  }
+  EXPECT_FALSE(lifetime.expired());
+  EXPECT_EQ(borrowed[0]->width, 2);
+  EXPECT_EQ(borrowed[0]->height, 1);
+  EXPECT_EQ(borrowed[0]->pixels.size(), 2);
+  borrowed.clear();
+  EXPECT_TRUE(lifetime.expired());
+}
+
+TEST_F(HostInputBankTest, PhotoGrayscaleMixedSizePackingMatchesPrivateRows) {
+  // Nonuniform real pixels reveal row-stride errors that constant images hide.
+  const float* K = job_.images[0].GetK();
+  const float* R = job_.images[0].GetR();
+  const float* T = job_.images[0].GetT();
+  Bitmap wide(3, 1, false);
+  wide.RowMajorData() = {11, 12, 13};
+  Bitmap narrow(2, 2, false);
+  narrow.RowMajorData() = {21, 22, 23, 24};
+  const auto wide_path = root_ / "wide.png";
+  const auto narrow_path = root_ / "narrow.png";
+  ASSERT_TRUE(wide.Write(wide_path));
+  ASSERT_TRUE(narrow.Write(narrow_path));
+  GrayscaleInput a{
+      Image(wide_path, 3, 1, K, R, T), -1, CaptureFileIdentity(wide_path)};
+  GrayscaleInput b{
+      Image(narrow_path, 2, 2, K, R, T), -1, CaptureFileIdentity(narrow_path)};
+  HostGrayscaleBank bank({{a, b}, {b, a}});
+  EXPECT_EQ(bank.Width(), 3);
+  EXPECT_EQ(bank.Height(), 2);
+  EXPECT_EQ(bank.WorkCounts().grayscale_reads, 2);
+  const auto first = bank.BindJob(0);
+  const auto second = bank.BindJob(1);
+  EXPECT_EQ(first[0], second[1]);
+  EXPECT_EQ(first[1], second[0]);
+  EXPECT_EQ(first[0]->row_stride, 3);
+  EXPECT_EQ(first[1]->row_stride, 3);
+  EXPECT_EQ(first[0]->pixels, (std::vector<uint8_t>{11, 12, 13, 0, 0, 0}));
+  EXPECT_EQ(first[1]->pixels, (std::vector<uint8_t>{21, 22, 0, 23, 24, 0}));
+  // Private packing of each original job uses the same padded extent and
+  // original order, including the narrower image's second row.
+  for (size_t job = 0; job < 2; ++job) {
+    std::vector<uint8_t> packed;
+    for (const auto& layer : bank.BindJob(job)) {
+      packed.insert(packed.end(), layer->pixels.begin(), layer->pixels.end());
+    }
+    const std::vector<uint8_t> expected =
+        job == 0
+            ? std::vector<uint8_t>{11, 12, 13, 0, 0, 0, 21, 22, 0, 23, 24, 0}
+            : std::vector<uint8_t>{21, 22, 0, 23, 24, 0, 11, 12, 13, 0, 0, 0};
+    EXPECT_EQ(packed, expected);
+  }
+  EXPECT_THROW(bank.SourceLayers(2), std::out_of_range);
+  EXPECT_THROW(bank.BindJob(2), std::out_of_range);
+}
+
+TEST_F(HostInputBankTest, PhotoGrayscaleCanonicalAliasesNotCopiedWorkspaces) {
+  const auto& image = job_.images[0];
+  GrayscaleInput original{image, 2, CaptureFileIdentity(image.GetPath())};
+  const auto alias_path = root_ / "gray-alias.png";
+  std::filesystem::create_symlink(image.GetPath(), alias_path);
+  GrayscaleInput alias{Image(alias_path,
+                             image.GetWidth(),
+                             image.GetHeight(),
+                             image.GetK(),
+                             image.GetR(),
+                             image.GetT()),
+                       2,
+                       CaptureFileIdentity(alias_path)};
+  HostGrayscaleBank shared({{original}, {alias}});
+  EXPECT_EQ(shared.WorkCounts().grayscale_reads, 1);
+  EXPECT_EQ(shared.BindJob(0)[0], shared.BindJob(1)[0]);
+  const auto copy_path = root_ / "gray-copy.png";
+  std::filesystem::copy_file(image.GetPath(), copy_path);
+  GrayscaleInput copy{Image(copy_path,
+                            image.GetWidth(),
+                            image.GetHeight(),
+                            image.GetK(),
+                            image.GetR(),
+                            image.GetT()),
+                      2,
+                      CaptureFileIdentity(copy_path)};
+  HostGrayscaleBank distinct({{original}, {copy}});
+  EXPECT_EQ(distinct.WorkCounts().grayscale_reads, 2);
+  EXPECT_NE(distinct.BindJob(0)[0], distinct.BindJob(1)[0]);
+  EXPECT_EQ(distinct.BindJob(0)[0]->pixels, distinct.BindJob(1)[0]->pixels);
+}
+
+TEST_F(HostInputBankTest, PhotoGrayscaleRejectsReplacementOfAdmissionSnapshot) {
+  const auto& image = job_.images[0];
+  GrayscaleInput input{image, 2, CaptureFileIdentity(image.GetPath())};
+  HostGrayscaleBank original({{input}});
+  const auto borrowed = original.BindJob(0);
+  const auto expected = borrowed[0]->pixels;
+  const auto replacement = root_ / "replacement.png";
+  Bitmap bitmap(4, 2, true);
+  bitmap.Fill(BitmapColor<uint8_t>(220, 210, 200));
+  ASSERT_TRUE(bitmap.Write(replacement));
+  const auto mtime = std::filesystem::last_write_time(image.GetPath());
+  std::filesystem::rename(replacement, image.GetPath());
+  std::filesystem::last_write_time(image.GetPath(), mtime);
+  EXPECT_THROW(HostGrayscaleBank({{input}}), std::runtime_error);
+  EXPECT_EQ(borrowed[0]->pixels, expected);
+  // A different current image cannot be bound to the first image's snapshot.
+  input.image = job_.images[1];
+  input.identity = CaptureFileIdentity(job_.images[0].GetPath());
+  EXPECT_THROW(HostGrayscaleBank({{input}}), std::invalid_argument);
+}
+
+TEST_F(HostInputBankTest,
+       PhotoGrayscaleRejectsInvalidConstructionAndCancellation) {
+  GrayscaleInput input{
+      job_.images[0], 2, CaptureFileIdentity(job_.images[0].GetPath())};
+  EXPECT_THROW(HostGrayscaleBank(std::vector<std::vector<GrayscaleInput>>{}),
+               std::invalid_argument);
+  EXPECT_THROW(HostGrayscaleBank(std::vector<std::vector<GrayscaleInput>>{{}}),
+               std::invalid_argument);
+  EXPECT_THROW(HostGrayscaleBank({{input, input}}), std::invalid_argument);
+  auto invalid = input;
+  invalid.identity = {};
+  EXPECT_THROW(HostGrayscaleBank({{invalid}}), std::invalid_argument);
+  invalid = input;
+  invalid.image = Image();
+  EXPECT_THROW(HostGrayscaleBank({{invalid}}), std::invalid_argument);
+  invalid = input;
+  Bitmap payload(2, 1, false);
+  invalid.image.SetBitmap(std::move(payload));
+  EXPECT_THROW(HostGrayscaleBank({{invalid}}), std::invalid_argument);
+  invalid = input;
+  const auto& image = input.image;
+  invalid.image =
+      Image(image.GetPath(), 1, 1, image.GetK(), image.GetR(), image.GetT());
+  EXPECT_THROW(HostGrayscaleBank({{invalid}}), std::invalid_argument);
+  EXPECT_THROW(HostGrayscaleBank({{input}, {invalid}}), std::invalid_argument);
+  invalid = input;
+  invalid.max_image_size = -1;  // Effective 2x1 is not the file's native 4x2.
+  EXPECT_THROW(HostGrayscaleBank({{invalid}}), std::invalid_argument);
+  EXPECT_THROW(HostGrayscaleBank({{input}, {invalid}}), std::invalid_argument);
+  invalid = input;
+  invalid.image = Image(image.GetPath(),
+                        std::numeric_limits<size_t>::max(),
+                        2,
+                        image.GetK(),
+                        image.GetR(),
+                        image.GetT());
+  EXPECT_THROW(HostGrayscaleBank({{invalid}}), std::invalid_argument);
+  const std::atomic<bool> cancelled{true};
+  EXPECT_THROW(HostGrayscaleBank({{input}}, &cancelled), std::runtime_error);
+  // Failed/cancelled attempts neither mutate nor revoke existing borrowers.
+  HostGrayscaleBank bank({{input}});
+  const auto borrowed = bank.BindJob(0);
+  const auto expected = borrowed[0]->pixels;
+  EXPECT_THROW(HostGrayscaleBank({{input}, {invalid}}), std::invalid_argument);
+  EXPECT_THROW(HostGrayscaleBank({{input}}, &cancelled), std::runtime_error);
+  EXPECT_EQ(borrowed[0]->pixels, expected);
+}
+
+TEST_F(HostInputBankTest, PhotoGrayscaleRejectsUnreadableAndMissingSources) {
+  const auto path = root_ / "invalid.png";
+  {
+    std::ofstream stream(path);
+    stream << "not an image";
+  }
+  const auto& image = job_.images[0];
+  GrayscaleInput invalid{
+      Image(path, 2, 1, image.GetK(), image.GetR(), image.GetT()),
+      2,
+      CaptureFileIdentity(path)};
+  EXPECT_THROW(HostGrayscaleBank({{invalid}}), std::invalid_argument);
+  std::filesystem::remove(path);
+  EXPECT_THROW(HostGrayscaleBank({{invalid}}),
+               std::filesystem::filesystem_error);
+}
+
 TEST_F(HostInputBankTest, SharedInputsNativeOrderAndRetention) {
   auto second = job_;
   second.reference_image_idx = 1;
