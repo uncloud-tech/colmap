@@ -55,7 +55,9 @@ class PhotoFingerprintTest(unittest.TestCase):
                 )
 
             git("init", "-q")
-            for path in generator.CLOSURE:
+            # The hot cache header exists even if omitted from the closure.
+            cache_header = "src/colmap/mvs/owned_source_cache.h"
+            for path in (*generator.CLOSURE, cache_header):
                 target = root / path
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(b"TEST-EVIDENCE\n")
@@ -86,7 +88,7 @@ class PhotoFingerprintTest(unittest.TestCase):
             self.assertIn(
                 hashlib.sha256(encoded).hexdigest(), output.read_text()
             )
-            self.assertEqual(len(generator.CLOSURE), 24)
+            self.assertEqual(len(generator.CLOSURE), 25)
             self.assertIn(
                 f'kPhotoPhaseV1SourceCommit[] = "{lineage}"', output.read_text()
             )
@@ -114,10 +116,11 @@ class PhotoFingerprintTest(unittest.TestCase):
             self.assertNotEqual(first, output.read_text())
             self.assertIn(f'"{lineage}";', output.read_text())
             original = output.read_text()
-            source = root / "src/colmap/mvs/owned_graph_coordinator.h"
+            source = root / cache_header
             source.write_bytes(b"changed\n")
-            with self.assertRaisesRegex(ValueError, "differs from committed"):
+            with self.assertRaisesRegex(ValueError, cache_header):
                 generator.generate(root, output)
+            self.assertEqual(original, output.read_text())
             git("add", "src")
             git(
                 "-c",
@@ -130,6 +133,9 @@ class PhotoFingerprintTest(unittest.TestCase):
             )
             generator.generate(root, output)
             self.assertNotEqual(original, output.read_text())
+            self.assertNotIn(
+                hashlib.sha256(encoded).hexdigest(), output.read_text()
+            )
             source.unlink()
             with self.assertRaises(FileNotFoundError):
                 generator.generate(root, output)
