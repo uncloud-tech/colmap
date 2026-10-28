@@ -175,6 +175,16 @@ TEST(OptimizedPhotoEntry, RunnerObjectsAttestAndAdmitTwoAtExactCaps) {
   const auto root = CreateTestDir();
   const auto config = root / "one.cfg";
   const auto config2 = root / "two.cfg";
+  // Option serialization canonicalizes both paths, so materialize the actual
+  // per-reference configs before constructing their bound wire records.
+  {
+    std::ofstream out(config);
+    out << "a.png\nc.png, d.png\n";
+  }
+  {
+    std::ofstream out(config2);
+    out << "b.png\nc.png, d.png\n";
+  }
   const auto forecast = root / "launch";
   const std::string digest(64, 'a');
   // TEST-EVIDENCE: real delivery object shape/options/SHA256, synthetic
