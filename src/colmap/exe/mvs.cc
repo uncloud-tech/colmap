@@ -449,7 +449,7 @@ int RunPatchMatchStereoWithExecution(
   options.AddDefaultOption(
       "owned_photo_forecast",
       &owned_photo_forecast,
-      "Reviewed SHA-bound single-reference PHOTO admission wire v2");
+      "SHA-bound PHOTO admission: V2 single reference or V3 bound rolling jobs");
   options.AddDefaultOption(
       "owned_photo_options_export",
       &owned_photo_options_export,
@@ -603,7 +603,6 @@ int RunPatchMatchStereoWithExecution(
       concurrency.concurrency = owned_run_max_concurrent_solvers;
       concurrency.full_bank_forecast = !owned_run_forecast_path.empty();
       concurrency.cohort_forecast = !owned_run_cohort_forecast_path.empty();
-      concurrency.photo_ceiling = mvs::kOptimizedPhotoQualifiedConcurrency;
       if (pm.geom_consistency)
         mvs::ValidateOptimizedStereoConcurrency(concurrency);
       else

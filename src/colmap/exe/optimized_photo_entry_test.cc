@@ -238,6 +238,11 @@ TEST(OptimizedPhotoEntry, RunnerObjectsAttestAndAdmitTwoAtExactCaps) {
     ++deliveries;
     return delivered;
   };
+  std::string requested_n = "2";
+  std::string host_cap = "710000";
+  std::string device_cap = "1800100";
+  std::string cohort_forecast;
+  bool reverse_effective_sources = false;
   const auto run = [&](const std::string& expected,
                        int expected_checked,
                        bool conflicting_source = false,
@@ -247,7 +252,9 @@ TEST(OptimizedPhotoEntry, RunnerObjectsAttestAndAdmitTwoAtExactCaps) {
       for (size_t i = 0; i < 2; ++i) {
         mvs::PatchMatch::Problem problem;
         problem.ref_image_idx = static_cast<int>(i);
-        problem.src_image_idxs = {2, 3};
+        problem.src_image_idxs = reverse_effective_sources
+                                     ? std::vector<int>{3, 2}
+                                     : std::vector<int>{2, 3};
         problem.images = &images;
         check(i, problem);
         ++checked;
@@ -267,11 +274,11 @@ TEST(OptimizedPhotoEntry, RunnerObjectsAttestAndAdmitTwoAtExactCaps) {
         "--optimized_dispatch_receipt",
         receipt.string(),
         "--owned_run_max_concurrent_solvers",
-        "2",
+        requested_n,
         "--owned_run_host_budget_bytes",
-        "710000",
+        host_cap,
         "--owned_run_device_budget_bytes",
-        "1800100",
+        device_cap,
         "--owned_run_timeout_seconds",
         "60",
         "--PatchMatchStereo.num_threads",
@@ -286,6 +293,8 @@ TEST(OptimizedPhotoEntry, RunnerObjectsAttestAndAdmitTwoAtExactCaps) {
         "0.00028",
         "--PatchMatchStereo.owned_distinct_source_cache",
         "true"};
+    if (!cohort_forecast.empty())
+      args.insert(args.end(), {"--owned_run_cohort_forecast", cohort_forecast});
     std::vector<char*> argv;
     for (auto& arg : args) argv.push_back(arg.data());
     ::testing::internal::CaptureStderr();
@@ -355,6 +364,23 @@ TEST(OptimizedPhotoEntry, RunnerObjectsAttestAndAdmitTwoAtExactCaps) {
   };
   write_wire(sections());
   run("PHOTO input probe completed without execution", 2, false, true);
+  // Ordinary CLI wire source, exact process + top-N private caps, no extra
+  // margin and no clamping. These checks run before any device execution.
+  host_cap = "709999";
+  run("PHOTO top-N private charges exceed caps", 0, false, true);
+  host_cap = "710000";
+  device_cap = "1800099";
+  run("PHOTO top-N private charges exceed caps", 0, false, true);
+  device_cap = "1800100";
+  requested_n = "1";
+  run("PHOTO rolling_active_jobs must equal CLI N", 0, false, true);
+  requested_n = "2";
+  reverse_effective_sources = true;
+  run("PHOTO effective reference/source order mismatch", 0, false, true);
+  reverse_effective_sources = false;
+  cohort_forecast = (root / "unread.cohort").string();
+  run("PHOTO requires owned_photo_forecast only", 0, false, true);
+  cohort_forecast.clear();
   write_wire("");
   run("PHOTO V3 requires delivered photo-phase-v1 binding", 0, false, true);
   write_wire("[BINDING]\nunknown=value\n[END]\n");

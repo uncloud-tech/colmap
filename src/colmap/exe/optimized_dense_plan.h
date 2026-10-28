@@ -25,11 +25,12 @@ namespace colmap {
 // cache,lookahead,lookahead_modes:[false,true],lifetime,
 // status:"compiled_planned_not_qualified"},
 // concurrency_support: null or {status:"compiled_supported_not_qualified",
-// photo:{full_bank:1,cohort:1},geo:{full_bank:5,cohort:1}},
+// photo:{full_bank:5,cohort:1},geo:{full_bank:5,cohort:1}},
 // Values are phase/mode concurrency ceilings derived from dispatch policy,
 // NOT selected defaults, admission or workload/hardware qualification. N>1
 // requires an exclusive full-bank forecast with exact active_jobs and resource
-// checks; without that forecast only N1 is supported. Unsupported CUDA/sample
+// checks; PHOTO additionally requires V3 per-job bindings and supplied k >= N.
+// Without that forecast only N1 is supported. Unsupported CUDA/sample
 // dispatch emits null (no capability), never invented singleton support. Builds
 // without native graph support still refuse the command without a plan file.
 // images:[{index,name,path,width,height}],
