@@ -33,13 +33,16 @@ classifiers = [
   "Programming Language :: Python :: 3 :: Only",
 ]
 
+[project.scripts]
+colmap-reconstruct = "colmap_reconstruction.cli:main"
+
 [project.optional-dependencies]
 panorama = ["opencv-python-headless", "pillow", "tqdm"]
 
 [tool.scikit-build]
 wheel.expand-macos-universal-tags = true
 cmake.source-dir = "python/"
-wheel.packages = ["python/pycolmap"]
+wheel.packages = ["python/pycolmap", "python/colmap_reconstruction"]
 
 [tool.cibuildwheel]
 build = "cp3{10,11,12,13,14}-{macosx,manylinux,win}*"
@@ -129,3 +132,9 @@ check_untyped_defs = false
 disallow_incomplete_defs = false
 disallow_untyped_defs = false
 disable_error_code = ["overload-cannot-match"]
+
+# Canonical wire/model adapters are gradually typed dictionary protocols.
+[[tool.mypy.overrides]]
+module = ["colmap_reconstruction", "colmap_reconstruction.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false

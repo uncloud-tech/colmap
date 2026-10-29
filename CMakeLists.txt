@@ -537,3 +537,8 @@ install(
     DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/cmake
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/colmap
     FILES_MATCHING PATTERN "Find*.cmake")
+
+# Install the stdlib reconstruction command without a Python wheel build.
+if(UNIX)
+    include("${PROJECT_SOURCE_DIR}/python/install_reconstruction.cmake")
+endif()

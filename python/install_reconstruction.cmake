@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Stdlib-only frontend: deliberately independent of pycolmap's wheel toolchain.
+set(_reconstruction_python "${CMAKE_INSTALL_DATAROOTDIR}/colmap/python")
+file(RELATIVE_PATH RECONSTRUCTION_MODULE_PATH
+    "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}"
+    "${CMAKE_INSTALL_PREFIX}/${_reconstruction_python}/launch.py")
+configure_file("${PROJECT_SOURCE_DIR}/python/reconstruct.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/colmap-reconstruct" @ONLY)
+install(PROGRAMS "${CMAKE_CURRENT_BINARY_DIR}/colmap-reconstruct"
+    DESTINATION "${CMAKE_INSTALL_BINDIR}")
+install(FILES "${PROJECT_SOURCE_DIR}/python/reconstruction_launch.py"
+    DESTINATION "${_reconstruction_python}" RENAME launch.py)
+install(DIRECTORY "${PROJECT_SOURCE_DIR}/python/colmap_reconstruction"
+    DESTINATION "${_reconstruction_python}" FILES_MATCHING PATTERN "*.py")
+install(FILES "${PROJECT_SOURCE_DIR}/python/colmap_reconstruction/NOTICE"
+    "${PROJECT_SOURCE_DIR}/LICENSE"
+    DESTINATION "${_reconstruction_python}/colmap_reconstruction")
+install(FILES "${PROJECT_SOURCE_DIR}/doc/reconstruction-cli.md"
+    DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/doc/colmap")

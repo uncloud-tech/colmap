@@ -52,6 +52,8 @@ namespace colmap {
 // complete actual PHOTO maps + exact native GEO bank revalidation are
 // mandatory.
 int RunOptimizedDensePlan(int argc, char** argv);
+// Same-executable build identity for installed resource adapters; no workspace.
+int RunReconstructionInfo(int argc, char** argv);
 
 struct OptimizedDensePlanArguments {
   std::filesystem::path workspace_path;
