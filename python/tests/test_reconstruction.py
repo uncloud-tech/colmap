@@ -194,6 +194,16 @@ class ReconstructionTest(unittest.TestCase):
                 process.run([sys.executable, '-c', 'import time; time.sleep(60)'])
             self.assertIsNone(process.child)
 
+    def test_packaged_geo_support_matches_actual_native_build_closure(self) -> None:
+        import importlib.util
+        from colmap_reconstruction import resident
+        root = Path(__file__).resolve().parents[2]
+        spec = importlib.util.spec_from_file_location('resident_generator',
+            root / 'scripts/resident/generate_resident_allocation_fingerprint.py')
+        generator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(generator)
+        self.assertEqual(generator.compute_fingerprint(root), resident.SUPPORTED_ALLOCATION_FINGERPRINT)
+
     def test_package_import_is_independent_of_extension_and_external_roots(self) -> None:
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as directory:

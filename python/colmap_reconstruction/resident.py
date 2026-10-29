@@ -721,7 +721,7 @@ FORECAST_REGISTRY_SCOPE_COHORT = 'cohort_allocation'
 # FORMULA/SOURCE COMPATIBILITY of that exact closure only.
 # Formula/content support only. Performance, quality and physical fit are NOT
 # certified. The native runner independently checks this exact compiled closure.
-SUPPORTED_ALLOCATION_FINGERPRINT = '5daa3f6ae52899ea87b4e5034cbdb2110d50018dc642ea8e97b460b6dc279b3a'
+SUPPORTED_ALLOCATION_FINGERPRINT = '0614ab2b8cbe1e7cbeec2cc90b51b10275d7eea39b9c3f20a6651d7bb2879ecb'
 ALLOCATION_CLOSURE_REGISTRY = {
     SUPPORTED_ALLOCATION_FINGERPRINT: {
         'status': FORECAST_REGISTRY_EXPERIMENTAL,

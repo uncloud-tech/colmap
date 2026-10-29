@@ -17,7 +17,7 @@ OPTIONS = 'COLMAP_OPTIMIZED_PHOTO_OPTIONS_V1\nbuild_cuda_enabled 1\nbuild_hip_en
 IDENTITY = dict(schema_version=1, cuda_compiled=True, source_commit='a' * 40,
     lineage_sha='cf7891059c402c333b84b752de3acb8b084abdad',
     fingerprint='9e749b59aabc5433f7e475b4e660a1a62ad8d4d5fda083fec8fc803165a78dda',
-    allocation_fingerprint='5daa3f6ae52899ea87b4e5034cbdb2110d50018dc642ea8e97b460b6dc279b3a')
+    allocation_fingerprint='0614ab2b8cbe1e7cbeec2cc90b51b10275d7eea39b9c3f20a6651d7bb2879ecb')
 
 
 def string(key, value):

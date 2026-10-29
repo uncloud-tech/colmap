@@ -94,7 +94,7 @@ future commits with the supported exact allocation content work without a
 manual commit repin. Unknown PHOTO or GEO fingerprints always refuse.
 
 The supported PHOTO closure is `9e749b59…`; the bounded full-bank GEO closure is
-`5daa3f6a…`. GEO's registry status is `experimental_compatibility`, not
+`0614ab2b…`. GEO's registry status is `experimental_compatibility`, not
 `qualified`: it certifies formula/content support only. Its native wire label
 `metadata_only_cpu_estimate` is distinct from comparative-performance or quality
 qualification. A changed allocation closure needs actual formula review and
