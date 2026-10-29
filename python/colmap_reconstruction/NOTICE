@@ -1,0 +1,54 @@
+COLMAP experimental fresh fixed-cohort accounting
+
+Distributed under this repository's BSD-3-Clause license (see LICENSE).
+
+model.py selectively reuses checked arithmetic, integer margin semantics and
+current-owned shape terms from reviewed python/colmap_reconstruction/model.py
+on the preserved, incomplete, UNMERGED PR16 source worktree. That extraction
+originated in Photogram revision 0b84800e787bea4823ea161a4131512e6ed364d6;
+project-authored history credits Bu5hm4nn, colmap-parent,
+photogram-coordinator and photogram. No separate third-party implementation
+or license was present in those terms. No runtime Photogram dependency exists.
+
+This is deliberately a small subset in the SAME eventual product package
+location, not a second model namespace or PR16 merge. Future PR16 reconciliation
+must retain ONE canonical current-owned-shape helper and route its resident
+adapter through that helper rather than retaining two formula authorities.
+PR16's frontend, resident parser, file identities, wire and CLI are not copied.
+Neither current-phase-v1's resident-only eligibility nor optimized-PHOTO's
+qualification is expanded. Fixed-cohort PHOTO and GEO reuse only the exact
+current-owned NATIVE LOGICAL MINIMUM inventory, including conservative mask
+retention. The added copies/retention/staging terms mirror the base42 runner.
+
+The producer requires observed tight grayscale Bitmap::NumBytes metadata;
+non-tight buffers are refused. It preserves all image order, reference order,
+phase options, device and duplicate source ordinals. Input pixel/calibration
+immutability and actual native invocation validation remain the caller/native
+contract; metadata never fabricates file identities or attests pixel contents.
+
+The existing resident allocation generator, frozen closure and digest encoding
+are reused verbatim with a base42 content pin, pending independent source
+review. Content changes refuse until explicit reviewed repinning; revision is
+recorded from actual Git HEAD, not accepted as a self-whitelisting declaration.
+No production/native allocation-closure files are changed by this extension.
+
+Every field delivered to experimental FixedCohortBudget is RAW. One aggregate
+3% margin is applied ONLY by native admission, plus separate explicit headroom.
+All caller pixels, frozen copies, both phases' host returns and every PHOTO
+snapshot remain charged for the full invocation. GEO staging is already
+included in per-job GEO private device storage; it is not charged twice.
+Process and positive unknown pitch/array/context/allocator allowance are
+explicit caller inputs, not new coefficients or free-minus-known filler.
+Classified live-process observation credits remain inside process storage.
+
+This is experimental/unqualified, not calibrated or a hard physical-fit bound.
+The tiny fixture's snapshot observation 28672 and staging observations
+6144/6144/4608/6144 are NOT calibration and are not model coefficients.
+No default dispatch, CLI, file producer, GPU performance, or full-scene
+qualification is claimed. The generated C++ initializer is solely a direct
+experimental typed-budget binding; it is not a generic wire framework.
+
+CPU-only validation (no install):
+  PYTHONPATH=python python -m unittest colmap_reconstruction.fixed_cohort_test
+The native comparison tests compile real headers using g++ and require an
+executable writable temporary directory within the repository.
