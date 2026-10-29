@@ -244,13 +244,34 @@ TEST(OptimizedPhotoExecution, RealCliV2V3N1IdentityAndN2Interleaving) {
     return wire;
   };
   const auto w0 = v2(c0, 0), w1 = v2(c1, 1);
+  // TEST-EVIDENCE only: generous synthetic charges for this tiny numerical
+  // fixture, not a calibrated workload admission or physical-fit claim.
+  const auto binding = [&](const fs::path& config, size_t job) {
+    const auto& resolved = graph.photo.at(job);
+    std::string sources;
+    for (const auto idx : resolved.source_image_idxs) {
+      if (!sources.empty()) sources += " ";
+      sources += std::to_string(idx);
+    }
+    return std::string("[BINDING]\nprofile=photo-phase-v1\nlineage_sha=") +
+           mvs::kPhotoPhaseV1Lineage +
+           "\nfingerprint=" + mvs::kPhotoPhaseV1Fingerprint +
+           "\noptions_sha256=" +
+           ComputeSHA256(mvs::OptimizedPhotoOptions(options, root, config)) +
+           "\nprocess=16777216 16777216"
+           "\nprivate_charge=16777216 16777216\nreference_image_idx=" +
+           std::to_string(resolved.reference_image_idx) +
+           "\nsource_image_idxs=" + sources +
+           "\nsource_commit=" + mvs::kPhotoPhaseV1SourceCommit + "\n[END]\n";
+  };
   const auto v3 = [&](int k, int n, bool two) {
     return "COLMAP_OPTIMIZED_PHOTO_V3\n" + std::to_string(k) + " " +
            std::to_string(n) + (two ? " 2\n" : " 1\n") +
            mvs::owned::Hex(c0.string()) + "\n" + mvs::owned::Hex(w0) + "\n" +
            (two ? mvs::owned::Hex(c1.string()) + "\n" + mvs::owned::Hex(w1) +
                       "\n"
-                : "");
+                : "") +
+           binding(c0, 0) + (two ? binding(c1, 1) : "");
   };
   int attempt = 0;
   const auto run = [&](const std::string& wire, int n) {
@@ -326,12 +347,25 @@ TEST(OptimizedPhotoExecution, RealCliV2V3N1IdentityAndN2Interleaving) {
             mvs::ReadOptimizedBytes(single.second));
   fs::remove(depth);
   fs::remove(normal);
+  // Capture an independent N1 oracle for the second reference too. N2 must
+  // preserve each reference's bytes, not merely create the second output.
+  const auto second =
+      run("COLMAP_OPTIMIZED_PHOTO_V3\n2 1 1\n" + mvs::owned::Hex(c1.string()) +
+              "\n" + mvs::owned::Hex(w1) + "\n" + binding(c1, 1),
+          1);
+  ASSERT_EQ(second.first, 0);
+  const auto depth1 = root / "stereo/depth_maps/b.png.photometric.bin";
+  const auto normal1 = root / "stereo/normal_maps/b.png.photometric.bin";
+  const auto d1 = mvs::ReadOptimizedBytes(depth1);
+  const auto n1 = mvs::ReadOptimizedBytes(normal1);
+  fs::remove(depth1);
+  fs::remove(normal1);
   const auto pair = run(v3(2, 2, true), 2);
   ASSERT_EQ(pair.first, 0);
   EXPECT_EQ(d0, mvs::ReadOptimizedBytes(depth));
   EXPECT_EQ(n0, mvs::ReadOptimizedBytes(normal));
-  EXPECT_TRUE(
-      fs::is_regular_file(root / "stereo/depth_maps/b.png.photometric.bin"));
+  EXPECT_EQ(d1, mvs::ReadOptimizedBytes(depth1));
+  EXPECT_EQ(n1, mvs::ReadOptimizedBytes(normal1));
   const auto receipt = mvs::ReadOptimizedBytes(pair.second);
   EXPECT_NE(receipt.find("\"rolling_active_jobs\":2"), std::string::npos);
   EXPECT_NE(receipt.find("\"max_concurrent_solvers\":2"), std::string::npos);

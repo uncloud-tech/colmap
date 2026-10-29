@@ -134,9 +134,9 @@ class Json {
 // selected defaults, admission, effective dispatch or qualification. N>1 still
 // requires the exact full-bank forecast and runtime resource checks.
 // Unsupported builds/sample specializations have no concurrency capability.
-// The PHOTO ceiling stays 1 here until PHOTO N>1 is qualified
-// (kOptimizedPhotoQualifiedConcurrency): a launch-contract ceiling k is not
-// capability metadata and never raises this value.
+// PHOTO full-bank support requires a producer-supplied V3 ceiling k, exact
+// active_jobs and per-job bindings. Report compiled support, not qualification;
+// V2, absent forecasts and cohorts remain singleton-only.
 inline Json ConcurrencySupportJson(bool cuda, int samples) {
   if (!mvs::OptimizedStereoCacheSupported(cuda, 16, samples) &&
       !mvs::OptimizedStereoCacheSupported(cuda, 32, samples))
@@ -144,7 +144,9 @@ inline Json ConcurrencySupportJson(bool cuda, int samples) {
   const auto phase = [](bool geo) {
     return Json::Object(
         {{"full_bank",
-          Json(mvs::OptimizedStereoMaxConcurrency(geo, true, false))},
+          Json(geo ? mvs::OptimizedStereoMaxConcurrency(true, true, false)
+                   : mvs::OptimizedPhotoMaxConcurrency(
+                         true, false, mvs::kOptimizedRollingStructuralMax))},
          {"cohort",
           Json(mvs::OptimizedStereoMaxConcurrency(geo, false, true))}});
   };

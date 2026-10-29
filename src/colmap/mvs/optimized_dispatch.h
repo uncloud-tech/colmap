@@ -57,11 +57,6 @@ inline void ValidateOptimizedStereo(bool cuda,
 // not a forecast and not permission for any workload.
 inline constexpr int kOptimizedRollingStructuralMax = 5;
 
-// PHOTO concurrency actually qualified today. No PHOTO N>1 experiment has been
-// run, so capability metadata keeps claiming 1 and a launch-contract ceiling
-// never raises this value.
-inline constexpr int kOptimizedPhotoQualifiedConcurrency = 1;
-
 // Compiled-supported GEO ceiling only, never resource admission or
 // qualification. Without an exclusive full-bank forecast, GEO remains
 // singleton-only. PHOTO keeps its historical value of 1 here; PHOTO N>1 is

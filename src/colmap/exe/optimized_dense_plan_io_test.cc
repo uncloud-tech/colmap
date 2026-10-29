@@ -71,7 +71,7 @@ void TestDensePlanOptions() {
 void TestDensePlanConcurrency() {
   Check(dense_plan::ConcurrencySupportJson(true, 7).Dump() ==
         "{\"status\":\"compiled_supported_not_qualified\","
-        "\"photo\":{\"full_bank\":1,\"cohort\":1},"
+        "\"photo\":{\"full_bank\":5,\"cohort\":1},"
         "\"geo\":{\"full_bank\":5,\"cohort\":1}}");
   for (const auto& [cuda, samples] :
        std::vector<std::pair<bool, int>>{{false, 7}, {true, 0}, {true, 16}}) {
@@ -93,16 +93,33 @@ void TestDensePlanConcurrency() {
       for (int n = 1; n <= 6; ++n) {
         bool supported = true;
         try {
-          mvs::ValidateOptimizedStereoConcurrency(
-              geo, std::to_string(n), !cohort, cohort);
+          mvs::OptimizedConcurrencyLimits limits;
+          limits.geom_consistency = geo;
+          limits.concurrency = std::to_string(n);
+          limits.full_bank_forecast = !cohort;
+          limits.cohort_forecast = cohort;
+          // PHOTO capability is conditional on a producer-supplied V3 k.
+          limits.photo_ceiling = mvs::kOptimizedRollingStructuralMax;
+          mvs::ValidateOptimizedStereoConcurrency(limits);
         } catch (const std::invalid_argument&) {
           supported = false;
         }
         if (supported) {
           Check(n == maximum + 1);
           maximum = n;
+          mvs::OptimizedConcurrencyObservation observation;
+          observation.requested_n = n;
+          observation.admitted_n = n;
+          observation.observed_n = n;
+          observation.owner_intervals.resize(n, {1, 2});
           const auto receipt = mvs::OptimizedDispatchReceipt(
-              geo ? "geo" : "photo", 16, 7, true, true, n);
+              geo ? "geo" : "photo",
+              16,
+              7,
+              true,
+              true,
+              n,
+              !geo && n > 1 ? &observation : nullptr);
           if (n == 1)
             Check(receipt.find("max_concurrent_solvers") == std::string::npos);
           else
