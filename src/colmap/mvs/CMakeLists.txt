@@ -351,8 +351,31 @@ if(CUDA_ENABLED)
     COLMAP_ADD_TEST(
         NAME owned_fixed_cohort_pipeline_test
         SRCS owned_fixed_cohort_pipeline_test.cu
+             owned_fixed_cohort_workspace_execution_test.cu
         LINK_LIBS colmap_mvs_cuda
     )
+    if(TESTS_ENABLED)
+        # Test-only canonical RAW binding. No public execution interface.
+        set(FIXED_COHORT_FIXTURE_DIR "${CMAKE_CURRENT_BINARY_DIR}/workspace_fixture")
+        add_custom_target(fixed_cohort_workspace_fixture
+            COMMAND ${Python3_EXECUTABLE}
+                "${CMAKE_CURRENT_SOURCE_DIR}/testdata/generate_fixed_cohort_workspace_fixture.py"
+                --output "${FIXED_COHORT_FIXTURE_DIR}/fixed_cohort_workspace_synthetic.h"
+            BYPRODUCTS "${FIXED_COHORT_FIXTURE_DIR}/fixed_cohort_workspace_synthetic.h"
+            VERBATIM)
+        add_dependencies(colmap_mvs_owned_fixed_cohort_pipeline_test
+            fixed_cohort_workspace_fixture)
+        target_include_directories(colmap_mvs_owned_fixed_cohort_pipeline_test
+            PRIVATE "${FIXED_COHORT_FIXTURE_DIR}")
+        set(COLMAP_FIXED_COHORT_EXTERNAL_HEADER "" CACHE FILEPATH
+            "Optional explicit generated test-only real-workspace request header")
+        if(COLMAP_FIXED_COHORT_EXTERNAL_HEADER)
+            configure_file("${COLMAP_FIXED_COHORT_EXTERNAL_HEADER}"
+                "${FIXED_COHORT_FIXTURE_DIR}/fixed_cohort_workspace_external.h" COPYONLY)
+            target_compile_definitions(colmap_mvs_owned_fixed_cohort_pipeline_test
+                PRIVATE COLMAP_FIXED_COHORT_EXTERNAL_FIXTURE)
+        endif()
+    endif()
 
     COLMAP_ADD_TEST(
         NAME owned_geo_photo_input_test

@@ -268,5 +268,41 @@ std::cout << admitted.host << " " << admitted.device;
                 self.assertEqual(result.stdout, '3000 7487' if active == 1 else '3522 13093')
 
 
+class WorkspaceFixtureBindingTest(unittest.TestCase):
+    def test_canonical_generated_workspace_binding(self):
+        import runpy
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[2]
+        tool = runpy.run_path(str(root / 'src/colmap/mvs/testdata/generate_fixed_cohort_workspace_fixture.py'))
+        spec = tool['synthetic_spec']()
+        header = tool['emit_header'](spec, root)
+        self.assertIn('MakeWorkspaceFixture', header)
+        self.assertIn('b.max_active_owners = 1', header)
+        self.assertIn('b.max_active_owners = 2', header)
+        self.assertIn(tool['cpp']('28dff08c2a392ed04fa046ade5e2717e51f922baece3b09dd91a4030ac8bfab0'), header)
+        self.assertIn('b.caller_inputs = {12288ULL,0ULL}', header)
+        self.assertIn('b.host_outputs = {393216ULL,0ULL}', header)
+        self.assertIn('b.snapshots = {0ULL,196608ULL}', header)
+        self.assertIn('b.geo_staging_device = {36864ULL,36864ULL,36864ULL,36864ULL}', header)
+        self.assertIn('r.photo_options.random_seed = 0;', header)
+        self.assertIn('r.geo_options.filter = true;', header)
+        # External requests must freeze all options, not silently use defaults.
+        spec['workspace'] = '/read-only/undistorted'
+        del spec['references'][0]['photo_options']['num_samples']
+        with self.assertRaisesRegex(ValueError, 'explicit phase options'):
+            tool['emit_header'](spec, root)
+
+    def test_external_binding_requires_repeatable_seed(self):
+        import runpy
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[2]
+        tool = runpy.run_path(str(root / 'src/colmap/mvs/testdata/generate_fixed_cohort_workspace_fixture.py'))
+        spec = tool['synthetic_spec']()
+        spec['workspace'] = '/read-only/undistorted'
+        spec['references'][0]['photo_options']['random_seed'] = -1
+        with self.assertRaisesRegex(ValueError, 'explicit repeatable seed'):
+            tool['emit_header'](spec, root)
+
+
 if __name__ == '__main__':
     unittest.main()
