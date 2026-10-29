@@ -154,8 +154,12 @@ TEST_F(FixedCohortWorkspaceTest,
   // reported BEFORE even opening their headers, not masked by missing files.
   for (const auto& name : names)
     std::filesystem::remove(path / "images" / name);
-  auto saved = references;
+  const auto saved = references;
+  const auto saved_budget = budget;
   references.pop_back();
+  budget.photo_private.pop_back();
+  budget.geo_private.pop_back();
+  budget.geo_staging_device.pop_back();
   try {
     Prepare();
     FAIL() << "open GEO closure accepted";
@@ -164,6 +168,7 @@ TEST_F(FixedCohortWorkspaceTest,
               std::string::npos);
   }
   references = saved;
+  budget = saved_budget;
   references[0].photo_options.max_image_size = 10;
   try {
     Prepare();
