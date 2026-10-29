@@ -183,6 +183,95 @@ assert Process.environment['CUDA_VISIBLE_DEVICES'] == '1,0'
             self.assertFalse((Path(directory) / 'new').exists())
             self.assertEqual(main(args + ['--workspace', str(photos)]), 2)
 
+    def prepare_sparse_models(self, models, selection):
+        """Exercise preparation with real synthetic native subprocesses, no GPU."""
+        from unittest.mock import patch
+        from colmap_reconstruction.cli import Reconstruction, parse_args
+        import shutil
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[2].parent) as directory:
+            temp = Path(directory)
+            native = temp / 'colmap'
+            shutil.copy(Path(__file__).with_name('fake_native.py'), native)
+            native.chmod(0o755)
+            workspace = temp / 'output'
+            workspace.mkdir()
+            args = ['--photos', str(temp), '--workspace', str(workspace),
+                    '--host-budget-bytes', str(2**30), '--device-budget-bytes', str(2**30)]
+            if selection is not None:
+                args += ['--sparse-model', selection]
+            calls = temp / 'calls.jsonl'
+            with patch.dict(os.environ, FAKE_SPARSE_MODELS=json.dumps(models), FAKE_CALLS=str(calls)):
+                reconstruction = Reconstruction(parse_args(args), str(native))
+                reconstruction.assets.mkdir()
+                with patch.object(reconstruction, 'resources'):
+                    reconstruction.prepare()
+            return (json.loads((reconstruction.assets / 'sparse-model.json').read_text()),
+                    [json.loads(line) for line in calls.read_text().splitlines()])
+
+    def test_sparse_largest_selects_ws1_by_registered_images(self) -> None:
+        record, calls = self.prepare_sparse_models({
+            '0': dict(num_registered_images=5, num_points3D=229),
+            '1': dict(num_registered_images=9, num_points3D=4380)}, 'largest')
+        self.assertEqual(record['name'], '1')
+        self.assertEqual(record['policy'], 'largest')
+        self.assertEqual(record['counts']['num_registered_images'], 9)
+        self.assertEqual([Path(a['--path']).name for c, a in calls if c == 'model_analyzer'], ['0', '1'])
+        self.assertEqual([Path(a['--input_path']).name for c, a in calls if c == 'image_undistorter'], ['1'])
+
+    def test_sparse_largest_rejects_invalid_native_counts(self) -> None:
+        good = dict(num_registered_images=9, num_points3D=3498)
+        invalid = [None, [], {}, dict(num_registered_images=9),
+                   dict(num_registered_images=True, num_points3D=4),
+                   dict(num_registered_images=9.0, num_points3D=4),
+                   dict(num_registered_images=9, num_points3D=True),
+                   dict(num_registered_images=9, num_points3D=1.5),
+                   dict(num_registered_images=9, num_points3D='4'),
+                   dict(num_registered_images=0, num_points3D=0),
+                   dict(num_registered_images=1, num_points3D=4),
+                   dict(num_registered_images=9, num_points3D=0)]
+        for counts in invalid:
+            with self.subTest(counts=counts), self.assertRaisesRegex(ValueError, 'invalid|insufficient'):
+                self.prepare_sparse_models({'0': good, '1': counts}, 'largest')
+
+    def test_sparse_largest_handles_ws2_renumbering_and_lexicographic_ties(self) -> None:
+        ws2 = {'0': dict(num_registered_images=9, num_points3D=3498)}
+        record, calls = self.prepare_sparse_models(ws2, 'largest')
+        self.assertEqual((record['name'], record['policy']), ('0', 'largest'))
+        # Point count and numeric directory ordering must not break image-count ties.
+        record, calls = self.prepare_sparse_models({
+            '2': dict(num_registered_images=9, num_points3D=9999),
+            '10': dict(num_registered_images=9, num_points3D=4)}, 'largest')
+        self.assertEqual(record['name'], '10')
+        self.assertEqual(sum(c == 'model_analyzer' for c, a in calls), 2)
+
+    def test_sparse_default_and_exact_name_selection_stay_explicit(self) -> None:
+        models = {'0': dict(num_registered_images=5, num_points3D=229),
+                  '1': dict(num_registered_images=9, num_points3D=4380)}
+        with self.assertRaisesRegex(ValueError, 'select --sparse-model'):
+            self.prepare_sparse_models(models, None)
+        for selection in ('0', '1'):
+            record, calls = self.prepare_sparse_models(models, selection)
+            self.assertEqual((record['name'], record['policy']), (selection, 'explicit'))
+            self.assertEqual([Path(a['--path']).name for c, a in calls if c == 'model_analyzer'], [selection])
+        ws2 = {'0': dict(num_registered_images=9, num_points3D=3498)}
+        with self.assertRaisesRegex(ValueError, 'select --sparse-model'):
+            self.prepare_sparse_models(ws2, '1')
+        record, calls = self.prepare_sparse_models(ws2, None)
+        self.assertEqual((record['name'], record['policy']), ('0', 'single'))
+
+    def test_sparse_selection_refuses_no_models_and_native_failure(self) -> None:
+        from colmap_reconstruction.process import NativeFailure
+        for selection in (None, '0', 'largest'):
+            with self.subTest(selection=selection), self.assertRaisesRegex(ValueError, 'select --sparse-model'):
+                self.prepare_sparse_models({}, selection)
+        with self.assertRaises(NativeFailure):
+            self.prepare_sparse_models({'0': 'native-failure'}, 'largest')
+        with self.assertRaises(json.JSONDecodeError):
+            self.prepare_sparse_models({'0': 'malformed-json'}, 'largest')
+        for selection in (None, '0'):
+            with self.subTest(selection=selection), self.assertRaisesRegex(ValueError, 'insufficient'):
+                self.prepare_sparse_models({'0': dict(num_registered_images=0, num_points3D=0)}, selection)
+
     def test_complete_cli_wires_fresh_sfm_all_references_geo_and_fusion(self) -> None:
         from colmap_reconstruction.resources import host_available_bytes
         if host_available_bytes() < 2500 * 2**20:

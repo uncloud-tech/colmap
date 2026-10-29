@@ -60,7 +60,7 @@ def parse_args(argv):
     parser.add_argument('--random-seed', type=int, default=0)
     parser.add_argument('--cache-size-gib', type=positive_float, default=1)
     parser.add_argument('--max-image-size', type=int, default=-1, help='explicit undistortion resize only; -1 preserves size')
-    parser.add_argument('--sparse-model', help='mapper model directory name; required if mapper produces multiple models')
+    parser.add_argument('--sparse-model', help='exact mapper model directory name or largest (most registered images, ties by lexicographically smallest name); required for multiple models')
     parser.add_argument('--tile', choices=(16, 32), type=int, default=16)
     parser.add_argument('--no-lookahead', action='store_true')
     parser.add_argument('--unclassified-allowance-bytes', type=nonnegative_int, default=0, help='explicit additional GEO bank raw allowance; unmeasured default 0')
@@ -176,16 +176,26 @@ class Reconstruction:
             '--Mapper.num_threads', a.threads, '--Mapper.ba_gpu_index', a.gpu_index)
         candidates = sorted(path.name for path in sparse.iterdir() if path.is_dir() and not path.is_symlink())
         selected = a.sparse_model
+        policy = 'largest' if selected == 'largest' else 'explicit' if selected is not None else 'single'
         if selected is None and len(candidates) == 1:
             selected = candidates[0]
-        if selected not in candidates:
+        if not candidates or (policy != 'largest' and selected not in candidates):
             raise ValueError('select --sparse-model from native models: ' + ', '.join(candidates))
-        counts = json.loads(self.native('model_analyzer', '--path', sparse / selected,
-                                       '--output_format', 'JSON', capture=True))
+        analyzed = {}
+        for name in candidates if policy == 'largest' else [selected]:
+            counts = json.loads(self.native('model_analyzer', '--path', sparse / name,
+                                           '--output_format', 'JSON', capture=True))
+            if not isinstance(counts, dict) or any(type(counts.get(key)) is not int
+                    for key in ('num_registered_images', 'num_points3D')):
+                raise ValueError('invalid native model analyzer counts for sparse model ' + name)
+            if counts['num_registered_images'] < 2 or counts['num_points3D'] < 1:
+                raise ValueError('sparse model ' + name + ' has insufficient registered images/points')
+            analyzed[name] = counts
+        if policy == 'largest':
+            selected = min(candidates, key=lambda name: (-analyzed[name]['num_registered_images'], name))
+        counts = analyzed[selected]
         self.registered_images = counts['num_registered_images']
-        if type(self.registered_images) is not int or self.registered_images < 2 or counts['num_points3D'] < 1:
-            raise ValueError('selected sparse reconstruction has insufficient registered images/points')
-        write_json(self.assets / 'sparse-model.json', dict(name=selected, counts=counts))
+        write_json(self.assets / 'sparse-model.json', dict(name=selected, policy=policy, counts=counts))
         self.resources()
         self.native('image_undistorter', '--image_path', a.photos, '--input_path', sparse / selected,
             '--output_path', self.dense, '--max_image_size', a.max_image_size,

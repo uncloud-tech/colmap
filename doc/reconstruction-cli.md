@@ -50,8 +50,20 @@ N2 prepares every registered reference in native graph order and submits one V3
 phase with one binding/config/options snapshot per job, including jobs beyond
 the two active slots. It never substitutes sequential N1 execution.
 
-If mapping produces more than one sparse model, execution refuses unless
-`--sparse-model NAME` explicitly selects one. Every registered reference in
+Fresh mapper runs can produce different components, model numbering and point
+counts, even with the same code and photographs. By default, multiple sparse
+models still refuse; a single model is selected only when it is the sole output.
+`--sparse-model NAME` selects that exact directory name and refuses if absent.
+For numbering-independent selection, explicitly pass `--sparse-model largest`:
+this reserved policy selects the most registered images, breaking ties by the
+lexicographically smallest directory name (e.g. `10` before `2`), not point count.
+It does not merge components or guarantee every input photograph registers.
+The existing native analyzer runs once per candidate for `largest`; malformed
+counts, native analyzer failures, fewer than two registered images or no 3D points
+in any candidate refuse rather than silently skipping a model. Exact/default
+selection validates only the selected model. No models also refuses.
+`planning/sparse-model.json` records the actual chosen name, analyzer counts and
+policy (`largest`, `explicit`, or `single`). Every registered reference in
 that model must appear in both native dense graphs. Source order is preserved:
 PHOTO singleton configs retain the original native source-selection tokens;
 GEO must match the fresh post-PHOTO native order. Completion requires all PHOTO

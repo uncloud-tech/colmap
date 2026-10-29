@@ -101,9 +101,20 @@ def main():
             IDENTITY['fingerprint'] = '0' * 64
         print(json.dumps(IDENTITY))
     elif command == 'mapper':
-        (Path(args['--output_path']) / '0').mkdir()
+        models = json.loads(os.environ.get('FAKE_SPARSE_MODELS', '{"0": null}'))
+        for name in models:
+            (Path(args['--output_path']) / name).mkdir()
     elif command == 'model_analyzer':
-        print(json.dumps(dict(num_registered_images=JOBS, num_points3D=4)))
+        if 'FAKE_SPARSE_MODELS' in os.environ:
+            counts = json.loads(os.environ['FAKE_SPARSE_MODELS'])[Path(args['--path']).name]
+            if counts == 'native-failure':
+                raise SystemExit(9)
+            if counts == 'malformed-json':
+                print('{')
+                return
+            print(json.dumps(counts))
+        else:
+            print(json.dumps(dict(num_registered_images=JOBS, num_points3D=4)))
     elif command == 'image_undistorter':
         ws = Path(args['--output_path'])
         for folder in ['images', 'stereo/depth_maps', 'stereo/normal_maps']:
