@@ -128,6 +128,8 @@ CLOSURE = (
     "src/colmap/image/warp.h",
     "src/colmap/image/warp.cc",
     "src/colmap/mvs/owned_input_bank.h",
+    "src/colmap/mvs/owned_photo_output.h",
+    "src/colmap/mvs/owned_photo_output_state.h",
     "src/colmap/mvs/owned_input_bank.cc",
     "src/colmap/mvs/owned_input_bank.cu",
     "src/colmap/mvs/cuda_texture.h",

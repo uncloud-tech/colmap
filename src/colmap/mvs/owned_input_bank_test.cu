@@ -464,6 +464,155 @@ TEST(ResidentGrayscaleBank, ConcurrentPhotoConsumersOwnBindings) {
   std::filesystem::remove_all(root);
 }
 
+// Real PHOTO producer -> independent device reader; no disk map round trip.
+__global__ void ReadPhotoOutput(PhotoOutputView depth,
+                                PhotoOutputView normal,
+                                GpuMatView<float> read_depth,
+                                GpuMatView<float> read_normal) {
+  const size_t x = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t y = blockIdx.y * blockDim.y + threadIdx.y;
+  if (x >= depth.width || y >= depth.height) return;
+  read_depth.Set(y, x, depth.Get(y, x));
+  for (size_t c = 0; c < 3; ++c) read_normal.Set(y, x, c, normal.Get(y, x, c));
+}
+
+TEST(PhotoOutputSnapshot, FreshCrossOwnerReadSurvivesProducerAndCallerRelease) {
+  const float K[9] = {10, 0, 2, 0, 10, 2, 0, 0, 1};
+  const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  const float T[3] = {0, 0, 0};
+  std::vector<Image> images;
+  for (int i = 0; i < 3; ++i) {
+    images.emplace_back("photo-" + std::to_string(i), 5, 4, K, R, T);
+    Bitmap bitmap(5, 4, false);
+    for (int y = 0; y < 4; ++y) {
+      for (int x = 0; x < 5; ++x) {
+        ASSERT_TRUE(bitmap.SetPixel(
+            x, y, BitmapColor<uint8_t>(17 + i * 40 + x + y * 3)));
+      }
+    }
+    images.back().SetBitmap(std::move(bitmap));
+  }
+  int device = -1;
+  CUDA_SAFE_CALL(cudaGetDevice(&device));
+  for (bool graphs : {false, true}) {
+    SCOPED_TRACE(graphs ? "graph" : "stream");
+    PatchMatchOptions options;
+    options.gpu_index = std::to_string(device);
+    options.geom_consistency = false;
+    options.depth_min = 1;
+    options.depth_max = 5;
+    options.sigma_spatial = 5;
+    options.num_iterations = 2;
+    options.num_samples = 2;
+    options.filter = false;
+    options.random_seed = 0;
+    PatchMatch::Problem problem;
+    problem.images = &images;
+    problem.ref_image_idx = 2;
+    problem.src_image_idxs = {1, 0};
+    PatchMatchCuda control(options, problem);
+    control.Run();
+    const auto expected_depth = control.GetDepthMap();
+    const auto expected_normal = control.GetNormalMap();
+    ASSERT_EQ(expected_depth.GetData().size(), 20);
+    ASSERT_TRUE(std::any_of(expected_depth.GetData().begin(),
+                            expected_depth.GetData().end(),
+                            [](float value) { return value > 0; }));
+    options.owned_cuda_graphs = graphs;
+    auto producer = std::make_unique<PatchMatchCuda>(options, problem);
+    EXPECT_THROW(producer->SnapshotPhotoOutput(), std::logic_error);
+    producer->Run();
+    auto snapshot = producer->SnapshotPhotoOutput();
+    ASSERT_EQ(snapshot->ReferenceImageIdx(), 2);
+    EXPECT_EQ(snapshot->SourceImageIdxs(), (std::vector<int>{1, 0}));
+    EXPECT_EQ(snapshot->Options().random_seed, 0);
+    EXPECT_EQ(snapshot->Options().owned_cuda_graphs, graphs);
+    EXPECT_EQ(snapshot->DeviceIndex(), device);
+    EXPECT_EQ(snapshot->Width(), 5);
+    EXPECT_EQ(snapshot->Height(), 4);
+    EXPECT_GE(snapshot->DepthBytes(), 20 * sizeof(float));
+    EXPECT_GE(snapshot->NormalBytes(), 60 * sizeof(float));
+    EXPECT_EQ(snapshot->RetainedBytes(),
+              snapshot->DepthBytes() + snapshot->NormalBytes());
+    EXPECT_EQ(snapshot->CopyAdditionalPeakBytes(), snapshot->RetainedBytes());
+    EXPECT_GE(snapshot->CopyLiveMapBytes(),
+              snapshot->RetainedBytes() + 80 * sizeof(float));
+    // A real throwing observer invalidates publication even after prior
+    // success.
+    producer->SetSweepObserver(
+        [](int, int) { throw std::runtime_error("failed rerun"); });
+    EXPECT_THROW(producer->Run(), std::runtime_error);
+    EXPECT_THROW(producer->SnapshotPhotoOutput(), std::logic_error);
+    producer.reset();
+    std::weak_ptr<const PhotoOutputSnapshot> lifetime = snapshot;
+    OwnedCudaStream consumer;
+    GpuMat<float> read_depth(5, 4), read_normal(5, 4, 3);
+    auto read = [&](PhotoOutputView depth, PhotoOutputView normal) {
+      GraphBuilder graph;
+      ScopedStreamCompletion completion(consumer.Get());
+      if (graphs) {
+        graph.Launch(ReadPhotoOutput,
+                     dim3(1),
+                     dim3(8, 8),
+                     consumer.Get(),
+                     false,
+                     depth,
+                     normal,
+                     read_depth.View(),
+                     read_normal.View());
+      } else {
+        ReadPhotoOutput<<<1, dim3(8, 8), 0, consumer.Get()>>>(
+            depth, normal, read_depth.View(), read_normal.View());
+      }
+      completion.Wait();  // before graph teardown, including exceptional paths
+    };
+    // Callback error still drains. No successful-result relabeling.
+    EXPECT_THROW(
+        snapshot->WithDeviceMaps(
+            consumer,
+            [&](auto depth, auto normal) {
+              ReadPhotoOutput<<<1, dim3(8, 8), 0, consumer.Get()>>>(
+                  depth, normal, read_depth.View(), read_normal.View());
+              throw std::runtime_error("consumer cancelled");
+            }),
+        std::runtime_error);
+    EXPECT_EQ(cudaStreamQuery(consumer.Get()), cudaSuccess);
+    EXPECT_FALSE(lifetime.expired());
+    int devices = 0;
+    CUDA_SAFE_CALL(cudaGetDeviceCount(&devices));
+    if (devices > 1) {
+      CUDA_SAFE_CALL(cudaSetDevice((device + 1) % devices));
+      {
+        OwnedCudaStream wrong_device;
+        EXPECT_THROW(snapshot->WithDeviceMaps(wrong_device, read),
+                     std::invalid_argument);
+      }
+      CUDA_SAFE_CALL(cudaSetDevice(device));
+    }
+    snapshot->WithDeviceMaps(consumer, [&](auto depth, auto normal) {
+      snapshot.reset();
+      EXPECT_FALSE(lifetime.expired());
+      read(depth, normal);
+    });
+    EXPECT_TRUE(lifetime.expired());
+    EXPECT_TRUE(SameFloatBits(expected_depth.GetData(),
+                              read_depth.CopyToMat(consumer.Get()).GetData()));
+    EXPECT_TRUE(SameFloatBits(expected_normal.GetData(),
+                              read_normal.CopyToMat(consumer.Get()).GetData()));
+    // Production cancellation path, not state injection.
+    if (graphs) {
+      auto cancelled = std::make_unique<PatchMatchCuda>(options, problem);
+      auto coordinator = std::make_shared<GraphLaunchControl>(1);
+      cancelled->SetGraphCoordinator(coordinator, 0);
+      cancelled->Run();
+      coordinator->Cancel(
+          std::make_exception_ptr(std::runtime_error("cancelled")));
+      EXPECT_THROW(cancelled->Run(), std::exception);
+      EXPECT_THROW(cancelled->SnapshotPhotoOutput(), std::logic_error);
+    }
+  }
+}
+
 TEST(ResidentInputBankSampler, DepthElementTypeAndPadding) {
   OwnedCudaStream stream;
   const std::vector<float> depth = {1.25f, 7.0f, 2.5f, 19.0f, 4.0f, 8.0f};

@@ -21,6 +21,8 @@ class PhotoFingerprintTest(unittest.TestCase):
     def test_graph_allocation_and_host_boundary_sources_are_attested(self):
         required = {
             "src/colmap/mvs/owned_input_bank.h",
+            "src/colmap/mvs/owned_photo_output.h",
+            "src/colmap/mvs/owned_photo_output_state.h",
             "src/colmap/mvs/owned_input_bank.cc",
             "src/colmap/mvs/owned_input_bank.cu",
             "src/colmap/mvs/owned_cuda_execution.h",
@@ -91,7 +93,7 @@ class PhotoFingerprintTest(unittest.TestCase):
             self.assertIn(
                 hashlib.sha256(encoded).hexdigest(), output.read_text()
             )
-            self.assertEqual(len(generator.CLOSURE), 28)
+            self.assertEqual(len(generator.CLOSURE), 30)
             self.assertIn(
                 f'kPhotoPhaseV1SourceCommit[] = "{lineage}"', output.read_text()
             )
@@ -119,6 +121,15 @@ class PhotoFingerprintTest(unittest.TestCase):
             self.assertNotEqual(first, output.read_text())
             self.assertIn(f'"{lineage}";', output.read_text())
             original = output.read_text()
+            for new_header in (
+                "owned_photo_output.h", "owned_photo_output_state.h"
+            ):
+                added = root / "src/colmap/mvs" / new_header
+                added.write_bytes(b"dirty snapshot allocation\n")
+                with self.assertRaisesRegex(ValueError, new_header):
+                    generator.generate(root, output)
+                self.assertEqual(original, output.read_text())
+                added.write_bytes(b"TEST-EVIDENCE\n")
             source = root / cache_header
             source.write_bytes(b"changed\n")
             with self.assertRaisesRegex(ValueError, cache_header):

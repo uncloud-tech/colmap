@@ -63,6 +63,7 @@ class OwnedCudaStream {
 
   void Activate() const { CUDA_SAFE_CALL(cudaSetDevice(device_)); }
   cudaStream_t Get() const { return stream_; }
+  int DeviceIndex() const { return device_; }
   void Synchronize() const {
     Activate();
     SynchronizeStream(stream_);

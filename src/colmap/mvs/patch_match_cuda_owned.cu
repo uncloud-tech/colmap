@@ -1713,10 +1713,82 @@ PatchMatchCuda::~PatchMatchCuda() {
 }
 
 void PatchMatchCuda::Run() {
+  photo_output_state_.BeginRun();
   stream_->Activate();
   DispatchOwnedTile(owned_tile_threads_, [this](auto tile) {
     RunWithWindowSizeAndStep<11, 1, decltype(tile)::value>();
   });
+  photo_output_state_.FinishRun();
+}
+
+PhotoOutputSnapshot::PhotoOutputSnapshot(int reference_image_idx,
+                                         std::vector<int> source_image_idxs,
+                                         PatchMatchOptions options,
+                                         int device,
+                                         const GpuMat<float>& depth,
+                                         const GpuMat<float>& normal,
+                                         cudaStream_t stream)
+    : reference_image_idx_(reference_image_idx),
+      source_image_idxs_(std::move(source_image_idxs)),
+      options_(std::move(options)),
+      device_(device),
+      source_bytes_(depth.GetPitch() * depth.GetHeight() +
+                    normal.GetPitch() * normal.GetHeight() *
+                        normal.GetDepth()) {
+  // Allocate both before enqueue; failure cannot release in-flight copy
+  // storage.
+  depth_ = std::make_unique<GpuMat<float>>(depth.GetWidth(), depth.GetHeight());
+  normal_ =
+      std::make_unique<GpuMat<float>>(normal.GetWidth(), normal.GetHeight(), 3);
+  ScopedStreamCompletion completion(stream);
+  for (const auto& pair : {std::make_pair(&depth, depth_.get()),
+                           std::make_pair(&normal, normal_.get())}) {
+    CUDA_SAFE_CALL(
+        cudaMemcpy2DAsync(pair.second->GetPtr(),
+                          pair.second->GetPitch(),
+                          pair.first->GetPtr(),
+                          pair.first->GetPitch(),
+                          pair.first->GetWidth() * sizeof(float),
+                          pair.first->GetHeight() * pair.first->GetDepth(),
+                          cudaMemcpyDeviceToDevice,
+                          stream));
+  }
+  completion.Wait();
+}
+
+PhotoOutputSnapshot::~PhotoOutputSnapshot() noexcept {
+  int previous = -1;
+  // All leases are already fenced. Never free an allocation on the wrong
+  // device.
+  if (cudaGetDevice(&previous) != cudaSuccess ||
+      cudaSetDevice(device_) != cudaSuccess) {
+    std::terminate();
+  }
+  normal_.reset();
+  depth_.reset();
+  if (cudaSetDevice(previous) != cudaSuccess) std::terminate();
+}
+
+std::shared_ptr<const PhotoOutputSnapshot> PatchMatchCuda::SnapshotPhotoOutput()
+    const {
+  photo_output_state_.RequireSnapshot(
+      options_.geom_consistency, ref_width_, ref_height_, rotation_in_half_pi_);
+  stream_->Activate();
+  THROW_CHECK_EQ(depth_map_->GetWidth(), ref_width_);
+  THROW_CHECK_EQ(depth_map_->GetHeight(), ref_height_);
+  THROW_CHECK_EQ(depth_map_->GetDepth(), 1);
+  THROW_CHECK_EQ(normal_map_->GetWidth(), ref_width_);
+  THROW_CHECK_EQ(normal_map_->GetHeight(), ref_height_);
+  THROW_CHECK_EQ(normal_map_->GetDepth(), 3);
+  THROW_CHECK_GE(problem_.ref_image_idx, 0);
+  return std::shared_ptr<const PhotoOutputSnapshot>(
+      new PhotoOutputSnapshot(problem_.ref_image_idx,
+                              problem_.src_image_idxs,
+                              options_,
+                              stream_->DeviceIndex(),
+                              *depth_map_.Current(),
+                              *normal_map_.Current(),
+                              stream_->Get()));
 }
 
 DepthMap PatchMatchCuda::GetDepthMap() const {

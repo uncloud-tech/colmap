@@ -13,6 +13,8 @@
 #include "colmap/mvs/owned_async_pool.h"
 #include "colmap/mvs/owned_cuda_execution.h"
 #include "colmap/mvs/owned_graph.h"
+#include "colmap/mvs/owned_photo_output.h"
+#include "colmap/mvs/owned_photo_output_state.h"
 #include "colmap/mvs/owned_prng_boundary.h"
 #include "colmap/mvs/owned_rotation_storage.h"
 #include "colmap/mvs/owned_selection_scratch.h"
@@ -68,6 +70,9 @@ class PatchMatchCuda {
     sweep_observer_ = std::move(observer);
   }
 
+  // Opt-in explicit copy after the phase barrier; no default dispatch change.
+  std::shared_ptr<const PhotoOutputSnapshot> SnapshotPhotoOutput() const;
+
   DepthMap GetDepthMap() const;
   NormalMap GetNormalMap() const;
   Mat<float> GetSelProbMap() const;
@@ -96,6 +101,7 @@ class PatchMatchCuda {
   // Rotate reference image by 90 degrees in counter-clockwise direction.
   void Rotate();
 
+  PhotoOutputState photo_output_state_;
   const PatchMatchOptions options_;
   const int owned_tile_threads_;
   // Strong PHOTO binding dies after stream/resources. Constructor failure and
