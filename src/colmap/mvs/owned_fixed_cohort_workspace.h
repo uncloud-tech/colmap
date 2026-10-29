@@ -34,7 +34,10 @@ class PreparedFixedCohortWorkspace {
   }
   const std::vector<std::string>& ImageNames() const { return names_; }
 
-  // Retains ALL closed-cohort PHOTO maps through GEO in the existing runner.
+  FixedCohortOutputPolicy OutputPolicy() const { return budget_.output_policy; }
+
+  // Retains ALL device PHOTO snapshots through final GEO drain, either policy.
+  // Host PHOTO cardinality follows the frozen budget policy (see result).
   // Returns native depth/normal maps; no output paths or partial publication.
   // Uses the original preparation deadline, never creates a fresh budget.
   FixedCohortResult Run(const std::atomic<bool>* cancel = nullptr) const;

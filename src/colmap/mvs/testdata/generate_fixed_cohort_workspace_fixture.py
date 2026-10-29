@@ -5,6 +5,9 @@ Default: four 64x48 translated pinhole cameras observing a textured plane z=4.
 External JSON has the same schema as synthetic_spec(); images are the COMPLETE
 loaded workspace bank after native max_load_image_size resizing, in any explicit
 order. Names, reference order and source ordinal multiplicity are preserved.
+Optional output_policy is "photo_and_geo" (default) or "final_geo_only".
+It binds the canonical RAW budget and actual runner output disposition. The GPU
+fixture exercises both policies against one independent control.
 Every phase option must be supplied. GEO sources must close over four producers.
 The caller freezes sparse/images separately; no image decoding or forecast
 coefficients here. All RAW inventory comes from the canonical producer.
@@ -39,7 +42,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT / 'python'))
 from colmap_reconstruction.fixed_cohort import (  # noqa: E402
-    ByteCharge, ImageShape, Job, PhaseOptions, forecast_fixed_cohort,
+    ByteCharge, ImageShape, Job, OutputPolicy, PhaseOptions, forecast_fixed_cohort,
 )
 
 
@@ -58,7 +61,7 @@ def synthetic_spec():
                          geo_sources=sources,
                          photo_options=asdict(photo),
                          geo_options=asdict(replace(photo, geom_consistency=True, filter=True))))
-    return dict(workspace='', max_load_image_size=-1,
+    return dict(workspace='', max_load_image_size=-1, output_policy='photo_and_geo',
                 images=[dict(name=n, width=64, height=48) for n in names],
                 references=refs, capacity=[2 << 30, 2 << 30],
                 process=[64 << 20, 64 << 20], unknown=[128 << 20, 128 << 20],
@@ -76,6 +79,7 @@ def cpp(value):
 
 
 def emit_header(spec, root=ROOT):
+    policy = OutputPolicy(spec.get('output_policy', 'photo_and_geo'))
     images = spec['images']
     names = [i['name'] for i in images]
     if len(set(names)) != len(names) or len(spec['references']) != 4:
@@ -105,10 +109,11 @@ def emit_header(spec, root=ROOT):
         raise ValueError('bounded integer deadline required')
     if type(spec['loader_scratch_host']) is not int or spec['loader_scratch_host'] <= 0:
         raise ValueError('positive explicit decoder scratch bound required')
-    budgets = [forecast_fixed_cohort(shapes, jobs, max_active_owners=a, source_root=root,
+    budgets = [[forecast_fixed_cohort(shapes, jobs, max_active_owners=a, source_root=root,
                 process=ByteCharge(*spec['process']), unknown=ByteCharge(*spec['unknown']),
                 unknown_provenance=spec['unknown_provenance'],
-                headroom_reserve=ByteCharge(*spec['headroom_reserve'])) for a in (1, 2)]
+                headroom_reserve=ByteCharge(*spec['headroom_reserve']), output_policy=p) for a in (1, 2)]
+               for p in (policy, next(p for p in OutputPolicy if p != policy))]
     identity = json.dumps(spec, sort_keys=True, separators=(',', ':'))
     lines = ['// Generated test-only canonical RAW request. Do not hand edit.',
              'WorkspaceFixture MakeWorkspaceFixture() { WorkspaceFixture f;',
@@ -118,8 +123,8 @@ def emit_header(spec, root=ROOT):
              f'f.scratch = {spec["loader_scratch_host"]}ULL;',
              f'f.seconds = {spec["deadline_seconds"]};',
              f'f.spec = {cpp(identity)};',
-             f'f.fingerprint = {cpp(budgets[0].source.fingerprint)};',
-             f'f.revision = {cpp(budgets[0].source.revision)};']
+             f'f.fingerprint = {cpp(budgets[0][0].source.fingerprint)};',
+             f'f.revision = {cpp(budgets[0][0].source.revision)};']
     for filename in ('generate_fixed_cohort_workspace_fixture.py', '../owned_fixed_cohort_workspace_execution_test.cu'):
         path = Path(__file__).parent / filename
         if path.exists():
@@ -133,8 +138,9 @@ def emit_header(spec, root=ROOT):
             for key, value in ref[phase+'_options'].items():
                 lines.append(f'r.{phase}_options.{key} = {cpp(value)};')
         lines += ['f.references.push_back(r); }']
-    for i, budget in enumerate(budgets):
-        lines.append(f'f.budgets[{i}] = {budget.native_cpp_initializer()};')
+    for policy_index, pair in enumerate(budgets):
+        for i, budget in enumerate(pair):
+            lines.append(f'f.budgets[{policy_index}][{i}] = {budget.native_cpp_initializer()};')
     return '\n'.join(lines + ['return f; }', ''])
 
 

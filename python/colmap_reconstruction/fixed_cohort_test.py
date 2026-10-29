@@ -93,6 +93,27 @@ class RefusalAndLifetimeTest(unittest.TestCase):
         self.assertEqual(len(one.source.revision), 40)
         self.assertEqual(len(one.source.fingerprint), 64)
 
+    def test_output_policy_controls_only_retained_host_maps(self):
+        from colmap_reconstruction.fixed_cohort import ByteCharge, OutputPolicy
+        default = self.forecast()
+        retained = self.forecast(output_policy=OutputPolicy.PHOTO_AND_GEO)
+        final = self.forecast(output_policy=OutputPolicy.FINAL_GEO_ONLY)
+        self.assertEqual(default, retained)
+        self.assertEqual(final.host_outputs, ByteCharge(464))
+        self.assertEqual(final.retained.host, retained.retained.host - 464)
+        for name in ('snapshots', 'photo_private', 'geo_private', 'geo_staging_device',
+                     'caller_inputs', 'frozen_inputs', 'process', 'unknown'):
+            self.assertEqual(getattr(final, name), getattr(retained, name))
+        self.assertEqual(final.peak.device, retained.peak.device)
+        self.assertIn('FixedCohortOutputPolicy::kFinalGeoOnly', final.native_cpp_initializer())
+        self.assertIn('FixedCohortOutputPolicy::kPhotoAndGeo', retained.native_cpp_initializer())
+        from dataclasses import replace
+        with self.assertRaises(ValueError):
+            replace(default, output_policy=False).native_cpp_initializer()
+        for invalid in (False, True, 'final_geo_only', None, 1):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.forecast(output_policy=invalid)
+
     def test_resourcewise_top_active_and_checked_overflow(self):
         from colmap_reconstruction.fixed_cohort import ByteCharge, active_peak
         from colmap_reconstruction.model import _add, _mul
@@ -181,7 +202,7 @@ class NativeBindingTest(unittest.TestCase):
         import tempfile
         from pathlib import Path
         from colmap_reconstruction.fixed_cohort import (
-            ByteCharge, ImageShape, Job, PhaseOptions, forecast_fixed_cohort,
+            ByteCharge, ImageShape, Job, OutputPolicy, PhaseOptions, forecast_fixed_cohort,
         )
         root = Path(__file__).resolve().parents[2]
         images = (ImageShape(5, 4, 1, 20), ImageShape(3, 3, 1, 9)) * 2
@@ -191,9 +212,10 @@ class NativeBindingTest(unittest.TestCase):
                          PhaseOptions(False, False, '0', 1, 5, 5),
                          PhaseOptions(True, True, '0', 1, 5, 5))
                      for i, ref in enumerate(ids))
-        for active in (1, 2):
+        from itertools import product
+        for active, policy in product((1, 2), OutputPolicy):
             budget = forecast_fixed_cohort(
-                images, jobs, max_active_owners=active, source_root=root,
+                images, jobs, max_active_owners=active, source_root=root, output_policy=policy,
                 process=ByteCharge(100, 200), unknown=ByteCharge(300, 400),
                 unknown_provenance='explicit test-only allowance ' + chr(0x1f9ea),
                 headroom_reserve=ByteCharge(10, 20),
@@ -226,7 +248,15 @@ assert(p.peak.host == {budget.peak.host} && p.peak.device == {budget.peak.device
 auto admitted = AdmitFixedCohortBudget(b, {{1000000,1000000}});
 assert(admitted.host == MarginBytes(p.peak.host));
 assert(admitted.device == MarginBytes(p.peak.device));
-assert(b.host_outputs.host==1856 && b.snapshots.device==928);
+assert(b.output_policy==FixedCohortOutputPolicy::{"kPhotoAndGeo" if policy == OutputPolicy.PHOTO_AND_GEO else "kFinalGeoOnly"});
+assert(b.host_outputs.host=={1856 if policy == OutputPolicy.PHOTO_AND_GEO else 928} && b.snapshots.device==928);
+auto invalid=b;
+invalid.output_policy=static_cast<FixedCohortOutputPolicy>(99);
+bool invalid_refused=false;
+try {{ AdmitFixedCohortBudget(invalid,{{1000000,1000000}}); }}
+catch(const std::invalid_argument&) {{ invalid_refused=true; }}
+assert(invalid_refused);
+assert(FixedCohortBudget{{}}.output_policy==FixedCohortOutputPolicy::kPhotoAndGeo);
 assert(b.geo_staging_device == std::vector<uint64_t>({{240,240,108,240}}));
 assert(b.photo_private.size()==4 && b.max_active_owners=={active});
 assert(b.caller_inputs.host==58 && b.frozen_inputs.host==58);
@@ -265,7 +295,11 @@ std::cout << admitted.host << " " << admitted.device;
                 self.assertEqual(compiled.returncode, 0, compiled.stderr)
                 result = subprocess.run([str(binary)], check=True, capture_output=True, text=True)
                 # Independent once-margin totals for these fixed raw budgets.
-                self.assertEqual(result.stdout, '3000 7487' if active == 1 else '3522 13093')
+                expected = { (1, OutputPolicy.PHOTO_AND_GEO): '3000 7487',
+                             (2, OutputPolicy.PHOTO_AND_GEO): '3522 13093',
+                             (1, OutputPolicy.FINAL_GEO_ONLY): '2044 7487',
+                             (2, OutputPolicy.FINAL_GEO_ONLY): '2566 13093' }
+                self.assertEqual(result.stdout, expected[active, policy])
 
 
 class WorkspaceFixtureBindingTest(unittest.TestCase):
@@ -286,7 +320,7 @@ class WorkspaceFixtureBindingTest(unittest.TestCase):
         self.assertIn('MakeWorkspaceFixture', header)
         self.assertIn('b.max_active_owners = 1', header)
         self.assertIn('b.max_active_owners = 2', header)
-        self.assertIn(tool['cpp']('28dff08c2a392ed04fa046ade5e2717e51f922baece3b09dd91a4030ac8bfab0'), header)
+        self.assertIn(tool['cpp']('b8007392eb66127cb92bed2b260dbd519e11b766d09364a6955940c806323914'), header)
         self.assertIn('b.caller_inputs = {12288ULL,0ULL}', header)
         self.assertIn('b.host_outputs = {393216ULL,0ULL}', header)
         self.assertIn('b.snapshots = {0ULL,196608ULL}', header)
@@ -297,6 +331,30 @@ class WorkspaceFixtureBindingTest(unittest.TestCase):
         spec['workspace'] = '/read-only/undistorted'
         del spec['references'][0]['photo_options']['num_samples']
         with self.assertRaisesRegex(ValueError, 'explicit phase options'):
+            tool['emit_header'](spec, root)
+
+    def test_optional_output_policy_binds_raw_native_inventory(self):
+        import runpy
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[2]
+        tool = runpy.run_path(str(root / 'src/colmap/mvs/testdata/generate_fixed_cohort_workspace_fixture.py'))
+        spec = tool['synthetic_spec']()
+        self.assertEqual(spec['output_policy'], 'photo_and_geo')
+        del spec['output_policy']
+        default_header = tool['emit_header'](spec, root)
+        first = default_header.split('f.budgets[0][0] = ', 1)[1].split('return b; }()', 1)[0]
+        self.assertIn('FixedCohortOutputPolicy::kPhotoAndGeo', first)
+        self.assertIn('b.host_outputs = {393216ULL,0ULL}', first)
+        spec['output_policy'] = 'final_geo_only'
+        header = tool['emit_header'](spec, root)
+        # The requested policy is first, its complementary test arm second.
+        first = header.split('f.budgets[0][0] = ', 1)[1].split('return b; }()', 1)[0]
+        self.assertIn('FixedCohortOutputPolicy::kFinalGeoOnly', first)
+        self.assertIn('b.host_outputs = {196608ULL,0ULL}', first)
+        self.assertIn('b.host_outputs = {196608ULL,0ULL}', header)
+        self.assertIn('b.snapshots = {0ULL,196608ULL}', header)
+        spec['output_policy'] = False
+        with self.assertRaises(ValueError):
             tool['emit_header'](spec, root)
 
     def test_external_binding_requires_repeatable_seed(self):

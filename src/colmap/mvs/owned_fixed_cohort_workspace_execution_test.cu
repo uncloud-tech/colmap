@@ -26,7 +26,7 @@ struct WorkspaceFixture {
   int seconds = 0;
   uint64_t scratch = 0;
   ByteCharge capacity;
-  std::array<FixedCohortBudget, 2> budgets;
+  std::array<std::array<FixedCohortBudget, 2>, 2> budgets;
   std::vector<Shape> shapes;
   std::vector<FixedCohortWorkspaceReference> references;
 };
@@ -110,9 +110,9 @@ void ExpectMeaningful(const FixedCohortResult::Maps& maps) {
 // An independent native loader and private PHOTO->GEO chain, not a GEO oracle
 // seeded from candidate PHOTO. The control never reads candidate result maps.
 FixedCohortResult PrivateControl(const WorkspaceFixture& fixture,
-                                 const PreparedFixedCohortWorkspace& prepared) {
-  NativeRunDeadlineGuard guard(
-      NativeRunDeadline::FromBudget(std::chrono::seconds(fixture.seconds)));
+                                 const PreparedFixedCohortWorkspace& prepared,
+                                 NativeRunDeadline deadline) {
+  NativeRunDeadlineGuard guard(deadline);
   Workspace::Options options;
   options.workspace_path = fixture.workspace;
   options.workspace_format = "COLMAP";
@@ -182,6 +182,10 @@ void ExerciseWorkspace(WorkspaceFixture fixture, bool external) {
   ::testing::Test::RecordProperty("producer_source_revision", fixture.revision);
   ::testing::Test::RecordProperty("test_source_identities",
                                   fixture.test_identities);
+  // One original finite cap covers all policy/mode arms AND the reused control.
+  const auto deadline =
+      NativeRunDeadline::FromBudget(std::chrono::seconds(fixture.seconds));
+  NativeRunDeadlineGuard guard(deadline);
   std::optional<FixedCohortResult> control;
   for (const bool graphs : {false, true}) {
     for (const size_t active : {size_t{1}, size_t{2}}) {
@@ -194,42 +198,66 @@ void ExerciseWorkspace(WorkspaceFixture fixture, bool external) {
         ref.photo_options.owned_cuda_graphs = graphs;
         ref.geo_options.owned_cuda_graphs = graphs;
       }
-      const auto deadline =
-          NativeRunDeadline::FromBudget(std::chrono::seconds(fixture.seconds));
-      auto prepared = PrepareFixedCohortWorkspace(
-          fixture.workspace,
-          fixture.max_size,
-          refs,
-          fixture.budgets[active - 1],
-          fixture.capacity,
-          fixture.scratch,
-          deadline,
-          active == 1 ? PairDispatch::kSerial : PairDispatch::kPair,
-          32);
-      ASSERT_EQ(prepared.Images().size(), fixture.shapes.size());
-      for (const auto& shape : fixture.shapes) {
-        const auto it = std::find(prepared.ImageNames().begin(),
-                                  prepared.ImageNames().end(),
-                                  shape.name);
-        ASSERT_NE(it, prepared.ImageNames().end());
-        const auto& image =
-            prepared.Images()[it - prepared.ImageNames().begin()];
-        ASSERT_EQ(image.GetWidth(), shape.width);
-        ASSERT_EQ(image.GetHeight(), shape.height);
-      }
-      // Native Run shares the original preparation deadline, never a reset.
-      const auto actual = prepared.Run();
-      if (!control) control = PrivateControl(fixture, prepared);
-      ASSERT_EQ(actual.photo.size(), 4);
-      ASSERT_EQ(actual.geo.size(), 4);
-      for (size_t i = 0; i < 4; ++i) {
-        SCOPED_TRACE(i);
-        ExpectMeaningful(control->photo[i]);
-        ExpectMeaningful(control->geo[i]);
-        ExpectMeaningful(actual.photo[i]);
-        ExpectMeaningful(actual.geo[i]);
-        ExpectMapBits(control->photo[i], actual.photo[i]);
-        ExpectMapBits(control->geo[i], actual.geo[i]);
+      std::optional<uint64_t> snapshot_bytes;
+      std::vector<uint64_t> staging_bytes;
+      for (size_t policy_index : {size_t{0}, size_t{1}}) {
+        const auto& budget = fixture.budgets[policy_index][active - 1];
+        SCOPED_TRACE(policy_index);
+        guard.Check();
+        auto prepared = PrepareFixedCohortWorkspace(
+            fixture.workspace,
+            fixture.max_size,
+            refs,
+            budget,
+            fixture.capacity,
+            fixture.scratch,
+            deadline,
+            active == 1 ? PairDispatch::kSerial : PairDispatch::kPair,
+            32);
+        ASSERT_EQ(prepared.Images().size(), fixture.shapes.size());
+        for (const auto& shape : fixture.shapes) {
+          const auto it = std::find(prepared.ImageNames().begin(),
+                                    prepared.ImageNames().end(),
+                                    shape.name);
+          ASSERT_NE(it, prepared.ImageNames().end());
+          const auto& image =
+              prepared.Images()[it - prepared.ImageNames().begin()];
+          ASSERT_EQ(image.GetWidth(), shape.width);
+          ASSERT_EQ(image.GetHeight(), shape.height);
+        }
+        // Mutating the original caller budget cannot change the prepared policy.
+        const auto policy = budget.output_policy;
+        auto& caller_budget = fixture.budgets[policy_index][active - 1];
+        caller_budget.output_policy = static_cast<FixedCohortOutputPolicy>(99);
+        const auto actual = prepared.Run();
+        caller_budget.output_policy = policy;
+        EXPECT_EQ(prepared.OutputPolicy(), policy);
+        EXPECT_EQ(actual.output_policy, policy);
+        guard.Check();
+        if (!control) control = PrivateControl(fixture, prepared, deadline);
+        const bool retain = policy == FixedCohortOutputPolicy::kPhotoAndGeo;
+        ASSERT_EQ(actual.photo.size(), retain ? 4 : 0);
+        ASSERT_GT(actual.actual_snapshot_bytes, 0);
+        if (snapshot_bytes) {
+          EXPECT_EQ(actual.actual_snapshot_bytes, *snapshot_bytes);
+          EXPECT_EQ(actual.actual_geo_staging_bytes, staging_bytes);
+        } else {
+          snapshot_bytes = actual.actual_snapshot_bytes;
+          staging_bytes = actual.actual_geo_staging_bytes;
+        }
+        ASSERT_EQ(actual.geo.size(), 4);
+        for (size_t i = 0; i < 4; ++i) {
+          SCOPED_TRACE(i);
+          ExpectMeaningful(control->photo[i]);
+          ExpectMeaningful(control->geo[i]);
+          if (retain) {
+            ExpectMeaningful(actual.photo[i]);
+            ExpectMapBits(control->photo[i], actual.photo[i]);
+          }
+          ExpectMeaningful(actual.geo[i]);
+          ExpectMapBits(control->geo[i], actual.geo[i]);
+        }
+        guard.Check();
       }
     }
   }

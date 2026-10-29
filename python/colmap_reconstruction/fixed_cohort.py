@@ -1,22 +1,25 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Fresh fixed-cohort RAW logical inventory, experimental/unqualified.
 
-All caller pixels and frozen copies, both returned host phases and every PHOTO
-snapshot stay charged throughout. Private source padding preserves ordinal
-multiplicity. Explicit unknown pitch/array/context/allocator bytes are NOT
+All caller pixels and frozen copies, policy-selected returned host maps and
+all PHOTO device snapshots stay charged throughout. OutputPolicy is the sole
+native execution/inventory binding: default retains both host phases; final-only
+returns GEO only (16 rather than 32 bytes per reference pixel). Private source
+padding preserves ordinal multiplicity. Explicit unknown pitch/array/context/allocator bytes are NOT
 calibrated coefficients or physical-fit proof. Native admission applies the ONE
 aggregate 3% margin; this producer does not apply any item margins.
 
 Only loaded grayscale shape metadata is evaluated: no file-map identities,
 pixel allocations, GPU queries, source sorting or execution. Source content is
 bound with the existing resident allocation closure/algorithm, not a new digest
-scheme. The pin includes the workspace adapter/shared-validation extraction from the
-base42 inventory (allocation-equivalent native runner), pending independent
-review, NOT inherited current-phase-v1/optimized-PHOTO qualification. This
-producer covers native execution only; workspace decode/resize scratch and
+scheme. The pin includes the optional final-GEO-only disposition and existing
+workspace adapter/shared validation, pending independent review, NOT inherited
+current-phase-v1/optimized-PHOTO qualification. This producer covers native
+execution only; workspace decode/resize scratch and
 cache overlap require the adapter's separate explicit lifecycle admission.
 """
 from dataclasses import dataclass, fields
+from enum import Enum
 import math
 from pathlib import Path
 import runpy
@@ -24,9 +27,14 @@ import subprocess
 
 from .model import _add, _mul, current_owned_shape_minimum, exact_int
 
-_FIXED_COHORT_FINGERPRINT = '28dff08c2a392ed04fa046ade5e2717e51f922baece3b09dd91a4030ac8bfab0'
+_FIXED_COHORT_FINGERPRINT = 'b8007392eb66127cb92bed2b260dbd519e11b766d09364a6955940c806323914'
 _PROFILE = 'fresh-fixed-cohort/current-owned-shape-lower-bound-v1/unqualified'
 _ROOT = Path(__file__).resolve().parents[2]
+
+
+class OutputPolicy(Enum):
+    PHOTO_AND_GEO = 'photo_and_geo'
+    FINAL_GEO_ONLY = 'final_geo_only'
 
 
 @dataclass(frozen=True)
@@ -207,6 +215,7 @@ class FixedCohortBudget:
     jobs: tuple[Job, ...]
     already_live_process: tuple[ByteCharge, ByteCharge]
     already_live_process_provenance: tuple[str, str]
+    output_policy: OutputPolicy = OutputPolicy.PHOTO_AND_GEO
     profile: str = _PROFILE
     physical_fit_certified: bool = False
     calibration_certified: bool = False
@@ -236,6 +245,8 @@ class FixedCohortBudget:
         Compiled in CPU fixture tests against the real native public headers.
         Metadata remains on this typed Python record; no execution authority.
         """
+        if not isinstance(self.output_policy, OutputPolicy):
+            raise ValueError('expected typed OutputPolicy')
         # Fixed-width octal UTF-8 escapes preserve arbitrary provenance bytes
         # without C++ universal-character/surrogate or quote injection issues.
         def text(value):
@@ -243,6 +254,9 @@ class FixedCohortBudget:
 
         charge = lambda b: '{' + str(b.host) + 'ULL,' + str(b.device) + 'ULL}'
         lines = ['[] { colmap::mvs::owned::FixedCohortBudget b;']
+        policy = ('kPhotoAndGeo' if self.output_policy == OutputPolicy.PHOTO_AND_GEO
+                  else 'kFinalGeoOnly')
+        lines.append(f'b.output_policy = colmap::mvs::owned::FixedCohortOutputPolicy::{policy};')
         for name in ('caller_inputs', 'frozen_inputs', 'host_outputs', 'snapshots',
                      'process', 'unknown', 'headroom_reserve'):
             lines.append(f'b.{name} = {charge(getattr(self, name))};')
@@ -260,7 +274,8 @@ class FixedCohortBudget:
 def forecast_fixed_cohort(images, jobs, *, max_active_owners, source_root,
                           process, unknown, unknown_provenance, headroom_reserve,
                           already_live_process=(ByteCharge(), ByteCharge()),
-                          already_live_process_provenance=('', '')):
+                          already_live_process_provenance=('', ''),
+                          output_policy=OutputPolicy.PHOTO_AND_GEO):
     """Evaluate metadata only; capacities and the aggregate margin belong native.
 
     Process is caller-classified raw storage (not a new coefficient). Live
@@ -269,6 +284,8 @@ def forecast_fixed_cohort(images, jobs, *, max_active_owners, source_root,
     free memory. Source/device/options/order binding does not hash caller pixels
     or calibration: native still validates actual inputs and frozen invocation.
     """
+    if not isinstance(output_policy, OutputPolicy):
+        raise ValueError('expected typed OutputPolicy')
     exact_int(max_active_owners, 1, 2)
     images, jobs = tuple(images), tuple(jobs)
     if not images or not jobs:
@@ -322,8 +339,9 @@ def forecast_fixed_cohort(images, jobs, *, max_active_owners, source_root,
                 staging.append(_mul(4, padded))
     inputs = sum_checked(image.num_bytes for image in images)
     maps = _mul(sum_checked(images[i].num_bytes for i in producers), 16)
+    host_phases = 2 if output_policy == OutputPolicy.PHOTO_AND_GEO else 1
     return FixedCohortBudget(
-        ByteCharge(inputs), ByteCharge(inputs), ByteCharge(_mul(2, maps)),
+        ByteCharge(inputs), ByteCharge(inputs), ByteCharge(_mul(host_phases, maps)),
         ByteCharge(0, maps), process, unknown, unknown_provenance, headroom_reserve,
         max_active_owners, tuple(photo), tuple(geo), tuple(staging),
-        _bind_source(source_root), images, jobs, live, provenance)
+        _bind_source(source_root), images, jobs, live, provenance, output_policy)

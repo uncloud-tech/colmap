@@ -12,16 +12,22 @@
 
 namespace colmap::mvs::owned {
 
+enum class FixedCohortOutputPolicy { kPhotoAndGeo, kFinalGeoOnly };
+
 // Experimental native caller contract, NOT a forecast producer or a physical
 // allocation estimator. All fields are RAW (unmargined) bounds supplied by the
-// caller. Keep original caller inputs AND frozen copies charged. Reserve both
-// phases' returned host maps and all PHOTO snapshot copies for the full run.
+// caller. Keep original caller inputs AND frozen copies charged. Reserve
+// policy-selected returned host maps and all PHOTO snapshot copies for the
+// full run.
 // Per-owner bounds include setup/transients/private solver storage; the GEO
 // bounds additionally include adapter staging + its private depth texture.
 // Process covers classified process storage; unknown covers separately
 // justified unclassified overhead. Neither is a sharing credit.
 // Production dispatch requires a separately qualified canonical producer.
 struct FixedCohortBudget {
+  // Sole execution AND logical host-output inventory binding. Device PHOTO
+  // snapshots remain retained through final GEO drain under either policy.
+  FixedCohortOutputPolicy output_policy = FixedCohortOutputPolicy::kPhotoAndGeo;
   ByteCharge caller_inputs;
   ByteCharge frozen_inputs;
   ByteCharge host_outputs;
@@ -55,6 +61,9 @@ struct FixedCohortBudgetPeaks {
 };
 
 inline void ValidateFixedCohortJobShape(const FixedCohortBudget& budget) {
+  if (budget.output_policy != FixedCohortOutputPolicy::kPhotoAndGeo &&
+      budget.output_policy != FixedCohortOutputPolicy::kFinalGeoOnly)
+    throw std::invalid_argument("invalid fixed-cohort output policy");
   if (!budget.max_active_owners || budget.max_active_owners > 2 ||
       budget.photo_private.empty() ||
       budget.geo_private.size() != budget.photo_private.size() ||

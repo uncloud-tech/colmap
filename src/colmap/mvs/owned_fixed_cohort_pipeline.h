@@ -29,7 +29,10 @@ struct FixedCohortResult {
     DepthMap depth;
     NormalMap normal;
   };
-  // Order is the caller's reference order, NOT image-index or worker order.
+  FixedCohortOutputPolicy output_policy = FixedCohortOutputPolicy::kPhotoAndGeo;
+  // GEO always has N maps in caller reference order, NOT image/worker order.
+  // PHOTO has N maps by default; kFinalGeoOnly returns zero PHOTO entries,
+  // explicitly omitted, NOT N empty valid maps. Consumers must check policy.
   std::vector<Maps> photo;
   std::vector<Maps> geo;
   static constexpr const char* qualification =
@@ -57,7 +60,9 @@ struct FixedCohortResult {
 //
 // dispatch selects 1 (serial) or 2 (pair) active owners and must match
 // budget.max_active_owners. Every per-job budget vector matches references.
-// Returned maps are HOST copies from both phases and are charged explicitly.
+// Returned maps are HOST copies selected by budget.output_policy and charged
+// explicitly. kFinalGeoOnly skips both PHOTO host getters, not device snapshots;
+// final GEO outputs and all device snapshot lifetimes remain unchanged.
 // The caller owns resource-bound provenance and real external resource limits;
 // lower-bound checks and RAM/cgroup/GPU-free observations do not certify fit.
 // budget.already_live_process supplies separately justified classified storage

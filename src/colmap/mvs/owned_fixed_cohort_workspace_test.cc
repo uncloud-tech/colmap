@@ -113,6 +113,31 @@ TEST_F(FixedCohortWorkspaceTest, NativePixelsCalibrationAndOrdinalIdentity) {
   }
 }
 
+TEST_F(FixedCohortWorkspaceTest, OutputPolicyBindsShapeCapsAndFrozenInvocation) {
+  EXPECT_EQ(budget.output_policy, FixedCohortOutputPolicy::kPhotoAndGeo);
+  auto retained = Prepare();
+  budget.host_outputs.host = 9600;  // 600 reference pixels * 16 bytes, GEO only.
+  EXPECT_THROW(Prepare(), std::invalid_argument);  // default still needs 32a
+  budget.output_policy = FixedCohortOutputPolicy::kFinalGeoOnly;
+  auto final = Prepare();
+  EXPECT_EQ(final.OutputPolicy(), FixedCohortOutputPolicy::kFinalGeoOnly);
+  EXPECT_EQ(retained.OutputPolicy(), FixedCohortOutputPolicy::kPhotoAndGeo);
+  const auto admitted = AdmitFixedCohortBudget(budget, {1000000000, 1000000000});
+  EXPECT_NO_THROW(AdmitFixedCohortBudget(budget, admitted));
+  EXPECT_THROW(AdmitFixedCohortBudget(budget, {admitted.host - 1, admitted.device}),
+               std::invalid_argument);
+  --budget.host_outputs.host;
+  EXPECT_THROW(Prepare(), std::invalid_argument);
+  budget.host_outputs.host = 9600;
+  --budget.snapshots.device;  // no snapshot credit under either policy
+  EXPECT_THROW(Prepare(), std::invalid_argument);
+  ++budget.snapshots.device;
+  budget.output_policy = static_cast<FixedCohortOutputPolicy>(99);
+  EXPECT_THROW(Prepare(), std::invalid_argument);
+  // Caller mutation cannot change a previously prepared invocation.
+  EXPECT_EQ(final.OutputPolicy(), FixedCohortOutputPolicy::kFinalGeoOnly);
+}
+
 TEST_F(FixedCohortWorkspaceTest, ResizingUsesNativeGrayscaleAndCalibration) {
   auto prepared = Prepare(10);
   Workspace::Options options;

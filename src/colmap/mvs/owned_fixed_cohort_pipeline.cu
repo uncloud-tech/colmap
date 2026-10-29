@@ -80,7 +80,9 @@ FixedCohortResult RunFixedCohortPhotoGeo(
   for (const auto& image : images)
     caller_bytes = CheckedAdd(caller_bytes, image.GetBitmap().NumBytes());
   FixedCohortResult result;
-  result.photo.resize(references.size());
+  result.output_policy = budget.output_policy;
+  if (budget.output_policy == FixedCohortOutputPolicy::kPhotoAndGeo)
+    result.photo.resize(references.size());
   result.geo.resize(references.size());
   result.actual_geo_staging_bytes.resize(references.size());
   result.before_copy_available = ObserveAvailable(device);
@@ -168,9 +170,11 @@ FixedCohortResult RunFixedCohortPhotoGeo(
         check();
         coordinator.SolverDone(owner);
         coordinator.BeginOutput(owner);
-        auto& maps = geo ? result.geo[owner] : result.photo[owner];
-        maps.depth = solver.GetDepthMap();
-        maps.normal = solver.GetNormalMap();
+        if (geo || budget.output_policy == FixedCohortOutputPolicy::kPhotoAndGeo) {
+          auto& maps = geo ? result.geo[owner] : result.photo[owner];
+          maps.depth = solver.GetDepthMap();
+          maps.normal = solver.GetNormalMap();
+        }
         if (!geo) snapshots[owner] = solver.SnapshotPhotoOutput();
         check();
         coordinator.EndOutput(owner);

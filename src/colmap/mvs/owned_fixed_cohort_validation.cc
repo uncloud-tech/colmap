@@ -231,8 +231,10 @@ void ValidateFixedCohortShape(const std::vector<Image>& images,
                    geo ? budget.geo_private[i] : budget.photo_private[i]);
     }
   }
+  const uint64_t host_phases =
+      budget.output_policy == FixedCohortOutputPolicy::kPhotoAndGeo ? 2 : 1;
   Require(budget.snapshots.device >= maps &&
-              budget.host_outputs.host >= CheckedMultiply(2, maps),
+              budget.host_outputs.host >= CheckedMultiply(host_phases, maps),
           "fixed-cohort snapshot/output bound below logical maps");
 }
 void ValidateFixedCohortPixels(const std::vector<Image>& images,
