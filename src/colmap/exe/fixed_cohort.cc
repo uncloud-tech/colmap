@@ -10,6 +10,7 @@
 #include "colmap/util/misc.h"
 #include "colmap/util/string.h"
 
+#include <charconv>
 #include <chrono>
 #include <filesystem>
 #include <iostream>
@@ -88,24 +89,35 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
     options.AddDefaultOption(
         "output_policy", &output_policy, "final_geo_only or photo_and_geo");
     options.AddRequiredOption("deadline_seconds", &deadline_seconds);
-    options.AddRequiredOption("host_capacity_bytes", &capacity.host);
-    options.AddRequiredOption("device_capacity_bytes", &capacity.device);
-    options.AddRequiredOption("loader_scratch_host_bytes",
-                              &loader_scratch_host);
-    options.AddRequiredOption("process_host_bytes", &declarations.process.host);
-    options.AddRequiredOption("process_device_bytes",
-                              &declarations.process.device);
-    options.AddRequiredOption("unknown_host_bytes", &declarations.unknown.host);
-    options.AddRequiredOption("unknown_device_bytes",
-                              &declarations.unknown.device);
+    // OptionManager supports strings, but not uint64_t. Parse byte quantities
+    // losslessly after its normal required-option handling.
+    std::map<std::string, std::pair<std::string, uint64_t*>> byte_options;
+    const auto add_bytes = [&](const std::string& name, uint64_t* target) {
+      auto& value = byte_options[name];
+      value.second = target;
+      options.AddRequiredOption(name, &value.first);
+    };
+    add_bytes("host_capacity_bytes", &capacity.host);
+    add_bytes("device_capacity_bytes", &capacity.device);
+    add_bytes("loader_scratch_host_bytes", &loader_scratch_host);
+    add_bytes("process_host_bytes", &declarations.process.host);
+    add_bytes("process_device_bytes", &declarations.process.device);
+    add_bytes("unknown_host_bytes", &declarations.unknown.host);
+    add_bytes("unknown_device_bytes", &declarations.unknown.device);
     options.AddRequiredOption("unknown_provenance",
                               &declarations.unknown_provenance);
-    options.AddRequiredOption("reserve_host_bytes",
-                              &declarations.headroom_reserve.host);
-    options.AddRequiredOption("reserve_device_bytes",
-                              &declarations.headroom_reserve.device);
+    add_bytes("reserve_host_bytes", &declarations.headroom_reserve.host);
+    add_bytes("reserve_device_bytes", &declarations.headroom_reserve.device);
     options.AddPatchMatchStereoOptions();
     if (!options.Parse(argc, argv)) return EXIT_FAILURE;
+    for (const auto& [name, value] : byte_options) {
+      const auto* begin = value.first.data();
+      const auto* end = begin + value.first.size();
+      const auto parsed = std::from_chars(begin, end, *value.second);
+      if (parsed.ec != std::errc{} || parsed.ptr != end) {
+        throw std::invalid_argument("invalid unsigned byte quantity: " + name);
+      }
+    }
     Require(active_owners == 1 || active_owners == 2,
             "active_owners must be 1 or 2");
     Require(deadline_seconds > 0, "positive finite deadline_seconds required");

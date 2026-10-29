@@ -110,6 +110,23 @@ class FixedCohortCommandTest(unittest.TestCase):
         self.config.write_text('../a.pgm\nc.pgm\n')
         self.refuse('unsafe image name')
 
+    def test_byte_options_are_lossless_unsigned_integers(self):
+        index = self.args.index('--host_capacity_bytes') + 1
+        for value in ('-1', '18446744073709551616', '1.5', '123x'):
+            with self.subTest(value=value):
+                args = self.args.copy()
+                args[index] = value
+                result = self.invoke(args)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('invalid unsigned byte quantity',
+                              result.stdout + result.stderr)
+                self.assertFalse(self.output.exists())
+        args = self.args.copy()
+        args[index] = str(1 << 34)
+        result = self.invoke(args)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.output.exists())
+
     def test_cap_refusal(self):
         self.args[self.args.index('--host_capacity_bytes') + 1] = '1'
         self.refuse('exceeds capacity')
