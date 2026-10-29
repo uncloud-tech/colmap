@@ -57,11 +57,15 @@ struct FixedCohortResult {
 // Returned maps are HOST copies from both phases and are charged explicitly.
 // The caller owns resource-bound provenance and real external resource limits;
 // lower-bound checks and RAM/cgroup/GPU-free observations do not certify fit.
-// Canonical production forecast delivery is not implemented by this
-// experimental entry. One finite original deadline covers setup, both phases,
-// drain and joins (existing fail-closed NativeRunDeadlineGuard semantics).
-// Cancellation throws, never returns partial results; optional sweep-boundary
-// checks may synchronize graph execution.
+// budget.already_live_process supplies separately justified classified storage
+// actually resident at EACH observation (before copy / before GEO). It stays
+// included in the full reservation/caps but is not charged twice against free.
+// Exclude pixels/maps/snapshots and unknown overhead; default zero is
+// conservative. Canonical production forecast delivery is not implemented by
+// this experimental entry. One finite original deadline covers setup, both
+// phases, drain and joins (existing fail-closed NativeRunDeadlineGuard
+// semantics). Cancellation throws, never returns partial results; optional
+// sweep-boundary checks may synchronize graph execution.
 FixedCohortResult RunFixedCohortPhotoGeo(
     const std::vector<Image>& images,
     const std::array<FixedCohortReference, 2>& references,

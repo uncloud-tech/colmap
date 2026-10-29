@@ -278,10 +278,8 @@ FixedCohortResult RunFixedCohortPhotoGeo(
     caller_bytes = CheckedAdd(caller_bytes, image.GetBitmap().NumBytes());
   FixedCohortResult result;
   result.before_copy_available = ObserveAvailable(device);
-  CheckFixedCohortHeadroom(reserved,
-                           result.before_copy_available,
-                           {caller_bytes, 0},
-                           budget.headroom_reserve);
+  CheckFixedCohortPhaseHeadroom(
+      budget, false, result.before_copy_available, {caller_bytes, 0});
   check();
   // One immutable invocation copy, shared read-only by private solver owners.
   auto frozen = images;
@@ -295,13 +293,11 @@ FixedCohortResult RunFixedCohortPhotoGeo(
         live_host = CheckedAdd(
             live_host,
             CheckedAdd(maps.depth.GetNumBytes(), maps.normal.GetNumBytes()));
-      const auto geo_peak = FixedCohortPeaks(budget).geo;
       result.before_geo_available = ObserveAvailable(device);
-      CheckFixedCohortHeadroom(
-          {MarginBytes(geo_peak.host), MarginBytes(geo_peak.device)},
-          result.before_geo_available,
-          {live_host, result.actual_snapshot_bytes},
-          budget.headroom_reserve);
+      CheckFixedCohortPhaseHeadroom(budget,
+                                    true,
+                                    result.before_geo_available,
+                                    {live_host, result.actual_snapshot_bytes});
     }
     const auto& charges = geo ? budget.geo_private : budget.photo_private;
     // Retain the entire once-margined peak, even in the smaller phase. No

@@ -24,6 +24,13 @@ struct FixedCohortBudget {
   ByteCharge host_outputs;
   ByteCharge snapshots;
   ByteCharge process;
+  // Actual classified process bytes already resident at each observation
+  // [before copy, before GEO], INCLUDED in process, not another charge.
+  // Each declaration needs independent provenance and must exclude caller
+  // pixels/maps/snapshots and unknown overhead. Do not carry a PHOTO-only
+  // allocation into GEO after destruction. Zero means no measured credit.
+  std::array<ByteCharge, 2> already_live_process{};
+  std::array<std::string, 2> already_live_process_provenance{};
   // Explicit unclassified physical overhead (pitch/array/context/allocator and
   // metadata). Must be justified independently, never free-minus-known filler.
   ByteCharge unknown;
@@ -64,10 +71,24 @@ inline FixedCohortBudgetPeaks FixedCohortPeaks(
           {std::max(photo.host, geo.host), std::max(photo.device, geo.device)}};
 }
 
+inline void ValidateFixedCohortLiveProcess(const FixedCohortBudget& budget) {
+  for (size_t i = 0; i < 2; ++i) {
+    const auto live = budget.already_live_process[i];
+    if (live.host > budget.process.host ||
+        live.device > budget.process.device ||
+        ((live.host || live.device) &&
+         budget.already_live_process_provenance[i].empty()))
+      throw std::invalid_argument(
+          "fixed-cohort live process exceeds classified bound or lacks "
+          "provenance");
+  }
+}
+
 // Shape/cap gate only. The native entry additionally validates invocation
 // lower bounds and actual snapshot pitches. No physical-fit certification.
 inline ByteCharge AdmitFixedCohortBudget(const FixedCohortBudget& budget,
                                          ByteCharge capacity) {
+  ValidateFixedCohortLiveProcess(budget);
   const auto peak = FixedCohortPeaks(budget).peak;
   const ByteCharge admitted{MarginBytes(peak.host), MarginBytes(peak.device)};
   if ((!budget.unknown.host && !budget.unknown.device) ||
@@ -112,6 +133,41 @@ inline void CheckFixedCohortHeadroom(ByteCharge demand,
             reserve.device))
     throw std::invalid_argument(
         "fixed-cohort observed remaining headroom insufficient");
+}
+
+// Shared public admission seam for the real runner's two observations.
+// known_live_payload contains only actual pixels/returned maps/snapshots, never
+// process allocations. Reservation and cap admission remain independent.
+inline void CheckFixedCohortPhaseHeadroom(const FixedCohortBudget& budget,
+                                          bool geo,
+                                          ByteCharge observed_free,
+                                          ByteCharge known_live_payload) {
+  ValidateFixedCohortLiveProcess(budget);
+  const auto peaks = FixedCohortPeaks(budget);
+  // Snapshot pitch deltas may consume the original aggregate GEO margin;
+  // CheckFixedCohortPhysicalCopies independently checks simultaneous deltas.
+  const auto snapshot_bound =
+      CheckedAdd(budget.snapshots.device,
+                 MarginBytes(peaks.geo.device) - peaks.geo.device);
+  const ByteCharge payload_bound{
+      geo ? CheckedAdd(CheckedAdd(budget.caller_inputs.host,
+                                  budget.frozen_inputs.host),
+                       budget.host_outputs.host)
+          : budget.caller_inputs.host,
+      geo ? snapshot_bound : 0};
+  if (!PairCoordinator::Fits(known_live_payload, payload_bound))
+    throw std::invalid_argument(
+        "fixed-cohort live payload exceeds classified bound");
+  const auto process = budget.already_live_process[geo];
+  const ByteCharge already_live{
+      CheckedAdd(known_live_payload.host, process.host),
+      CheckedAdd(known_live_payload.device, process.device)};
+  const auto demand = geo ? peaks.geo : peaks.peak;
+  CheckFixedCohortHeadroom(
+      {MarginBytes(demand.host), MarginBytes(demand.device)},
+      observed_free,
+      already_live,
+      budget.headroom_reserve);
 }
 
 inline void CheckFixedCohortPhysicalCopies(

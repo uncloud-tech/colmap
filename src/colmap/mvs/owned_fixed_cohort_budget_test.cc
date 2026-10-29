@@ -49,6 +49,9 @@ int main() {
   // PHOTO raw device peak 422 -> original once-margined 435; GEO 502 ->
   // 518. A 13-byte snapshot discrepancy fits BOTH phases, without remargin.
   CheckFixedCohortPhysicalCopies(budget, 313, {{1, 1}});
+  // Simultaneous snapshot +13 and staging +3 exactly consume GEO's
+  // original 16-byte margin; serialized staging extras are not summed.
+  CheckFixedCohortPhysicalCopies(budget, 313, {{4, 4}});
   bool pitch_refused = false;
   try {
     CheckFixedCohortPhysicalCopies(budget, 314, {{1, 1}});
@@ -72,6 +75,75 @@ int main() {
     live_refused = true;
   }
   assert(live_refused);
+  // Public admission seam shared by both native phase observations. Raw host
+  // demand is 1000: 500 classified live process + 100 caller + 400 other.
+  auto live = budget;
+  live.process.host = 500;
+  live.frozen_inputs.host = 100;
+  live.host_outputs.host = 100;
+  live.unknown.host = 100;
+  live.photo_private[0].host = live.geo_private[0].host = 50;
+  live.photo_private[1].host = live.geo_private[1].host = 50;
+  live.already_live_process = {{{500, 10}, {500, 5}}};
+  live.already_live_process_provenance = {
+      {"fixture classified allocations live before copy",
+       "fixture classified allocations still live before GEO"}};
+  for (const bool geo : {false, true}) {
+    assert(AdmitFixedCohortBudget(live, {1030, 1000}).host == 1030);
+    CheckFixedCohortPhaseHeadroom(live, geo, {450, 1000}, {100, 0});
+    CheckFixedCohortPhaseHeadroom(live, geo, {430, 1000}, {100, 0});
+    const auto refuses =
+        [&](const FixedCohortBudget& b, ByteCharge free, ByteCharge payload) {
+          bool rejected = false;
+          try {
+            CheckFixedCohortPhaseHeadroom(b, geo, free, payload);
+          } catch (const std::invalid_argument&) {
+            rejected = true;
+          }
+          assert(rejected);
+        };
+    refuses(live, {429, 1000}, {100, 0});
+    // Device process credit is phase-specific, not carried over from PHOTO.
+    // Before copy keeps the full peak reservation (518), not PHOTO's 435.
+    const uint64_t remaining_device = geo ? 513 : 508;
+    CheckFixedCohortPhaseHeadroom(live, geo, {430, remaining_device}, {100, 0});
+    refuses(live, {430, remaining_device - 1}, {100, 0});
+    auto incremental_process = live;
+    incremental_process.already_live_process[geo].host = 400;
+    refuses(incremental_process, {450, 1000}, {100, 0});
+    auto malformed = live;
+    malformed.already_live_process[geo].host = 501;
+    refuses(malformed, {1000, 1000}, {100, 0});
+    bool invalid_admission = false;
+    try {
+      (void)AdmitFixedCohortBudget(malformed, {1000, 1000});
+    } catch (const std::invalid_argument&) {
+      invalid_admission = true;
+    }
+    assert(invalid_admission);
+    malformed = live;
+    malformed.already_live_process[geo].device = 21;
+    refuses(malformed, {1000, 1000}, {100, 0});
+    malformed = live;
+    malformed.already_live_process_provenance[geo].clear();
+    refuses(malformed, {1000, 1000}, {100, 0});
+    // Process cannot be included a second time as caller/map payload.
+    refuses(live, {1000, 1000}, {600, 0});
+  }
+  // Actual snapshots can exceed their raw item bound inside the original
+  // aggregate margin; the shared observation seam must not reimpose it.
+  CheckFixedCohortPhaseHeadroom(live, true, {430, 200}, {100, 313});
+  // No live-process declaration means no process deduction, even if free
+  // would otherwise suggest that some unknown overhead is already resident.
+  auto unmeasured = live;
+  unmeasured.already_live_process = {};
+  bool unmeasured_refused = false;
+  try {
+    CheckFixedCohortPhaseHeadroom(unmeasured, false, {450, 1000}, {100, 0});
+  } catch (const std::invalid_argument&) {
+    unmeasured_refused = true;
+  }
+  assert(unmeasured_refused);
   auto device_unknown_only = budget;
   device_unknown_only.unknown.host = 0;
   (void)AdmitFixedCohortBudget(device_unknown_only, {1000, 1000});
