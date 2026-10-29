@@ -31,6 +31,30 @@
 
 namespace colmap {
 namespace {
+TEST(ReconstructionInfo, RejectsArgumentsWithoutProducingIdentity) {
+  char name[] = "reconstruction_info";
+  char option[] = "--source-root";
+  char* argv[] = {name, option};
+  EXPECT_NE(RunReconstructionInfo(2, argv), EXIT_SUCCESS);
+}
+
+TEST(ReconstructionInfo, ReportsSameBuildWithoutWorkspace) {
+  char name[] = "reconstruction_info";
+  char* argv[] = {name};
+  testing::internal::CaptureStdout();
+  const int status = RunReconstructionInfo(1, argv);
+  const auto output = testing::internal::GetCapturedStdout();
+#if defined(COLMAP_MVS_ENABLED)
+  EXPECT_EQ(status, EXIT_SUCCESS);
+  EXPECT_NE(output.find("\"source_commit\":\""), std::string::npos);
+  EXPECT_NE(output.find("\"allocation_fingerprint\":\""), std::string::npos);
+  EXPECT_NE(output.find("\"fingerprint\":\""), std::string::npos);
+#else
+  EXPECT_NE(status, EXIT_SUCCESS);
+  EXPECT_TRUE(output.empty());
+#endif
+}
+
 int RunDensePlanCommand(std::vector<std::string> args) {
   args.insert(args.begin(), "colmap");
   std::vector<char*> argv;

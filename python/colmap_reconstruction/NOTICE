@@ -1,0 +1,15 @@
+COLMAP reconstruction frontend and resource adapters
+
+Distributed under the repository's BSD-3-Clause license (see LICENSE).
+
+Canonical project-authored resource arithmetic, PHOTO producer/wire and resident
+contract parser/serializer were selectively migrated from revision
+0b84800e787bea4823ea161a4131512e6ed364d6. Their authored history credits Bu5hm4nn,
+colmap-parent, photogram-coordinator and photogram. No third-party implementation
+or separate third-party license notice was present in the extracted modules.
+Native stage sequencing and original-source-token preservation follow the
+project frontend at ff989301b774b71cfe0646eaffd52d843c934b85.
+
+The extraction excludes provider APIs, rental/lifecycle scripts, machine-specific
+runtime/qualification catalogs, private benchmark records and source discovery.
+Arithmetic is engineering estimation, not physical memory or quality assurance.

@@ -359,3 +359,10 @@ bitmap.write("output.jpg")
 # Rescale bitmap
 bitmap.rescale(new_width=320, new_height=240)
 ```
+
+## Experimental reconstruction command
+
+The native CMake install also provides a stdlib-only `colmap-reconstruct`
+command without building pycolmap. See [setup, supported backend and resource
+limits](../doc/reconstruction-cli.md). The wheel's optional console entry still
+requires a matching installed native COLMAP executable.

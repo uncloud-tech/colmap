@@ -11,6 +11,11 @@
 #include <fstream>
 #include <iostream>
 
+#if defined(COLMAP_MVS_ENABLED)
+#include "colmap/mvs/generated/photo_phase_fingerprint.h"
+#include "colmap/mvs/generated/resident_allocation_fingerprint.h"
+#endif
+
 #if defined(COLMAP_CUDA_ENABLED) && defined(COLMAP_MVS_ENABLED) &&      \
     defined(COLMAP_DOWNLOAD_ENABLED) && !defined(COLMAP_HIP_ENABLED) && \
     defined(__linux__)
@@ -26,6 +31,36 @@
 #endif
 
 namespace colmap {
+int RunReconstructionInfo(int argc, char**) {
+  if (argc != 1) {
+    std::cerr << "reconstruction_info accepts no arguments\n";
+    return EXIT_FAILURE;
+  }
+#if defined(COLMAP_MVS_ENABLED)
+#if defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
+  constexpr bool cuda = true;
+#else
+  constexpr bool cuda = false;
+#endif
+  using dense_plan::Json;
+  std::cout
+      << Json::Object(
+             {{"schema_version", Json(1)},
+              {"cuda_compiled", Json(cuda)},
+              {"source_commit",
+               Json(std::string(mvs::kPhotoPhaseV1SourceCommit))},
+              {"lineage_sha", Json(std::string(mvs::kPhotoPhaseV1Lineage))},
+              {"fingerprint", Json(std::string(mvs::kPhotoPhaseV1Fingerprint))},
+              {"allocation_fingerprint",
+               Json(std::string(mvs::kResidentAllocationFingerprint))}})
+             .Dump()
+      << '\n';
+  return EXIT_SUCCESS;
+#else
+  std::cerr << "reconstruction requires MVS support\n";
+  return EXIT_FAILURE;
+#endif
+}
 namespace {
 using dense_plan::Json;
 namespace fs = std::filesystem;
