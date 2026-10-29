@@ -286,6 +286,8 @@ if(CUDA_ENABLED)
             owned_cuda_execution.h
             owned_photo_output.h owned_photo_output_state.h
             owned_geo_photo_input.h owned_geo_photo_input.cu
+            owned_fixed_cohort_budget.h
+            owned_fixed_cohort_pipeline.h owned_fixed_cohort_pipeline.cu
             owned_rotation_storage.h
             owned_selection_scratch.h
             owned_tile.h
@@ -333,6 +335,12 @@ if(CUDA_ENABLED)
     COLMAP_ADD_TEST(
         NAME owned_input_bank_cuda_test
         SRCS owned_input_bank_test.cu
+        LINK_LIBS colmap_mvs_cuda
+    )
+
+    COLMAP_ADD_TEST(
+        NAME owned_fixed_cohort_pipeline_test
+        SRCS owned_fixed_cohort_pipeline_test.cu
         LINK_LIBS colmap_mvs_cuda
     )
 
@@ -583,6 +591,15 @@ endif()
 
 # Dependency-free topology/argument packing regression, including CUDA-off builds.
 if(TESTS_ENABLED)
+    add_executable(owned_fixed_cohort_budget_test owned_fixed_cohort_budget_test.cc)
+    target_include_directories(owned_fixed_cohort_budget_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+    target_compile_features(owned_fixed_cohort_budget_test PRIVATE cxx_std_17)
+    target_link_libraries(owned_fixed_cohort_budget_test PRIVATE Threads::Threads)
+    target_compile_options(owned_fixed_cohort_budget_test PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-UNDEBUG>
+        $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>)
+    add_test(NAME mvs/owned_fixed_cohort_budget_test COMMAND owned_fixed_cohort_budget_test)
+
     add_executable(owned_photo_output_cpu_test owned_photo_output_test.cc)
     target_include_directories(owned_photo_output_cpu_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
     target_compile_features(owned_photo_output_cpu_test PRIVATE cxx_std_17)

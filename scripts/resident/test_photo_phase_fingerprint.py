@@ -25,6 +25,13 @@ class PhotoFingerprintTest(unittest.TestCase):
             "src/colmap/mvs/owned_photo_output_state.h",
             "src/colmap/mvs/owned_geo_photo_input.h",
             "src/colmap/mvs/owned_geo_photo_input.cu",
+            "src/colmap/mvs/owned_fixed_cohort_budget.h",
+            "src/colmap/mvs/owned_fixed_cohort_pipeline.h",
+            "src/colmap/mvs/owned_fixed_cohort_pipeline.cu",
+            "src/colmap/mvs/owned_pair_run.h",
+            "src/colmap/mvs/native_run_deadline.h",
+            "src/colmap/mvs/owned_rotation_memory.h",
+            "src/colmap/mvs/owned_resident_minima.h",
             "src/colmap/mvs/owned_input_bank.cc",
             "src/colmap/mvs/owned_input_bank.cu",
             "src/colmap/mvs/owned_cuda_execution.h",
@@ -96,7 +103,7 @@ class PhotoFingerprintTest(unittest.TestCase):
             self.assertIn(
                 hashlib.sha256(encoded).hexdigest(), output.read_text()
             )
-            self.assertEqual(len(generator.CLOSURE), 32)
+            self.assertEqual(len(generator.CLOSURE), 39)
             self.assertIn(
                 f'kPhotoPhaseV1SourceCommit[] = "{lineage}"', output.read_text()
             )
@@ -126,7 +133,9 @@ class PhotoFingerprintTest(unittest.TestCase):
             original = output.read_text()
             for new_header in (
                 "owned_photo_output.h", "owned_photo_output_state.h",
-                "owned_geo_photo_input.h", "owned_geo_photo_input.cu"
+                "owned_geo_photo_input.h", "owned_geo_photo_input.cu",
+                "owned_fixed_cohort_budget.h", "owned_fixed_cohort_pipeline.h",
+                "owned_fixed_cohort_pipeline.cu",
             ):
                 added = root / "src/colmap/mvs" / new_header
                 added.write_bytes(b"dirty snapshot allocation\n")
