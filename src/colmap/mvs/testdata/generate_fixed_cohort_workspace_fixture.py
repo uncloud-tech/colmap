@@ -53,7 +53,7 @@ def synthetic_spec():
     names = [f'plane{i}.png' for i in range(4)]
     refs = []
     for i, ref in enumerate(ids):
-        sources = [names[ids[(i+j) % 4]] for j in (1, 2, 3)]
+        sources = [names[ids[(i+j) % 4]] for j in (1, 2, 3, 1)]
         refs.append(dict(reference=names[ref], photo_sources=sources,
                          geo_sources=sources,
                          photo_options=asdict(photo),

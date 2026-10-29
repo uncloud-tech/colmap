@@ -275,6 +275,13 @@ class WorkspaceFixtureBindingTest(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         tool = runpy.run_path(str(root / 'src/colmap/mvs/testdata/generate_fixed_cohort_workspace_fixture.py'))
         spec = tool['synthetic_spec']()
+        for reference in spec['references']:
+            for phase in ('photo_sources', 'geo_sources'):
+                sources = reference[phase]
+                self.assertEqual(len(sources), 4)
+                self.assertEqual(len(set(sources)), 3)
+                self.assertEqual(sources[0], sources[3])
+                self.assertNotIn(reference['reference'], sources)
         header = tool['emit_header'](spec, root)
         self.assertIn('MakeWorkspaceFixture', header)
         self.assertIn('b.max_active_owners = 1', header)
@@ -283,7 +290,7 @@ class WorkspaceFixtureBindingTest(unittest.TestCase):
         self.assertIn('b.caller_inputs = {12288ULL,0ULL}', header)
         self.assertIn('b.host_outputs = {393216ULL,0ULL}', header)
         self.assertIn('b.snapshots = {0ULL,196608ULL}', header)
-        self.assertIn('b.geo_staging_device = {36864ULL,36864ULL,36864ULL,36864ULL}', header)
+        self.assertIn('b.geo_staging_device = {49152ULL,49152ULL,49152ULL,49152ULL}', header)
         self.assertIn('r.photo_options.random_seed = 0;', header)
         self.assertIn('r.geo_options.filter = true;', header)
         # External requests must freeze all options, not silently use defaults.
