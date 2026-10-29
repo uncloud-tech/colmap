@@ -2,6 +2,7 @@
 #include "colmap/mvs/owned_geo_photo_input.h"
 
 #if !defined(COLMAP_HIP_ENABLED)
+#include "colmap/mvs/optimized_photo_options.h"
 #include "colmap/mvs/owned_pair_validation.h"
 
 #include <algorithm>
@@ -39,6 +40,12 @@ void GeoPhotoInput::Validate(const PatchMatchOptions& options,
           problem.photo_grayscale.layers.empty() && !problem.depth_maps &&
           !problem.normal_maps && !sources_.empty() &&
           sources_.size() == problem.src_image_idxs.size());
+  // Compare the complete intended GEO configuration, not the PHOTO producer's
+  // options. Reuse the exhaustive bit-exact option wire (no struct padding).
+  // This adapter has no workspace/config paths: supply the same neutral path
+  // to both encodings in this call so only options participate in equality.
+  Require(OptimizedPhotoOptions(geo_options_, ".", ".") ==
+          OptimizedPhotoOptions(options, ".", "."));
   // The owned solver supports one explicit device, not an automatic/multi-GPU
   // list. Validate without changing context or allocating on an unknown GPU.
   size_t consumed = 0;
@@ -55,7 +62,8 @@ GeoPhotoInput::GeoPhotoInput(const PatchMatchOptions& options,
                              const PatchMatch::Problem& problem,
                              Snapshot reference,
                              std::vector<Snapshot> ordered_sources)
-    : reference_(std::move(reference)),
+    : geo_options_(options),
+      reference_(std::move(reference)),
       sources_(std::move(ordered_sources)),
       device_(reference_ ? reference_->DeviceIndex() : -1) {
   Validate(options, problem);  // ALL binding refusals before GPU allocations

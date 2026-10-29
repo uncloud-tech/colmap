@@ -189,10 +189,42 @@ TEST(GeoPhotoInput, FreshCrossOwnerMapsMatchPrivateGeoAndDrainOnCancellation) {
                  std::invalid_argument);
     auto wrong_options = options;
     wrong_options.geom_consistency = false;
-    EXPECT_THROW(input->Validate(wrong_options, geo), std::invalid_argument);
+    EXPECT_THROW((PatchMatchCuda(wrong_options, geo, 32, input)),
+                 std::invalid_argument);
     wrong_options = options;
     wrong_options.gpu_index = std::to_string(device + 1);
-    EXPECT_THROW(input->Validate(wrong_options, geo), std::invalid_argument);
+    EXPECT_THROW((PatchMatchCuda(wrong_options, geo, 32, input)),
+                 std::invalid_argument);
+
+    // Bind the intended GEO invocation, not the earlier PHOTO settings (which
+    // deliberately differed in geom_consistency/filter). Refuse changes through
+    // the real consumer constructor, before it allocates any GPU resources.
+    for (const auto field : {&PatchMatchOptions::depth_min,
+                             &PatchMatchOptions::depth_max,
+                             &PatchMatchOptions::sigma_spatial,
+                             &PatchMatchOptions::geom_consistency_regularizer,
+                             &PatchMatchOptions::filter_min_ncc}) {
+      auto changed = options;
+      changed.*field += 0.25;
+      EXPECT_THROW((PatchMatchCuda(changed, geo, 32, input)),
+                   std::invalid_argument);
+    }
+    for (const auto field : {&PatchMatchOptions::random_seed,
+                             &PatchMatchOptions::num_iterations,
+                             &PatchMatchOptions::filter_min_num_consistent}) {
+      auto changed = options;
+      ++(changed.*field);
+      EXPECT_THROW((PatchMatchCuda(changed, geo, 32, input)),
+                   std::invalid_argument);
+    }
+    wrong_options = options;
+    wrong_options.filter = false;
+    EXPECT_THROW((PatchMatchCuda(wrong_options, geo, 32, input)),
+                 std::invalid_argument);
+    wrong_options = options;
+    wrong_options.owned_cuda_graphs = !options.owned_cuda_graphs;
+    EXPECT_THROW((PatchMatchCuda(wrong_options, geo, 32, input)),
+                 std::invalid_argument);
 
     auto consumer = std::make_unique<PatchMatchCuda>(options, geo, 32, input);
     // Check initialization before filtering can hide a failed handoff behind
@@ -206,6 +238,18 @@ TEST(GeoPhotoInput, FreshCrossOwnerMapsMatchPrivateGeoAndDrainOnCancellation) {
     sources.clear();
     wrong.clear();
     input.reset();
+    consumer->Run();
+    ExpectBits(control.GetDepthMap().GetData(),
+               consumer->GetDepthMap().GetData());
+    ExpectBits(control.GetNormalMap().GetData(),
+               consumer->GetNormalMap().GetData());
+    ExpectBits(control.GetSelProbMap().GetData(),
+               consumer->GetSelProbMap().GetData());
+    EXPECT_EQ(control.GetConsistentImageIdxs(),
+              consumer->GetConsistentImageIdxs());
+    // Rerun both actual consumers: mutable solver buffers must not leak back
+    // into the retained PHOTO snapshot or change the adapter's next Run().
+    control.Run();
     consumer->Run();
     ExpectBits(control.GetDepthMap().GetData(),
                consumer->GetDepthMap().GetData());

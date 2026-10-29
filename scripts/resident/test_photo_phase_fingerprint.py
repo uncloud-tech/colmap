@@ -40,6 +40,7 @@ class PhotoFingerprintTest(unittest.TestCase):
             "src/colmap/mvs/patch_match.cc",
             "src/colmap/mvs/patch_match_cuda_owned.h",
             "src/colmap/mvs/patch_match_options.h",
+            "src/colmap/mvs/optimized_photo_options.h",
         }
         self.assertTrue(required <= set(generator.CLOSURE))
         resident_spec = importlib.util.spec_from_file_location(

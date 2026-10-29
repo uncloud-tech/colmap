@@ -13,9 +13,11 @@ namespace colmap::mvs::owned {
 // ordered source depths -> zero-padded pitched staging -> private depth
 // texture; reference depth/normal -> the consumer's existing mutable solver
 // buffers. No host/disk map round trip, no sharing/admission credit, no default
-// dispatch. Caller keeps images/pixels/options frozen from PHOTO construction
-// through GEO completion; camera metadata validation is NOT a pixel/content
-// hash. Source ordinals, including duplicates, are copied verbatim, never
+// dispatch. Caller keeps images/pixels frozen from PHOTO construction through
+// GEO completion; camera metadata validation is NOT a pixel/content hash.
+// GEO options are bound at adapter construction, separately from the producer's
+// PHOTO options (e.g. geometry/filtering may deliberately differ by phase).
+// Source ordinals, including duplicates, are copied verbatim, never
 // sorted/deduplicated.
 class GeoPhotoInput {
  public:
@@ -56,6 +58,7 @@ class GeoPhotoInput {
   // (their actual pitches are those of the supplied GpuMats), not extra owners.
 
  private:
+  const PatchMatchOptions geo_options_;
   const Snapshot reference_;
   const std::vector<Snapshot> sources_;
   const int device_;
