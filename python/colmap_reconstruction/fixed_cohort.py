@@ -10,8 +10,11 @@ aggregate 3% margin; this producer does not apply any item margins.
 Only loaded grayscale shape metadata is evaluated: no file-map identities,
 pixel allocations, GPU queries, source sorting or execution. Source content is
 bound with the existing resident allocation closure/algorithm, not a new digest
-scheme. The pin below is base42 inventory compatibility, pending independent
-review, NOT inherited current-phase-v1/optimized-PHOTO qualification.
+scheme. The pin includes the workspace adapter/shared-validation extraction from the
+base42 inventory (allocation-equivalent native runner), pending independent
+review, NOT inherited current-phase-v1/optimized-PHOTO qualification. This
+producer covers native execution only; workspace decode/resize scratch and
+cache overlap require the adapter's separate explicit lifecycle admission.
 """
 from dataclasses import dataclass, fields
 import math
@@ -21,7 +24,7 @@ import subprocess
 
 from .model import _add, _mul, current_owned_shape_minimum, exact_int
 
-_BASE42_FINGERPRINT = '2a515089b8db8c8db8679e4c7bdc092e3a97cfe77d5d9a48923e0fc93416450c'
+_FIXED_COHORT_FINGERPRINT = '28dff08c2a392ed04fa046ade5e2717e51f922baece3b09dd91a4030ac8bfab0'
 _PROFILE = 'fresh-fixed-cohort/current-owned-shape-lower-bound-v1/unqualified'
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -164,7 +167,7 @@ def _bind_source(root):
         fingerprint = generator['compute_fingerprint'](root)
     except (SystemExit, OSError) as error:
         raise ValueError('unavailable fixed-cohort source closure') from error
-    if fingerprint != _BASE42_FINGERPRINT:
+    if fingerprint != _FIXED_COHORT_FINGERPRINT:
         raise ValueError('unknown fixed-cohort source fingerprint; review/repin required')
     revision = subprocess.check_output(
         ['git', '-C', str(root), 'rev-parse', 'HEAD^{commit}'], text=True).strip()

@@ -28,6 +28,10 @@ class PhotoFingerprintTest(unittest.TestCase):
             "src/colmap/mvs/owned_fixed_cohort_budget.h",
             "src/colmap/mvs/owned_fixed_cohort_pipeline.h",
             "src/colmap/mvs/owned_fixed_cohort_pipeline.cu",
+            "src/colmap/mvs/owned_fixed_cohort_validation.h",
+            "src/colmap/mvs/owned_fixed_cohort_validation.cc",
+            "src/colmap/mvs/owned_fixed_cohort_workspace.h",
+            "src/colmap/mvs/owned_fixed_cohort_workspace.cc",
             "src/colmap/mvs/owned_pair_run.h",
             "src/colmap/mvs/native_run_deadline.h",
             "src/colmap/mvs/owned_rotation_memory.h",
@@ -103,7 +107,7 @@ class PhotoFingerprintTest(unittest.TestCase):
             self.assertIn(
                 hashlib.sha256(encoded).hexdigest(), output.read_text()
             )
-            self.assertEqual(len(generator.CLOSURE), 39)
+            self.assertEqual(len(generator.CLOSURE), 43)
             self.assertIn(
                 f'kPhotoPhaseV1SourceCommit[] = "{lineage}"', output.read_text()
             )
@@ -136,6 +140,8 @@ class PhotoFingerprintTest(unittest.TestCase):
                 "owned_geo_photo_input.h", "owned_geo_photo_input.cu",
                 "owned_fixed_cohort_budget.h", "owned_fixed_cohort_pipeline.h",
                 "owned_fixed_cohort_pipeline.cu",
+                "owned_fixed_cohort_validation.h", "owned_fixed_cohort_validation.cc",
+                "owned_fixed_cohort_workspace.h", "owned_fixed_cohort_workspace.cc",
             ):
                 added = root / "src/colmap/mvs" / new_header
                 added.write_bytes(b"dirty snapshot allocation\n")

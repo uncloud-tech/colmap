@@ -59,6 +59,8 @@ COLMAP_ADD_LIBRARY(
         poisson_meshing.h poisson_meshing.cc
         normal_map.h normal_map.cc
         owned_input_bank.h owned_input_bank.cc
+        owned_fixed_cohort_validation.h owned_fixed_cohort_validation.cc
+        owned_fixed_cohort_workspace.h owned_fixed_cohort_workspace.cc
         owned_cohort.h
         optimized_photo_delivery.h
         optimized_photo_options.h
@@ -182,6 +184,11 @@ COLMAP_ADD_TEST(
 COLMAP_ADD_TEST(
     NAME texture_mapping_test
     SRCS texture_mapping_test.cc
+    LINK_LIBS colmap_mvs
+)
+COLMAP_ADD_TEST(
+    NAME owned_fixed_cohort_workspace_test
+    SRCS owned_fixed_cohort_workspace_test.cc
     LINK_LIBS colmap_mvs
 )
 COLMAP_ADD_TEST(
@@ -338,6 +345,9 @@ if(CUDA_ENABLED)
         LINK_LIBS colmap_mvs_cuda
     )
 
+    if(TESTS_ENABLED)
+        target_link_libraries(colmap_mvs_owned_fixed_cohort_workspace_test colmap_mvs_cuda)
+    endif()
     COLMAP_ADD_TEST(
         NAME owned_fixed_cohort_pipeline_test
         SRCS owned_fixed_cohort_pipeline_test.cu
