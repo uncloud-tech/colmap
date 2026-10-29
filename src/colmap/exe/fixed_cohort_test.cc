@@ -14,6 +14,9 @@ int Invoke(std::vector<std::string> args) {
   return RunExperimentalFixedCohort(argv.size(), argv.data());
 }
 TEST(ExperimentalFixedCohort, Help) {
+  // Linked runtime libraries may already have threads when this test starts.
+  // Re-exec rather than running option parsing in a fork-only child.
+  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
   EXPECT_EXIT(Invoke({"experimental_fixed_cohort", "--help"}),
               ::testing::ExitedWithCode(EXIT_SUCCESS),
               "");
