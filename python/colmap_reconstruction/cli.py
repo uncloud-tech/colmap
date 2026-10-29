@@ -51,7 +51,9 @@ def parse_args(argv):
     parser.add_argument('--device-headroom-bytes', type=nonnegative_int, default=256 * 1024**2)
     parser.add_argument('--require-hard-memory-cap', action='store_true', help='unsupported in ordinary local mode: always refuses')
     parser.add_argument('--timeout-seconds', type=positive_float, default=3600)
-    parser.add_argument('--threads', type=positive_int, default=1, help='SfM/feature/undistortion workers; optimized stereo and fusion remain N1')
+    parser.add_argument('--threads', type=positive_int, default=1, help='SfM/feature/undistortion workers; independent of optimized solver concurrency')
+    parser.add_argument('--photo-concurrent-solvers', type=int, choices=(1, 2), default=1,
+                        help='explicit native PHOTO rolling concurrency; GEO/fusion remain N1')
     parser.add_argument('--gpu-index', type=nonnegative_int, default=0)
     parser.add_argument('--source-cap', type=int, choices=(8, 20), default=20)
     parser.add_argument('--num-samples', type=int, choices=range(1, 16), default=15)
@@ -66,10 +68,15 @@ def parse_args(argv):
     return parser.parse_args(argv)
 
 
-def digest(path):
+def digest(path, *, check=None):
     result = hashlib.sha256()
     with Path(path).open('rb') as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+        while True:
+            if check:
+                check()
+            chunk = stream.read(1024 * 1024)
+            if not chunk:
+                break
             result.update(chunk)
     return result.hexdigest()
 
@@ -85,15 +92,15 @@ class Reconstruction:
     def __init__(self, args, executable):
         self.args = args
         self.executable = executable
-        self.executable_sha = digest(executable)
         self.workspace = args.workspace
         self.dense = self.workspace / 'dense'
         self.assets = self.workspace / 'planning'
         self.process = NativeProcess(self.workspace, args.timeout_seconds,
                                      host_budget_bytes=args.host_budget_bytes, threads=args.threads)
+        self.executable_sha = digest(executable, check=self.process.remaining)
 
     def native(self, command, *arguments, capture=False):
-        if digest(self.executable) != self.executable_sha:
+        if digest(self.executable, check=self.process.remaining) != self.executable_sha:
             raise NativeFailure('native executable changed during reconstruction')
         return self.process.run([self.executable, command, *map(str, arguments)], capture=capture)
 
@@ -109,14 +116,17 @@ class Reconstruction:
         return argv
 
     def strict_flags(self, phase, forecast, ordinal):
+        seconds = math.floor(self.process.remaining())
+        if seconds < 1:
+            raise NativeFailure('reconstruction deadline has less than one native second remaining')
         return ['--optimized_only', 'true', '--optimized_dispatch_receipt',
             str(self.assets / ('%s-%d.receipt' % (phase, ordinal))),
             '--owned_tile_threads', str(self.args.tile),
             '--owned_photo_forecast' if phase == 'photo' else '--owned_run_forecast', str(forecast),
             '--owned_run_host_budget_bytes', str(self.args.host_budget_bytes),
             '--owned_run_device_budget_bytes', str(self.args.device_budget_bytes),
-            '--owned_run_max_concurrent_solvers', '1',
-            '--owned_run_timeout_seconds', str(self.process.remaining())]
+            '--owned_run_max_concurrent_solvers', str(self.args.photo_concurrent_solvers if phase == 'photo' else 1),
+            '--owned_run_timeout_seconds', str(seconds)]
 
     def run(self):
         self.assets.mkdir()
@@ -143,7 +153,7 @@ class Reconstruction:
             '--optimized_dispatch_receipt', self.assets / 'fusion.receipt',
             '--StereoFusion.max_image_size', '-1', '--StereoFusion.use_mmap', 'true',
             '--StereoFusion.use_cache', 'false', '--StereoFusion.num_threads', '1')
-        count = validate_ply(self.workspace / 'points.ply')
+        count = validate_ply(self.workspace / 'points.ply', check=self.process.remaining)
         self.process.remaining()
         write_json(self.workspace / 'result.json', dict(status='completed', vertices=count,
             registered_images=self.registered_images, photo_references=len(self.graph['phases']['photo']['jobs']),
@@ -205,9 +215,8 @@ class Reconstruction:
         self.input_files = {entry['path']: entry['sha256'] for entry in self.graph['input_files']}
         self.check_inputs(self.input_files)
 
-    @staticmethod
-    def check_inputs(files):
-        if any(digest(path) != expected for path, expected in files.items()):
+    def check_inputs(self, files):
+        if any(digest(path, check=self.process.remaining) != expected for path, expected in files.items()):
             raise ValueError('native input changed after planning')
 
     def photo(self):
@@ -218,7 +227,12 @@ class Reconstruction:
         if len(raw) % 2 or len(set(raw[::2])) != len(raw[::2]):
             raise ValueError('invalid native config pairs')
         pairs = dict(zip(raw[::2], raw[1::2]))
-        for ordinal, job in enumerate(self.graph['phases']['photo']['jobs']):
+        jobs = self.graph['phases']['photo']['jobs']
+        active = self.args.photo_concurrent_solvers
+        if len(jobs) < active:
+            raise ValueError('PHOTO concurrency exceeds registered reference jobs; no N1 fallback')
+        snapshots = []
+        for ordinal, job in enumerate(jobs):
             self.check_inputs(self.input_files)
             self.resources()
             config = self.assets / ('photo-%d.cfg' % ordinal)
@@ -229,25 +243,35 @@ class Reconstruction:
             options = self.assets / ('photo-%d.options' % ordinal)
             self.native('patch_match_stereo', *argv, '--owned_photo_options_export', options)
             image = self.images[job['reference']]
-            files = dict(self.input_files, **{str(config): digest(config)})
+            files = dict(self.input_files, **{str(config): digest(config, check=self.process.remaining)})
             snapshot = dict(provenance='native-snapshot', reference_image_idx=job['reference'],
                 source_image_idxs=job['sources'], width=image['width'], height=image['height'],
                 source_dimensions=[[self.images[i]['width'], self.images[i]['height']] for i in job['sources']],
                 cache_size_gib=self.args.cache_size_gib, options_bytes=options.read_bytes(),
                 workspace=str(self.dense), config=str(config), files=files)
-            artifact = wire.emit_native_v3(jobs=[snapshot], ceiling=1, rolling_active_jobs=1,
+            snapshots.append(snapshot)
+            if active == 2 and ordinal != len(jobs) - 1:
+                continue
+            # N1 retains singleton launches. N2 is one native rolling phase
+            # over EVERY ordered job, not only the first two references.
+            launch_ordinal = ordinal if active == 1 else 0
+            argv = self.stereo_argv('photo') + ['--config_path', snapshots[0]['config']]
+            self.check_inputs(self.input_files)
+            self.resources()
+            artifact = wire.emit_native_v3(jobs=snapshots, ceiling=active, rolling_active_jobs=active,
                 capacity_bytes=dict(host=self.args.host_budget_bytes, device=self.args.device_budget_bytes),
                 build_identity=self.identity)
-            forecast = self.assets / ('photo-%d.forecast' % ordinal)
+            forecast = self.assets / ('photo-%d.forecast' % launch_ordinal)
             with forecast.open('xb') as stream:
                 stream.write(wire.export_fire(artifact))
-            write_json(self.assets / ('photo-%d.audit.json' % ordinal), json.loads(artifact.audit_json))
-            self.native('patch_match_stereo', *argv, *self.strict_flags('photo', forecast, ordinal))
+            write_json(self.assets / ('photo-%d.audit.json' % launch_ordinal), json.loads(artifact.audit_json))
+            self.native('patch_match_stereo', *argv, *self.strict_flags('photo', forecast, launch_ordinal))
+            snapshots.clear()
         self.photo_files = {}
         for dependency in self.graph['future_photo_dependencies']:
             path = dependency['path']
-            validate_photo_map(path, dependency)
-            self.photo_files[path] = digest(path)
+            validate_photo_map(path, dependency, check=self.process.remaining)
+            self.photo_files[path] = digest(path, check=self.process.remaining)
 
     def geo(self):
         self.check_inputs(self.input_files)
@@ -276,7 +300,9 @@ class Reconstruction:
         self.check_inputs(self.photo_files)
 
 
-def validate_photo_map(path, expected):
+def validate_photo_map(path, expected, *, check=None):
+    if check:
+        check()
     if model.read_resident_map_header(path)[:3] != tuple(expected[k] for k in ('width', 'height', 'channels')):
         raise ValueError('PHOTO map dimensions differ from native plan')
     with Path(path).open('rb') as stream:
@@ -285,19 +311,25 @@ def validate_photo_map(path, expected):
         stream.seek(match.end())
         remaining = expected['width'] * expected['height'] * expected['channels'] * 4
         while remaining:
+            if check:
+                check()
             chunk = stream.read(min(1024 * 1024, remaining))
             if not chunk or len(chunk) % 4 or any(not math.isfinite(v[0]) for v in struct.iter_unpack('<f', chunk)):
                 raise ValueError('truncated/nonfinite PHOTO map')
             remaining -= len(chunk)
         if stream.read(1):
             raise ValueError('unexpected PHOTO map payload')
+    if check:
+        check()
 
 
-def validate_ply(path):
+def validate_ply(path, *, check=None):
     """Read the native scalar-vertex PLY formats, including finite XYZ values."""
     with Path(path).open('rb') as stream:
         header = bytearray()
         while len(header) < 65536:
+            if check:
+                check()
             line = stream.readline(65536 - len(header))
             if not line:
                 break
@@ -317,14 +349,18 @@ def validate_ply(path):
                  b'uchar': 'B', b'uint8': 'B'}
         formats = [line.split()[1] for line in lines if line.startswith(b'format ')]
         if formats == [b'ascii']:
-            for _ in range(vertices[0]):
-                values = stream.readline().split()
+            for index in range(vertices[0]):
+                if check and index % 1024 == 0:
+                    check()
+                values = stream.readline(65536).split()
                 if len(values) != len(properties) or not all(math.isfinite(float(v)) for v in values):
                     raise ValueError('truncated/nonfinite fused PLY')
         elif formats in ([b'binary_little_endian'], [b'binary_big_endian']):
             layout = struct.Struct(('<' if formats[0] == b'binary_little_endian' else '>') +
                                    ''.join(types[prop[0]] for prop in properties))
-            for _ in range(vertices[0]):
+            for index in range(vertices[0]):
+                if check and index % 1024 == 0:
+                    check()
                 payload = stream.read(layout.size)
                 if len(payload) != layout.size:
                     raise ValueError('truncated fused PLY')
@@ -332,6 +368,8 @@ def validate_ply(path):
                     raise ValueError('nonfinite fused PLY')
         else:
             raise ValueError('unsupported fused PLY format')
+        if check:
+            check()
         return vertices[0]
 
 

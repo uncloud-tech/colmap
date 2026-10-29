@@ -14,6 +14,8 @@ import struct
 import sys
 
 OPTIONS = 'COLMAP_OPTIMIZED_PHOTO_OPTIONS_V1\nbuild_cuda_enabled 1\nbuild_hip_enabled 0\nopt_int max_image_size -1\nopt_string gpu_index 1 30\nopt_double depth_min 3ff0000000000000\nopt_double depth_max 4024000000000000\nopt_int random_seed 0\nopt_int window_radius 5\nopt_int window_step 1\nopt_double sigma_spatial 4014000000000000\nopt_double sigma_color 3fc999999999999a\nopt_int num_samples 15\nopt_bool owned_distinct_source_cache 1\nopt_bool owned_tex_lookahead 0\nopt_double ncc_sigma 3fe3333333333333\nopt_double min_triangulation_angle 3ff0000000000000\nopt_double incident_angle_sigma 3feccccccccccccd\nopt_int num_iterations 5\nopt_bool geom_consistency 0\nopt_double geom_consistency_regularizer 3fd3333333333333\nopt_double geom_consistency_max_cost 4008000000000000\nopt_bool filter 0\nopt_double filter_min_ncc 3fb999999999999a\nopt_double filter_min_triangulation_angle 4008000000000000\nopt_int filter_min_num_consistent 2\nopt_double filter_geom_consistency_max_cost 3ff0000000000000\nopt_bool write_consistency_graph 0\nopt_bool allow_missing_files 0\nopt_int num_threads 8\nopt_double cache_size 3f847ae147ae147b\nopt_string workspace 18 2f666978747572652f776f726b7370616365\nopt_string config 17 2f666978747572652f636f6e6669672d37\n'
+JOBS = int(os.environ.get('FAKE_REGISTERED_IMAGES', '2'))
+
 IDENTITY = dict(schema_version=1, cuda_compiled=True, source_commit='a' * 40,
     lineage_sha='cf7891059c402c333b84b752de3acb8b084abdad',
     fingerprint='9e749b59aabc5433f7e475b4e660a1a62ad8d4d5fda083fec8fc803165a78dda',
@@ -59,14 +61,14 @@ def map_path(ws, name, kind):
 def contract(ws):
     lines = ['owned-bank-contract', 'version 1', 'build_cuda_enabled 1', 'build_hip_enabled 0',
         string('allocation_compatibility', 'unqualified-cpu-only'), 'invocation_options',
-        *options('geo'), string('stereo_folder', 'stereo'), 'problem_count 2']
-    for ref in range(2):
+        *options('geo'), string('stereo_folder', 'stereo'), 'problem_count %d' % JOBS]
+    for ref in range(JOBS):
         name = 'image%d.jpg' % ref
         lines += ['problem %d' % ref, 'reference_image_idx %d' % ref,
             string('reference_name', name), string('output_depth_path', ws / ('depth%d' % ref)),
             string('output_normal_path', ws / ('normal%d' % ref)), 'problem_options',
             *options('geo'), 'input_count 2']
-        for ordinal, idx in enumerate([ref, 1-ref]):
+        for ordinal, idx in enumerate([ref, (ref + 1) % JOBS]):
             image_name = 'image%d.jpg' % idx
             lines += ['input %d' % ordinal, 'is_reference %d' % (idx == ref), 'image_idx %d' % idx,
                 string('image_name', image_name), 'image_dims 3 2', 'max_image_size -1',
@@ -91,6 +93,9 @@ def main():
         return
     command = sys.argv[1]
     args = dict(zip(sys.argv[2::2], sys.argv[3::2]))
+    if os.environ.get('FAKE_CALLS'):
+        with Path(os.environ['FAKE_CALLS']).open('a') as stream:
+            stream.write(json.dumps([command, args]) + '\n')
     if command == 'reconstruction_info':
         if os.environ.get('FAKE_BAD_FINGERPRINT'):
             IDENTITY['fingerprint'] = '0' * 64
@@ -98,25 +103,26 @@ def main():
     elif command == 'mapper':
         (Path(args['--output_path']) / '0').mkdir()
     elif command == 'model_analyzer':
-        print(json.dumps(dict(num_registered_images=2, num_points3D=4)))
+        print(json.dumps(dict(num_registered_images=JOBS, num_points3D=4)))
     elif command == 'image_undistorter':
         ws = Path(args['--output_path'])
         for folder in ['images', 'stereo/depth_maps', 'stereo/normal_maps']:
             (ws / folder).mkdir(parents=True)
-        for i in range(2):
+        for i in range(JOBS):
             (ws / 'images' / ('image%d.jpg' % i)).write_bytes(b'synthetic image')
-        (ws / 'stereo/patch-match.cfg').write_text('image0.jpg\n__auto__, 20\nimage1.jpg\n__auto__, 20\n')
+        (ws / 'stereo/patch-match.cfg').write_text(''.join(
+            'image%d.jpg\n__auto__, 20\n' % i for i in range(JOBS)))
     elif command == 'optimized_dense_plan':
         ws = Path(args['--workspace_path'])
         images = [dict(index=i, name='image%d.jpg' % i,
-            path=str(ws / 'images' / ('image%d.jpg' % i)), width=3, height=2) for i in range(2)]
+            path=str(ws / 'images' / ('image%d.jpg' % i)), width=3, height=2) for i in range(JOBS)]
         phases = {}
         for phase in ['photo', 'geo']:
             phases[phase] = dict(requested_options=decoded_options(phase), jobs=[dict(reference=i,
-                sources=[1-i]) for i in range(2)])
+                sources=[(i + 1) % JOBS]) for i in range(JOBS)])
         dependencies = [dict(reference=i, kind=kind, width=3, height=2,
             channels=1 if kind == 'depth' else 3, path=str(map_path(ws, 'image%d.jpg' % i, kind)))
-            for i in range(2) for kind in ['depth', 'normal']]
+            for i in range(JOBS) for kind in ['depth', 'normal']]
         paths = [ws / 'stereo/patch-match.cfg', *[Path(image['path']) for image in images]]
         Path(args['--output_path']).write_text(json.dumps(dict(schema_version=1,
             workspace_path=str(ws), build=dict(revision='a'*40), images=images, phases=phases,
@@ -132,12 +138,23 @@ def main():
             Path(args['--owned_metadata_export']).write_bytes(contract(ws))
         elif '--owned_photo_forecast' in args:
             assert args['--optimized_only'] == 'true'
-            assert Path(args['--owned_photo_forecast']).read_bytes().startswith(b'COLMAP_OPTIMIZED_PHOTO_V3\n')
-            name = Path(args['--config_path']).read_text().splitlines()[0]
-            for kind, channels in [('depth', 1), ('normal', 3)]:
-                map_path(ws, name, kind).write_bytes(('3&2&%d&' % channels).encode() + struct.pack('<f', 1) * (6*channels))
+            timeout = args['--owned_run_timeout_seconds']
+            assert timeout.isascii() and timeout.isdigit() and timeout[0] != '0'
+            payload = Path(args['--owned_photo_forecast']).read_bytes().splitlines()
+            assert payload[0] == b'COLMAP_OPTIMIZED_PHOTO_V3'
+            ceiling, active, count = map(int, payload[1].split())
+            assert active == int(args['--owned_run_max_concurrent_solvers'])
+            for ordinal in range(count):
+                config = Path(os.fsdecode(bytes.fromhex(payload[2 + 2 * ordinal].decode())))
+                name = config.read_text().splitlines()[0]
+                for kind, channels in [('depth', 1), ('normal', 3)]:
+                    map_path(ws, name, kind).write_bytes(('3&2&%d&' % channels).encode() + struct.pack('<f', 1) * (6*channels))
+            if os.environ.get('FAKE_PHOTO_FAILURE'):
+                raise SystemExit(9)
         elif '--owned_run_forecast' in args:
             assert args['--optimized_only'] == 'true'
+            timeout = args['--owned_run_timeout_seconds']
+            assert timeout.isascii() and timeout.isdigit() and timeout[0] != '0'
             assert Path(args['--owned_run_forecast']).read_bytes().startswith(b'resident-forecast\n')
         else:
             raise AssertionError('stock fallback')

@@ -1,6 +1,44 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Local resource observations, not hard allocator or cgroup enforcement."""
 from pathlib import Path
+import ctypes
+import os
+import uuid
+
+
+def cuda_device_uuid(ordinal):
+    """Resolve a CUDA-visible ordinal using the same driver/environment as COLMAP.
+
+    Management indices are not CUDA ordinals (even without visibility overrides).
+    cuInit/device queries create no CUDA context and require no toolkit/runtime.
+    """
+    if type(ordinal) is not int or ordinal < 0:
+        raise ValueError('CUDA ordinal must be nonnegative')
+    try:
+        driver = ctypes.CDLL('libcuda.so.1')
+        initialize = driver.cuInit
+        initialize.argtypes = [ctypes.c_uint]
+        initialize.restype = ctypes.c_int
+        get_device = driver.cuDeviceGet
+        get_device.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int]
+        get_device.restype = ctypes.c_int
+        get_uuid = driver.cuDeviceGetUuid_v2
+        get_uuid.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        get_uuid.restype = ctypes.c_int
+        device = ctypes.c_int()
+        raw = (ctypes.c_ubyte * 16)()
+        status = initialize(0)
+        if status:
+            raise ValueError('cuInit failed: %d' % status)
+        status = get_device(ctypes.byref(device), ordinal)
+        if status:
+            raise ValueError('cuDeviceGet failed for CUDA ordinal %d: %d' % (ordinal, status))
+        status = get_uuid(raw, device.value)
+        if status or not any(raw):
+            raise ValueError('CUDA device UUID unavailable: %d' % status)
+        return 'GPU-' + str(uuid.UUID(bytes=bytes(raw)))
+    except (OSError, AttributeError) as error:
+        raise ValueError('CUDA Driver API identity unavailable; no management-index fallback') from error
 
 
 def admit_resources(*, host_available, device_available, host_budget, device_budget,
@@ -43,8 +81,14 @@ def host_available_bytes():
 
 
 def observe_resources(process, args):
+    # Preserve caller visibility/order; the child uses this exact CUDA ordinal
+    # environment. Refuse drift rather than querying a different physical GPU.
+    for key in ('CUDA_VISIBLE_DEVICES', 'CUDA_DEVICE_ORDER'):
+        if process.environment.get(key) != os.environ.get(key):
+            raise ValueError('CUDA visibility/order changed during reconstruction')
+    device_uuid = cuda_device_uuid(args.gpu_index)
     # nvidia-smi is supplied by the local NVIDIA driver, not a provider API.
-    output = process.run(['nvidia-smi', '-i', str(args.gpu_index),
+    output = process.run(['nvidia-smi', '-i', device_uuid,
         '--query-gpu=memory.free', '--format=csv,noheader,nounits'], capture=True)
     rows = output.decode('ascii').strip().splitlines()
     if len(rows) != 1:
@@ -54,4 +98,7 @@ def observe_resources(process, args):
     admit_resources(host_available=host, device_available=device,
         host_budget=args.host_budget_bytes, device_budget=args.device_budget_bytes,
         host_headroom=args.host_headroom_bytes, device_headroom=args.device_headroom_bytes)
-    return dict(host_available_bytes=host, device_available_bytes=device)
+    return dict(host_available_bytes=host, device_available_bytes=device,
+                cuda_ordinal=args.gpu_index, cuda_device_uuid=device_uuid,
+                cuda_visible_devices=process.environment.get('CUDA_VISIBLE_DEVICES'),
+                cuda_device_order=process.environment.get('CUDA_DEVICE_ORDER'))

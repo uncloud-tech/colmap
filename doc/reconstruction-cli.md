@@ -42,9 +42,13 @@ recommendation. `--help` lists explicit cache, source cap, samples, seed, tile,
 lookahead, resizing, absolute headroom and extra allowance controls. No quality
 preset or automatic quality reduction is applied. Feature extraction preserves
 the existing 3200-pixel working cap; undistortion defaults to no resize. Dense
-stereo always consumes native-resolution undistorted inputs. Stereo and fusion
-remain N1; `--threads` bounds feature/SfM/undistortion workers and common CPU
-thread-pool environment settings, not optimized solver concurrency.
+stereo always consumes native-resolution undistorted inputs. PHOTO defaults to
+N1; `--photo-concurrent-solvers 2` explicitly selects the existing native rolling
+N2 runner. GEO and fusion remain N1. `--threads` bounds feature/SfM/undistortion
+workers and common CPU thread-pool environment settings, not solver concurrency.
+N2 prepares every registered reference in native graph order and submits one V3
+phase with one binding/config/options snapshot per job, including jobs beyond
+the two active slots. It never substitutes sequential N1 execution.
 
 If mapping produces more than one sparse model, execution refuses unless
 `--sparse-model NAME` explicitly selects one. Every registered reference in
@@ -61,11 +65,18 @@ paths (including symlinks) refuse; there is no resume or implicit overwrite.
 The existing privileged runner/cgroup authorization lane is not changed.
 
 * Host/GPU budgets must fit current available memory minus the explicit absolute
-  headroom. Host observations include visible cgroup-v2 ancestor limits.
+  headroom. Host observations include visible cgroup-v2 ancestor limits. GPU
+  observations resolve `--gpu-index` as a CUDA-visible ordinal via the Driver API
+  and query `nvidia-smi` by that device's UUID, not its management index. Caller
+  `CUDA_VISIBLE_DEVICES`/`CUDA_DEVICE_ORDER` are preserved for native dispatch;
+  ordinal, UUID and visibility/order are recorded. Identity resolution failure
+  refuses, with no management-index fallback.
 * Canonical dense engineering forecasts use **one 3% margin**, once per disjoint
   term. Native PHOTO/GEO independently verify the wire, exact options/order,
   compiled fingerprints, minima and logical budgets. These are admission checks,
-  **not physical RSS/VRAM allocator limits**. Extra GEO bank and metadata
+  **not physical RSS/VRAM allocator limits**. PHOTO N2 charges one process/cache
+  plus the two largest private owner charges per resource (not all queued jobs,
+  not a sequential peak, and no shared-gray credits). Extra GEO bank and metadata
   allowances default explicitly to unmeasured zero; callers can increase them.
 * SfM/undistortion/fusion physical memory is **not modeled or certified by the
   stereo model**. Direct child RSS is sampled best-effort and overbudget children
@@ -73,7 +84,11 @@ The existing privileged runner/cgroup authorization lane is not changed.
   workloads, driver allocations and hidden cgroup ancestors remain risks.
 * One monotonic whole-job deadline applies across native stages. Cancellation
   and expiry send TERM, allow up to two seconds of drain, then KILL and reap the
-  owned direct child, signaling only its new process group. COLMAP is trusted not
+  owned direct child, signaling only its new process group. Hash/map validation
+  checks the same deadline/cancel state in bounded chunks; PLY checks between
+  bounded vertex batches. Native stereo receives floored positive integer
+  remaining seconds; less than one second refuses rather than extending time.
+  COLMAP is trusted not
   to detach children. This is not a sandbox; SIGKILL/controller death, detached
   descendants and hard tree-wide RSS/VRAM limits require external containment.
   `--require-hard-memory-cap` therefore always refuses, rather than pretending an
@@ -105,7 +120,11 @@ native validation, not an allow-unknown switch.
 CPU tests exercise prefix-only installation/import isolation, canonical wire and
 binding, source order, resource refusals, output validation, owned-process
 cancellation/deadline and a **synthetic** complete native protocol. That fixture
-is not CUDA/native numerical proof. Before release acceptance, validate a clean
+is not CUDA/native numerical proof. Four-job N2/N1 synthetic tests check the
+full PHOTO barrier, while a compiled CPU probe parses emitted V3 with the real
+native headers and tests exact top-two resource caps and integer deadlines.
+The synthetic Driver API visibility seam is not real GPU-identity proof.
+Before release acceptance, validate a clean
 native install outside the checkout, `reconstruction_info`, real options/wire
 binding and a fresh small complete CUDA reconstruction with all selected-model
 references and nonempty PLY. Native/GPU validation and independent source review

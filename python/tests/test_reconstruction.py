@@ -8,7 +8,82 @@ import tempfile
 import unittest
 
 
+def fake_cuda_environment(temp, env):
+    """Build only a synthetic Driver API seam, never install/use a CUDA driver."""
+    import shutil
+    compiler = shutil.which('cc')
+    if not compiler:
+        raise unittest.SkipTest('C compiler required for synthetic CUDA identity seam')
+    source = Path(__file__).with_name('fake_cuda.c')
+    subprocess.run([compiler, '-shared', '-fPIC', str(source), '-o', str(temp / 'libcuda.so.1')], check=True)
+    return dict(env, LD_LIBRARY_PATH=str(temp) + os.pathsep + env.get('LD_LIBRARY_PATH', ''))
+
+
 class ReconstructionTest(unittest.TestCase):
+    def test_resources_follow_cuda_visible_ordinal_not_management_index(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=root.parent.parent) as directory:
+            temp = Path(directory)
+            env = fake_cuda_environment(temp, dict(os.environ, CUDA_VISIBLE_DEVICES='1,0',
+                                                   CUDA_DEVICE_ORDER='PCI_BUS_ID'))
+            script = '''import sys
+sys.path.insert(0, sys.argv[1])
+from types import SimpleNamespace
+from colmap_reconstruction.resources import observe_resources
+class Process:
+    environment = dict(__import__('os').environ)
+    def run(self, argv, capture=False):
+        assert argv[2] == 'GPU-00000000-0000-0000-0000-000000000002', argv
+        return b'32768\\n'
+a = SimpleNamespace(gpu_index=0, host_budget_bytes=1, device_budget_bytes=1,
+    host_headroom_bytes=0, device_headroom_bytes=0)
+r = observe_resources(Process(), a)
+assert r['cuda_device_uuid'] == 'GPU-00000000-0000-0000-0000-000000000002'
+assert r['cuda_visible_devices'] == '1,0'
+assert Process.environment['CUDA_VISIBLE_DEVICES'] == '1,0'
+'''
+            result = subprocess.run([sys.executable, '-I', '-B', '-c', script, str(root)],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_photo_concurrency_is_explicit_one_or_two_default_one(self) -> None:
+        from colmap_reconstruction.cli import parse_args
+        base = ['--photos', '/photos', '--workspace', '/new',
+                '--host-budget-bytes', '1000', '--device-budget-bytes', '1000']
+        self.assertEqual(parse_args(base).photo_concurrent_solvers, 1)
+        self.assertEqual(parse_args(base + ['--photo-concurrent-solvers', '2']).photo_concurrent_solvers, 2)
+        for value in ('0', '3', 'auto'):
+            with self.subTest(value=value), self.assertRaises(SystemExit):
+                parse_args(base + ['--photo-concurrent-solvers', value])
+
+    def test_stereo_timeout_uses_real_native_integer_parser_without_extension(self) -> None:
+        import time
+        from colmap_reconstruction.cli import Reconstruction, parse_args
+        from colmap_reconstruction.process import NativeFailure
+        import shutil
+        compiler = shutil.which('g++')
+        if not compiler:
+            self.skipTest('g++ required for real native parser regression')
+        root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory(dir=root.parent) as directory:
+            temp = Path(directory)
+            probe = temp / 'probe'
+            subprocess.run([compiler, '-std=c++17', '-pthread', '-I' + str(root / 'src'),
+                str(root / 'python/tests/reconstruction_protocol_probe.cc'), '-o', str(probe)], check=True)
+            args = parse_args(['--photos', str(temp), '--workspace', str(temp),
+                               '--host-budget-bytes', '1000', '--device-budget-bytes', '1000'])
+            reconstruction = Reconstruction(args, sys.executable)
+            reconstruction.process.deadline = time.monotonic() + 1.9
+            for phase in ('photo', 'geo'):
+                flags = reconstruction.strict_flags(phase, temp / 'forecast', 0)
+                seconds = flags[flags.index('--owned_run_timeout_seconds') + 1]
+                self.assertEqual(seconds, '1')
+                parsed = subprocess.run([str(probe), 'timeout', seconds], capture_output=True)
+                self.assertEqual(parsed.returncode, 0, parsed.stderr)
+            reconstruction.process.deadline = time.monotonic() + 0.5
+            with self.assertRaisesRegex(NativeFailure, 'deadline'):
+                reconstruction.strict_flags('photo', temp / 'forecast', 0)
+
     def test_supported_build_binding_records_commit_not_a_commit_whitelist(self) -> None:
         from colmap_reconstruction import producer
         identity = {'source_commit': 'a' * 40, 'lineage_sha': producer.LINEAGE,
@@ -131,6 +206,7 @@ class ReconstructionTest(unittest.TestCase):
             env = dict(os.environ, PATH=str(temp) + os.pathsep + os.environ['PATH'])
             env.pop('PYTHONPATH', None)
             env.pop('PYTHONHOME', None)
+            env = fake_cuda_environment(temp, env)
             argv = [str(temp / 'prefix/bin/colmap-reconstruct'),
                 '--experimental-local', '--photos', str(photos),
                 '--workspace', str(temp / 'output'), '--host-budget-bytes', str(2300 * 2**20),
@@ -150,6 +226,108 @@ class ReconstructionTest(unittest.TestCase):
             self.assertIn('fingerprint mismatch', refused.stderr)
             self.assertFalse((temp / 'bad-output/sparse').exists())
 
+    def test_photo_n2_launches_all_four_jobs_once_before_geo(self) -> None:
+        from colmap_reconstruction import wire
+        from colmap_reconstruction.resources import host_available_bytes
+        if os.geteuid() == 0:
+            self.skipTest('ordinary local CLI deliberately refuses root')
+        if host_available_bytes() < 2500 * 2**20:
+            self.skipTest('synthetic ledger requires 2.5 GiB available')
+        import shutil
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=root.parent.parent) as directory:
+            temp = Path(directory)
+            native = temp / 'colmap'
+            shutil.copy(root / 'tests/fake_native.py', native)
+            native.chmod(0o755)
+            (temp / 'nvidia-smi').symlink_to(native)
+            (temp / 'photos').mkdir()
+            env = dict(os.environ, PATH=str(temp) + os.pathsep + os.environ['PATH'],
+                       FAKE_REGISTERED_IMAGES='4', FAKE_CALLS=str(temp / 'calls'),
+                       CUDA_VISIBLE_DEVICES='1,0', CUDA_DEVICE_ORDER='PCI_BUS_ID')
+            env = fake_cuda_environment(temp, env)
+            # No install/source-external imports; launch the stdlib entry under -I.
+            argv = [sys.executable, '-I', '-B', '-c',
+                    'import sys; sys.path.insert(0, sys.argv.pop(1)); '
+                    'from colmap_reconstruction.cli import main; raise SystemExit(main())',
+                    str(root), '--colmap', str(native), '--experimental-local',
+                    '--photos', str(temp / 'photos'), '--workspace', str(temp / 'output'),
+                    '--host-budget-bytes', str(2300 * 2**20), '--device-budget-bytes', str(8 * 2**30),
+                    '--host-headroom-bytes', str(64 * 2**20), '--cache-size-gib', '0.01',
+                    '--no-lookahead', '--photo-concurrent-solvers', '2']
+            completed = subprocess.run(argv, env=env, cwd=temp, capture_output=True, text=True)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            planning = temp / 'output/planning'
+            self.assertEqual(len(list(planning.glob('photo-*.forecast'))), 1)
+            payload = (planning / 'photo-0.forecast').read_bytes()
+            launch = wire.parse_v3_launch(payload, requested_active_jobs=2,
+                options_bytes=[(planning / ('photo-%d.options' % i)).read_bytes() for i in range(4)])
+            self.assertEqual(launch['ceiling'], 2)
+            self.assertEqual([j['forecast']['reference_image_idx'] for j in launch['jobs']], [0, 1, 2, 3])
+            self.assertEqual([j['forecast']['source_image_idxs'] for j in launch['jobs']], [[1], [2], [3], [0]])
+            self.assertEqual(len(launch['bindings']), 4)
+            # Canonical 3x2/single-source fixture: one process/cache charge,
+            # two already-margined private owners, no shared-gray credits.
+            exact_peak = dict(host=2222968047, device=2211911306)
+            wire.parse_v3_launch(payload, requested_active_jobs=2, capacity_bytes=exact_peak)
+            for side in ('host', 'device'):
+                insufficient = dict(exact_peak)
+                insufficient[side] -= 1
+                with self.assertRaisesRegex(ValueError, 'capacity-exceeded: ' + side):
+                    wire.parse_v3_launch(payload, requested_active_jobs=2, capacity_bytes=insufficient)
+            if shutil.which('g++'):
+                probe = temp / 'probe'
+                subprocess.run(['g++', '-std=c++17', '-pthread', '-I' + str(root.parent / 'src'),
+                    str(root / 'tests/reconstruction_protocol_probe.cc'), '-o', str(probe)], check=True)
+                native_parsed = subprocess.run([str(probe), 'wire', str(planning / 'photo-0.forecast'),
+                    '2', str(exact_peak['host']), str(exact_peak['device'])], capture_output=True, text=True)
+                self.assertEqual(native_parsed.returncode, 0, native_parsed.stderr)
+                self.assertEqual(native_parsed.stdout, '2 4 4')
+                native_refused = subprocess.run([str(probe), 'wire', str(planning / 'photo-0.forecast'),
+                    '2', str(exact_peak['host'] - 1), str(exact_peak['device'])], capture_output=True, text=True)
+                self.assertNotEqual(native_refused.returncode, 0)
+                self.assertIn('top-N private charges exceed caps', native_refused.stderr)
+            for i in range(4):
+                self.assertEqual((planning / ('photo-%d.cfg' % i)).read_text(),
+                                 'image%d.jpg\n__auto__, 20\n' % i)
+            calls = [json.loads(line) for line in (temp / 'calls').read_text().splitlines()]
+            photo = [(i, a) for i, (c, a) in enumerate(calls) if '--owned_photo_forecast' in a]
+            self.assertEqual(len(photo), 1)
+            self.assertEqual(photo[0][1]['--owned_run_max_concurrent_solvers'], '2')
+            self.assertEqual(photo[0][1]['--PatchMatchStereo.gpu_index'], '0')
+            for observation in planning.glob('resources-*.json'):
+                recorded = json.loads(observation.read_text())
+                self.assertEqual(recorded['cuda_ordinal'], 0)
+                self.assertEqual(recorded['cuda_device_uuid'], 'GPU-00000000-0000-0000-0000-000000000002')
+                self.assertEqual(recorded['cuda_visible_devices'], '1,0')
+            geo = [(i, a) for i, (c, a) in enumerate(calls) if '--owned_run_forecast' in a]
+            self.assertEqual(len(geo), 1)
+            self.assertGreater(geo[0][0], photo[0][0])
+            self.assertEqual(geo[0][1]['--owned_run_max_concurrent_solvers'], '1')
+            self.assertEqual(json.loads((temp / 'output/result.json').read_text())['photo_references'], 4)
+            # Even a partially writing failed PHOTO cannot cross the GEO barrier.
+            failed_argv = [v.replace(str(temp / 'output'), str(temp / 'failed')) for v in argv]
+            failed = subprocess.run(failed_argv, env=dict(env, FAKE_PHOTO_FAILURE='1',
+                FAKE_CALLS=str(temp / 'failed-calls')), cwd=temp, capture_output=True, text=True)
+            self.assertNotEqual(failed.returncode, 0)
+            failed_calls = [json.loads(line) for line in (temp / 'failed-calls').read_text().splitlines()]
+            self.assertFalse(any('--owned_run_forecast' in a or '--owned_metadata_export' in a
+                                 or c == 'stereo_fusion' for c, a in failed_calls))
+            self.assertTrue((temp / 'failed/failure.json').is_file())
+            # Default N1 remains four singleton native launches, never truncates.
+            n1_argv = [v.replace(str(temp / 'output'), str(temp / 'n1')) for v in argv[:-2]]
+            n1 = subprocess.run(n1_argv, env=dict(env, FAKE_CALLS=str(temp / 'n1-calls')),
+                                cwd=temp, capture_output=True, text=True)
+            self.assertEqual(n1.returncode, 0, n1.stderr)
+            n1_calls = [json.loads(line) for line in (temp / 'n1-calls').read_text().splitlines()]
+            n1_photo = [a for c, a in n1_calls if '--owned_photo_forecast' in a]
+            self.assertEqual(len(n1_photo), 4)
+            for a in n1_photo:
+                self.assertEqual(a['--owned_run_max_concurrent_solvers'], '1')
+                n1_launch = wire.parse_v3_launch(Path(a['--owned_photo_forecast']).read_bytes())
+                self.assertEqual(len(n1_launch['jobs']), 1)
+            self.assertEqual(json.loads((temp / 'n1/result.json').read_text())['photo_references'], 4)
+
     def test_output_validation_rejects_truncation_and_nonfinite_maps(self) -> None:
         import struct
         from colmap_reconstruction.cli import validate_photo_map, validate_ply
@@ -165,6 +343,41 @@ class ReconstructionTest(unittest.TestCase):
             ply.write_bytes(b'ply\nformat binary_little_endian 1.0\nelement vertex 2\nproperty float x\nproperty float y\nproperty float z\nend_header\n' + struct.pack('<fff', 1, 2, 3))
             with self.assertRaisesRegex(ValueError, 'truncated'):
                 validate_ply(ply)
+
+    def test_python_validation_observes_cancellation_and_expiry_between_chunks(self) -> None:
+        import struct
+        import time
+        from colmap_reconstruction.cli import digest, validate_photo_map, validate_ply
+        from colmap_reconstruction.process import NativeProcess, NativeFailure
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            path = temp / 'payload'
+            cases = [
+                (lambda check: digest(path, check=check), b'x' * (2 * 1024**2), 2),
+                (lambda check: validate_photo_map(path, dict(width=600000, height=1, channels=1), check=check),
+                 b'600000&1&1&' + struct.pack('<f', 1) * 600000, 3),
+                (lambda check: validate_ply(path, check=check),
+                 b'ply\nformat ascii 1.0\nelement vertex 10000\nproperty float x\nproperty float y\nproperty float z\nend_header\n' + b'0 0 0\n' * 10000, 9),
+                (lambda check: validate_ply(path, check=check),
+                 b'ply\nformat binary_little_endian 1.0\nelement vertex 10000\nproperty float x\nproperty float y\nproperty float z\nend_header\n' + struct.pack('<fff', 0, 0, 0) * 10000, 9),
+            ]
+            for operation, content, cancel_at in cases:
+                path.write_bytes(content)
+                for reason in ('cancelled', 'deadline'):
+                    with self.subTest(operation=operation, reason=reason):
+                        process = NativeProcess(temp, timeout_seconds=10)
+                        calls = []
+                        def check():
+                            calls.append(1)
+                            if len(calls) == cancel_at:
+                                if reason == 'cancelled':
+                                    process.cancelled = True
+                                else:
+                                    process.deadline = time.monotonic() - 1
+                            process.remaining()
+                        with self.assertRaisesRegex(NativeFailure, reason):
+                            operation(check)
+                        self.assertEqual(len(calls), cancel_at)
 
     def test_canonical_photo_charge_has_one_margin_per_disjoint_term(self) -> None:
         from colmap_reconstruction import model
