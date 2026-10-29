@@ -8,8 +8,10 @@
 #include "colmap/mvs/patch_match_cuda_owned.h"
 #include "colmap/mvs/patch_match_execution.h"
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <set>
 #include <sstream>
@@ -140,9 +142,12 @@ void CheckPrivate(const std::vector<Image>& images,
 }
 
 void Validate(const std::vector<Image>& images,
-              const std::array<FixedCohortReference, 2>& refs,
+              const std::vector<FixedCohortReference>& refs,
               const FixedCohortBudget& budget) {
   Require(!images.empty(), "fixed-cohort images missing");
+  ValidateFixedCohortJobShape(budget);
+  Require(!refs.empty() && refs.size() == budget.photo_private.size(),
+          "fixed-cohort reference/budget cardinality mismatch");
   const int device = Device(refs[0].photo_options);
   std::set<int> producers;
   for (const auto& ref : refs) {
@@ -178,7 +183,7 @@ void Validate(const std::vector<Image>& images,
               budget.frozen_inputs.host >= input_bytes,
           "fixed-cohort input copy bound insufficient");
   uint64_t maps = 0;
-  for (size_t i = 0; i < 2; ++i) {
+  for (size_t i = 0; i < refs.size(); ++i) {
     const auto& ref = refs[i];
     maps = CheckedAdd(
         maps,
@@ -242,7 +247,7 @@ void Validate(const std::vector<Image>& images,
 
 FixedCohortResult RunFixedCohortPhotoGeo(
     const std::vector<Image>& images,
-    const std::array<FixedCohortReference, 2>& references,
+    const std::vector<FixedCohortReference>& references,
     const FixedCohortBudget& budget,
     ByteCharge capacity,
     NativeRunDeadline deadline,
@@ -255,6 +260,9 @@ FixedCohortResult RunFixedCohortPhotoGeo(
   ValidateOwnedTileThreads(tile_threads);
   Require(dispatch == PairDispatch::kSerial || dispatch == PairDispatch::kPair,
           "fixed-cohort invalid dispatch");
+  Require(
+      budget.max_active_owners == (dispatch == PairDispatch::kSerial ? 1u : 2u),
+      "fixed-cohort active owners disagree with dispatch");
   const auto reserved = AdmitFixedCohortBudget(budget, capacity);
   Validate(images, references, budget);
   Require(
@@ -277,6 +285,9 @@ FixedCohortResult RunFixedCohortPhotoGeo(
   for (const auto& image : images)
     caller_bytes = CheckedAdd(caller_bytes, image.GetBitmap().NumBytes());
   FixedCohortResult result;
+  result.photo.resize(references.size());
+  result.geo.resize(references.size());
+  result.actual_geo_staging_bytes.resize(references.size());
   result.before_copy_available = ObserveAvailable(device);
   CheckFixedCohortPhaseHeadroom(
       budget, false, result.before_copy_available, {caller_bytes, 0});
@@ -284,7 +295,8 @@ FixedCohortResult RunFixedCohortPhotoGeo(
   // One immutable invocation copy, shared read-only by private solver owners.
   auto frozen = images;
   const auto refs = references;
-  std::array<std::shared_ptr<const PhotoOutputSnapshot>, 2> snapshots;
+  std::vector<std::shared_ptr<const PhotoOutputSnapshot>> snapshots(
+      refs.size());
   for (const bool geo : {false, true}) {
     check();
     if (geo) {
@@ -302,12 +314,20 @@ FixedCohortResult RunFixedCohortPhotoGeo(
     const auto& charges = geo ? budget.geo_private : budget.photo_private;
     // Retain the entire once-margined peak, even in the smaller phase. No
     // per-owner re-margin or snapshot sharing credit is issued.
-    const ByteCharge process{
-        reserved.host - CheckedAdd(charges[0].host, charges[1].host),
-        reserved.device - CheckedAdd(charges[0].device, charges[1].device)};
-    PairCoordinator coordinator(
-        dispatch, capacity, process, charges, deadline.Remaining());
-    auto graphs = std::make_shared<GraphLaunchControl>(2);
+    const auto active =
+        FixedCohortActivePeak(charges, budget.max_active_owners);
+    const ByteCharge process{reserved.host - active.host,
+                             reserved.device - active.device};
+    // Use the once-margined reservation itself as the ledger capacity: spare
+    // external cap space cannot admit more than the declared active envelope.
+    PairCoordinator coordinator(reserved,
+                                process,
+                                budget.max_active_owners,
+                                charges,
+                                deadline.Remaining(),
+                                {},
+                                deadline);
+    auto graphs = std::make_shared<GraphLaunchControl>(refs.size());
     const auto run = [&](size_t owner) {
       try {
         check();
@@ -324,9 +344,13 @@ FixedCohortResult RunFixedCohortPhotoGeo(
         if (geo) {
           std::vector<GeoPhotoInput::Snapshot> sources;
           for (int index : problem.src_image_idxs) {
-            const size_t producer =
-                refs[0].reference_image_idx == index ? 0 : 1;
-            sources.push_back(snapshots[producer]);
+            const auto producer = std::find_if(
+                refs.begin(), refs.end(), [&](const auto& candidate) {
+                  return candidate.reference_image_idx == index;
+                });
+            Require(producer != refs.end(),
+                    "fixed-cohort source producer missing");
+            sources.push_back(snapshots[std::distance(refs.begin(), producer)]);
           }
           input = std::make_shared<GeoPhotoInput>(
               options, problem, snapshots[owner], std::move(sources));
@@ -355,19 +379,24 @@ FixedCohortResult RunFixedCohortPhotoGeo(
         if (!geo) snapshots[owner] = solver.SnapshotPhotoOutput();
         check();
         coordinator.EndOutput(owner);
-        // solver drains/destructs here, before RunPairOwners retires it.
+        // solver drains/destructs here, before rolling retirement and join.
       } catch (...) {
         graphs->Cancel(std::current_exception());
         throw;
       }
     };
-    RunPairOwners(coordinator, run, [](size_t, const char*) {});
+    RunRollingOwners(coordinator, run, [](size_t, const char*) {});
     check();
     if (!geo) {
       // Global PHOTO barrier: all successful owners drained, destroyed, joined.
-      const auto actual = CheckedAdd(snapshots[0]->RetainedBytes(),
-                                     snapshots[1]->RetainedBytes());
-      CheckFixedCohortPhysicalCopies(budget, actual, {{0, 0}});
+      uint64_t actual = 0;
+      for (const auto& snapshot : snapshots) {
+        Require(static_cast<bool>(snapshot),
+                "fixed-cohort PHOTO producer missing");
+        actual = CheckedAdd(actual, snapshot->RetainedBytes());
+      }
+      CheckFixedCohortPhysicalCopies(
+          budget, actual, result.actual_geo_staging_bytes);
       result.actual_snapshot_bytes = actual;
     }
   }

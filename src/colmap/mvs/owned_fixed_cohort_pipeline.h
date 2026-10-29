@@ -10,6 +10,7 @@
 #include <array>
 #include <atomic>
 #include <functional>
+#include <utility>
 #include <vector>
 
 namespace colmap::mvs::owned {
@@ -29,17 +30,17 @@ struct FixedCohortResult {
     NormalMap normal;
   };
   // Order is the caller's reference order, NOT image-index or worker order.
-  std::array<Maps, 2> photo;
-  std::array<Maps, 2> geo;
+  std::vector<Maps> photo;
+  std::vector<Maps> geo;
   static constexpr const char* qualification =
       "experimental_caller_declared_envelope/unqualified";
   ByteCharge before_copy_available;
   ByteCharge before_geo_available;
   uint64_t actual_snapshot_bytes = 0;
-  std::array<uint64_t, 2> actual_geo_staging_bytes{};
+  std::vector<uint64_t> actual_geo_staging_bytes;
 };
 
-// Experimental TWO-reference closed-cohort native entry only. Not the default
+// Experimental finite closed-cohort native entry only. Not the default
 // PatchMatch/Controller/CLI dispatch, a general scene pipeline or an estimator.
 // Caller supplies resolved phase options and immutable input
 // pixels/calibration; it must not mutate them during this synchronous call.
@@ -54,6 +55,8 @@ struct FixedCohortResult {
 // retained until final GEO drain/join. No zero-copy, rolling generation, shared
 // admission credit, disk output, fusion or full-scene qualification is claimed.
 //
+// dispatch selects 1 (serial) or 2 (pair) active owners and must match
+// budget.max_active_owners. Every per-job budget vector matches references.
 // Returned maps are HOST copies from both phases and are charged explicitly.
 // The caller owns resource-bound provenance and real external resource limits;
 // lower-bound checks and RAM/cgroup/GPU-free observations do not certify fit.
@@ -68,7 +71,7 @@ struct FixedCohortResult {
 // sweep-boundary checks may synchronize graph execution.
 FixedCohortResult RunFixedCohortPhotoGeo(
     const std::vector<Image>& images,
-    const std::array<FixedCohortReference, 2>& references,
+    const std::vector<FixedCohortReference>& references,
     const FixedCohortBudget& budget,
     ByteCharge capacity,
     NativeRunDeadline deadline,
@@ -77,5 +80,31 @@ FixedCohortResult RunFixedCohortPhotoGeo(
     const std::atomic<bool>* cancel = nullptr,
     // Diagnostic only; enables sweep synchronization, not throughput timing.
     std::function<void(bool, size_t, int, int)> sweep_observer = {});
+
+// Compatibility for the original two-reference fixture. A serial invocation
+// uses one active owner even when supplied with the old default pair budget.
+inline FixedCohortResult RunFixedCohortPhotoGeo(
+    const std::vector<Image>& images,
+    const std::array<FixedCohortReference, 2>& references,
+    const FixedCohortBudget& budget,
+    ByteCharge capacity,
+    NativeRunDeadline deadline,
+    PairDispatch dispatch = PairDispatch::kPair,
+    int tile_threads = 32,
+    const std::atomic<bool>* cancel = nullptr,
+    std::function<void(bool, size_t, int, int)> sweep_observer = {}) {
+  auto compatible = budget;
+  if (dispatch == PairDispatch::kSerial) compatible.max_active_owners = 1;
+  return RunFixedCohortPhotoGeo(
+      images,
+      std::vector<FixedCohortReference>(references.begin(), references.end()),
+      compatible,
+      capacity,
+      deadline,
+      dispatch,
+      tile_threads,
+      cancel,
+      std::move(sweep_observer));
+}
 
 }  // namespace colmap::mvs::owned

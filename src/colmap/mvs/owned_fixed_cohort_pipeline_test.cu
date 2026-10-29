@@ -9,14 +9,14 @@
 
 namespace colmap::mvs::owned {
 namespace {
-std::vector<Image> Images() {
+std::vector<Image> Images(int count = 2) {
   const float K[9] = {10, 0, 2, 0, 10, 2, 0, 0, 1};
   const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
   const float T[3] = {0, 0, 0};
   std::vector<Image> images;
-  for (int i = 0; i < 2; ++i) {
-    const int width = i ? 3 : 5;
-    const int height = i ? 3 : 4;
+  for (int i = 0; i < count; ++i) {
+    const int width = i % 2 ? 3 : 5;
+    const int height = i % 2 ? 3 : 4;
     images.emplace_back("fixed-" + std::to_string(i), width, height, K, R, T);
     Bitmap bitmap(width, height, false);
     for (int y = 0; y < height; ++y)
@@ -70,9 +70,9 @@ FixedCohortBudget Budget() {
   b.unknown_provenance =
       "tiny 5x4/3x3 fixture: 8MiB each for host metadata/allocator and "
       "device pitch/array/context uncertainty; not workload-calibrated";
-  b.geo_staging_device = {{mib, mib}};
+  b.geo_staging_device = {mib, mib};
   b.headroom_reserve = {mib, mib};
-  b.photo_private = {{{8 * mib, 8 * mib}, {8 * mib, 8 * mib}}};
+  b.photo_private = {{8 * mib, 8 * mib}, {8 * mib, 8 * mib}};
   b.geo_private = b.photo_private;
   return b;
 }
@@ -151,6 +151,168 @@ TEST(FixedCohortPipeline,
   }
 }
 
+// More logical producers than active owners; each source ordinal, including
+// duplicates, must bind to its producer rather than the reused physical slot.
+TEST(FixedCohortPipeline, FourJobsPreserveIdentityAcrossRollingOwners) {
+  auto images = Images(4);
+  int device = -1;
+  CUDA_SAFE_CALL(cudaGetDevice(&device));
+  std::optional<FixedCohortResult> oracle;
+  for (const bool graphs : {false, true}) {
+    for (const size_t active : {size_t{1}, size_t{2}}) {
+      auto pair = References(device, graphs);
+      std::vector<FixedCohortReference> refs = {
+          pair[0], pair[1], pair[0], pair[1]};
+      const std::vector<int> ids = {3, 0, 2, 1};
+      for (size_t i = 0; i < refs.size(); ++i) {
+        refs[i].reference_image_idx = ids[i];
+        refs[i].photo_sources = {
+            ids[(i + 1) % 4], ids[(i + 2) % 4], ids[(i + 1) % 4]};
+        refs[i].geo_sources = refs[i].photo_sources;
+      }
+      auto budget = Budget();
+      budget.max_active_owners = active;
+      budget.photo_private.resize(4, budget.photo_private.front());
+      budget.geo_private.resize(4, budget.geo_private.front());
+      budget.geo_staging_device.resize(4, budget.geo_staging_device.front());
+      const auto dispatch =
+          active == 1 ? PairDispatch::kSerial : PairDispatch::kPair;
+      const auto result = RunFixedCohortPhotoGeo(
+          images,
+          refs,
+          budget,
+          {128ull << 20, 128ull << 20},
+          NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
+          dispatch);
+      ASSERT_EQ(result.photo.size(), 4);
+      ASSERT_EQ(result.geo.size(), 4);
+      ASSERT_EQ(result.actual_geo_staging_bytes.size(), 4);
+      const auto key = std::string(graphs ? "graph" : "stream") + "_active" +
+                       std::to_string(active);
+      RecordProperty(key + "_before_copy_available_host",
+                     std::to_string(result.before_copy_available.host));
+      RecordProperty(key + "_before_copy_available_device",
+                     std::to_string(result.before_copy_available.device));
+      RecordProperty(key + "_before_geo_available_host",
+                     std::to_string(result.before_geo_available.host));
+      RecordProperty(key + "_before_geo_available_device",
+                     std::to_string(result.before_geo_available.device));
+      RecordProperty(key + "_snapshot_bytes",
+                     std::to_string(result.actual_snapshot_bytes));
+      RecordProperty(key + "_declared_snapshot_bytes",
+                     std::to_string(budget.snapshots.device));
+      const auto peak = FixedCohortPeaks(budget).peak;
+      RecordProperty(key + "_declared_raw_host_peak",
+                     std::to_string(peak.host));
+      RecordProperty(key + "_declared_raw_device_peak",
+                     std::to_string(peak.device));
+      std::vector<DepthMap> depths(4);
+      std::vector<NormalMap> normals(4);
+      for (size_t i = 0; i < refs.size(); ++i) {
+        RecordProperty(key + "_staging_bytes_job" + std::to_string(i),
+                       std::to_string(result.actual_geo_staging_bytes[i]));
+        RecordProperty(key + "_declared_staging_bytes_job" + std::to_string(i),
+                       std::to_string(budget.geo_staging_device[i]));
+        PatchMatch::Problem problem;
+        problem.images = &images;
+        problem.ref_image_idx = ids[i];
+        problem.src_image_idxs = refs[i].photo_sources;
+        PatchMatchCuda control(refs[i].photo_options, problem);
+        control.Run();
+        ExpectBits(control.GetDepthMap().GetData(),
+                   result.photo[i].depth.GetData());
+        ExpectBits(control.GetNormalMap().GetData(),
+                   result.photo[i].normal.GetData());
+        depths[ids[i]] = result.photo[i].depth;
+        normals[ids[i]] = result.photo[i].normal;
+      }
+      for (size_t i = 0; i < refs.size(); ++i) {
+        PatchMatch::Problem problem;
+        problem.images = &images;
+        problem.ref_image_idx = ids[i];
+        problem.src_image_idxs = refs[i].geo_sources;
+        problem.depth_maps = &depths;
+        problem.normal_maps = &normals;
+        PatchMatchCuda control(refs[i].geo_options, problem);
+        control.Run();
+        ExpectBits(control.GetDepthMap().GetData(),
+                   result.geo[i].depth.GetData());
+        ExpectBits(control.GetNormalMap().GetData(),
+                   result.geo[i].normal.GetData());
+        if (oracle) {
+          ExpectBits(oracle->photo[i].depth.GetData(),
+                     result.photo[i].depth.GetData());
+          ExpectBits(oracle->photo[i].normal.GetData(),
+                     result.photo[i].normal.GetData());
+          ExpectBits(oracle->geo[i].depth.GetData(),
+                     result.geo[i].depth.GetData());
+          ExpectBits(oracle->geo[i].normal.GetData(),
+                     result.geo[i].normal.GetData());
+        }
+      }
+      if (!oracle) oracle = result;
+      std::atomic<int> geo_sweeps{0};
+      std::atomic<bool> late_photo{false};
+      std::atomic<bool> tail_photo_started{false};
+      EXPECT_THROW(RunFixedCohortPhotoGeo(
+                       images,
+                       refs,
+                       budget,
+                       {128ull << 20, 128ull << 20},
+                       NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
+                       dispatch,
+                       32,
+                       nullptr,
+                       [&](bool geo, size_t job, int, int) {
+                         if (geo) ++geo_sweeps;
+                         if (!geo && job == 3) tail_photo_started = true;
+                         if (!geo && job == 2) {
+                           late_photo = true;
+                           throw std::runtime_error("late PHOTO failure");
+                         }
+                       }),
+                   std::runtime_error);
+      EXPECT_TRUE(late_photo.load());
+      if (active == 1) EXPECT_FALSE(tail_photo_started.load());
+      EXPECT_EQ(geo_sweeps.load(), 0);
+    }
+  }
+}
+
+TEST(FixedCohortPipeline, AllFourProducerMapsMustBeRetainedBeforeDeviceWork) {
+  const auto images = Images(4);
+  const auto pair = References(0, false);
+  std::vector<FixedCohortReference> refs = {pair[0], pair[1], pair[0], pair[1]};
+  const std::vector<int> ids = {3, 0, 2, 1};
+  for (size_t i = 0; i < refs.size(); ++i) {
+    refs[i].reference_image_idx = ids[i];
+    refs[i].photo_sources = {ids[(i + 1) % 4]};
+    refs[i].geo_sources = refs[i].photo_sources;
+  }
+  auto budget = Budget();
+  budget.photo_private.resize(4, budget.photo_private.front());
+  budget.geo_private.resize(4, budget.geo_private.front());
+  budget.geo_staging_device.resize(4, budget.geo_staging_device.front());
+  const auto run = [&](const FixedCohortBudget& b) {
+    return RunFixedCohortPhotoGeo(
+        images,
+        refs,
+        b,
+        {128ull << 20, 128ull << 20},
+        NativeRunDeadline::FromBudget(std::chrono::seconds(5)));
+  };
+  // Four maps = (20+9+20+9)*16 = 928 raw bytes; an active-pair
+  // retention allowance alone is insufficient even with one aggregate margin.
+  budget.snapshots.device = 464;
+  EXPECT_THROW(run(budget), std::invalid_argument);
+  budget = Budget();
+  budget.photo_private.resize(4, budget.photo_private.front());
+  budget.geo_private.resize(4, budget.geo_private.front());
+  budget.geo_staging_device.resize(4, budget.geo_staging_device.front());
+  budget.host_outputs.host = 928;  // Both returned phases require 1856.
+  EXPECT_THROW(run(budget), std::invalid_argument);
+}
+
 TEST(FixedCohortPipeline, PublicEntryRefusesInvalidInputsBeforeDeviceWork) {
   const auto images = Images();
   const auto refs = References(0, false);
@@ -179,6 +341,21 @@ TEST(FixedCohortPipeline, PublicEntryRefusesInvalidInputsBeforeDeviceWork) {
   auto small = Budget();
   small.snapshots.device = 1;
   EXPECT_THROW(run(refs, small, cap), std::invalid_argument);
+  std::vector<FixedCohortReference> vector_refs(refs.begin(), refs.end());
+  EXPECT_THROW(run(std::vector<FixedCohortReference>{}, Budget(), cap),
+               std::invalid_argument);
+  vector_refs.push_back(refs.front());
+  EXPECT_THROW(run(vector_refs, Budget(), cap), std::invalid_argument);
+  vector_refs.assign(refs.begin(), refs.end());
+  auto mismatched = Budget();
+  mismatched.max_active_owners = 1;
+  EXPECT_THROW(run(vector_refs, mismatched, cap), std::invalid_argument);
+  mismatched = Budget();
+  mismatched.geo_private.pop_back();
+  EXPECT_THROW(run(vector_refs, mismatched, cap), std::invalid_argument);
+  mismatched = Budget();
+  mismatched.geo_staging_device.pop_back();
+  EXPECT_THROW(run(vector_refs, mismatched, cap), std::invalid_argument);
   std::atomic<bool> cancel{true};
   EXPECT_THROW(RunFixedCohortPhotoGeo(
                    images,

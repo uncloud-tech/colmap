@@ -5,7 +5,10 @@
 #include "colmap/mvs/owned_pair_validation.h"
 #include "colmap/mvs/owned_resident_minima.h"
 
+#include <algorithm>
 #include <array>
+#include <functional>
+#include <vector>
 
 namespace colmap::mvs::owned {
 
@@ -36,11 +39,13 @@ struct FixedCohortBudget {
   ByteCharge unknown;
   std::string unknown_provenance;
   // Sub-bounds ALREADY INSIDE geo_private, not an additional ledger charge.
-  std::array<uint64_t, 2> geo_staging_device{};
+  std::vector<uint64_t> geo_staging_device = std::vector<uint64_t>(2);
   // Unallocated headroom in addition to the once-margined peak.
   ByteCharge headroom_reserve;
-  std::array<ByteCharge, 2> photo_private;
-  std::array<ByteCharge, 2> geo_private;
+  // Serial=1 / pair=2. Logical job count is independent of active owners.
+  size_t max_active_owners = 2;
+  std::vector<ByteCharge> photo_private = std::vector<ByteCharge>(2);
+  std::vector<ByteCharge> geo_private = std::vector<ByteCharge>(2);
 };
 
 struct FixedCohortBudgetPeaks {
@@ -49,8 +54,36 @@ struct FixedCohortBudgetPeaks {
   ByteCharge peak;
 };
 
+inline void ValidateFixedCohortJobShape(const FixedCohortBudget& budget) {
+  if (!budget.max_active_owners || budget.max_active_owners > 2 ||
+      budget.photo_private.empty() ||
+      budget.geo_private.size() != budget.photo_private.size() ||
+      budget.geo_staging_device.size() != budget.photo_private.size())
+    throw std::invalid_argument("invalid fixed-cohort job bounds/cardinality");
+}
+
+// Resourcewise top active jobs, not sum(all jobs) or top jobs by one resource.
+// This bounds any simultaneous admitted subset, including copy transitions.
+inline ByteCharge FixedCohortActivePeak(const std::vector<ByteCharge>& jobs,
+                                        size_t active) {
+  std::vector<uint64_t> host, device;
+  for (const auto job : jobs) {
+    host.push_back(job.host);
+    device.push_back(job.device);
+  }
+  std::sort(host.begin(), host.end(), std::greater<uint64_t>());
+  std::sort(device.begin(), device.end(), std::greater<uint64_t>());
+  ByteCharge peak{};
+  for (size_t i = 0; i < std::min(active, jobs.size()); ++i) {
+    peak.host = CheckedAdd(peak.host, host[i]);
+    peak.device = CheckedAdd(peak.device, device[i]);
+  }
+  return peak;
+}
+
 inline FixedCohortBudgetPeaks FixedCohortPeaks(
     const FixedCohortBudget& budget) {
+  ValidateFixedCohortJobShape(budget);
   const auto add = [](ByteCharge a, ByteCharge b) {
     return ByteCharge{CheckedAdd(a.host, b.host),
                       CheckedAdd(a.device, b.device)};
@@ -60,12 +93,12 @@ inline FixedCohortBudgetPeaks FixedCohortPeaks(
   retained = add(retained, budget.snapshots);
   retained = add(retained, budget.process);
   retained = add(retained, budget.unknown);
-  auto photo = retained;
-  auto geo = retained;
-  for (size_t i = 0; i < 2; ++i) {
-    photo = add(photo, budget.photo_private[i]);
-    geo = add(geo, budget.geo_private[i]);
-  }
+  const auto photo = add(
+      retained,
+      FixedCohortActivePeak(budget.photo_private, budget.max_active_owners));
+  const auto geo =
+      add(retained,
+          FixedCohortActivePeak(budget.geo_private, budget.max_active_owners));
   return {photo,
           geo,
           {std::max(photo.host, geo.host), std::max(photo.device, geo.device)}};
@@ -98,7 +131,7 @@ inline ByteCharge AdmitFixedCohortBudget(const FixedCohortBudget& budget,
       budget.frozen_inputs.device || budget.host_outputs.device ||
       budget.snapshots.host)
     throw std::invalid_argument("invalid fixed-cohort budget shape");
-  for (size_t i = 0; i < 2; ++i) {
+  for (size_t i = 0; i < budget.photo_private.size(); ++i) {
     if (!budget.photo_private[i].host || !budget.photo_private[i].device ||
         !budget.geo_private[i].host || !budget.geo_private[i].device ||
         !budget.geo_staging_device[i] ||
@@ -173,7 +206,10 @@ inline void CheckFixedCohortPhaseHeadroom(const FixedCohortBudget& budget,
 inline void CheckFixedCohortPhysicalCopies(
     const FixedCohortBudget& budget,
     uint64_t snapshots,
-    const std::array<uint64_t, 2>& staging) {
+    const std::vector<uint64_t>& staging) {
+  ValidateFixedCohortJobShape(budget);
+  if (staging.size() != budget.geo_staging_device.size())
+    throw std::invalid_argument("fixed-cohort staging cardinality mismatch");
   const auto excess = [](uint64_t actual, uint64_t estimate) {
     return actual > estimate ? actual - estimate : 0;
   };
@@ -181,9 +217,10 @@ inline void CheckFixedCohortPhysicalCopies(
   // Setup is serialized by PairCoordinator; each adapter's temporary pitched
   // staging is freed before the next preparation lease. Only the larger extra
   // staging peak can overlap retained snapshots/other live private owners.
-  const auto staging_extra =
-      std::max(excess(staging[0], budget.geo_staging_device[0]),
-               excess(staging[1], budget.geo_staging_device[1]));
+  uint64_t staging_extra = 0;
+  for (size_t i = 0; i < staging.size(); ++i)
+    staging_extra = std::max(staging_extra,
+                             excess(staging[i], budget.geo_staging_device[i]));
   const auto phases = FixedCohortPeaks(budget);
   if (CheckedAdd(phases.photo.device, snapshot_extra) >
           MarginBytes(phases.photo.device) ||

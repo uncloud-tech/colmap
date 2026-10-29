@@ -17,9 +17,9 @@ int main() {
   budget.unknown = {1, 2};
   budget.unknown_provenance =
       "fixture: metadata and driver allocation uncertainty";
-  budget.geo_staging_device = {{1, 1}};
-  budget.photo_private = {{{30, 40}, {50, 60}}};
-  budget.geo_private = {{{70, 80}, {90, 100}}};
+  budget.geo_staging_device = {1, 1};
+  budget.photo_private = {{30, 40}, {50, 60}};
+  budget.geo_private = {{70, 80}, {90, 100}};
   // All snapshots and outputs are reserved even before publication; private
   // PHOTO and GEO owners are mutually exclusive, never summed together.
   const auto peaks = FixedCohortPeaks(budget);
@@ -48,13 +48,13 @@ int main() {
   assert(headroom_refused);
   // PHOTO raw device peak 422 -> original once-margined 435; GEO 502 ->
   // 518. A 13-byte snapshot discrepancy fits BOTH phases, without remargin.
-  CheckFixedCohortPhysicalCopies(budget, 313, {{1, 1}});
+  CheckFixedCohortPhysicalCopies(budget, 313, {1, 1});
   // Simultaneous snapshot +13 and staging +3 exactly consume GEO's
   // original 16-byte margin; serialized staging extras are not summed.
-  CheckFixedCohortPhysicalCopies(budget, 313, {{4, 4}});
+  CheckFixedCohortPhysicalCopies(budget, 313, {4, 4});
   bool pitch_refused = false;
   try {
-    CheckFixedCohortPhysicalCopies(budget, 314, {{1, 1}});
+    CheckFixedCohortPhysicalCopies(budget, 314, {1, 1});
   } catch (const std::invalid_argument&) {
     pitch_refused = true;
   }
@@ -62,7 +62,7 @@ int main() {
   bool combined_refused = false;
   try {
     // Snapshot +13 and staging +4 exceed GEO's existing 16-byte margin.
-    CheckFixedCohortPhysicalCopies(budget, 313, {{5, 1}});
+    CheckFixedCohortPhysicalCopies(budget, 313, {5, 1});
   } catch (const std::invalid_argument&) {
     combined_refused = true;
   }
@@ -165,6 +165,70 @@ int main() {
     missing_refused = true;
   }
   assert(missing_refused);
+  // Four logical jobs retain every map/output, but only resourcewise top-N
+  // private inventories can coexist. Host and device maxima differ by job.
+  auto four = budget;
+  four.photo_private = {{10, 100}, {80, 20}, {30, 70}, {60, 40}};
+  four.geo_private = four.photo_private;
+  four.geo_staging_device = {1, 1, 1, 1};
+  four.snapshots.device = 600;
+  four.host_outputs.host = 400;
+  four.max_active_owners = 2;
+  auto four_peaks = FixedCohortPeaks(four);
+  assert(four_peaks.photo.host == 751 && four_peaks.photo.device == 792);
+  assert(AdmitFixedCohortBudget(four, {774, 816}).host == 774);
+  four.max_active_owners = 1;
+  four_peaks = FixedCohortPeaks(four);
+  assert(four_peaks.photo.host == 691 && four_peaks.photo.device == 722);
+  // Every snapshot discrepancy is aggregated before this public check;
+  // serialized staging peaks use the largest excess, not the final job only.
+  CheckFixedCohortPhysicalCopies(four, 621, {1, 1, 1, 1});
+  // GEO's 22-byte margin covers snapshot +21 and staging +1, not +2.
+  CheckFixedCohortPhysicalCopies(four, 621, {2, 2, 2, 2});
+  bool early_staging_refused = false;
+  try {
+    CheckFixedCohortPhysicalCopies(four, 621, {3, 1, 1, 1});
+  } catch (const std::invalid_argument&) {
+    early_staging_refused = true;
+  }
+  assert(early_staging_refused);
+  bool late_staging_refused = false;
+  try {
+    CheckFixedCohortPhysicalCopies(four, 621, {1, 1, 1, 5});
+  } catch (const std::invalid_argument&) {
+    late_staging_refused = true;
+  }
+  assert(late_staging_refused);
+  four.geo_private.pop_back();
+  bool shape_refused = false;
+  try {
+    (void)AdmitFixedCohortBudget(four, {1000, 1000});
+  } catch (const std::invalid_argument&) {
+    shape_refused = true;
+  }
+  assert(shape_refused);
+  for (size_t active : {size_t{0}, size_t{3}}) {
+    auto invalid = budget;
+    invalid.max_active_owners = active;
+    bool active_refused = false;
+    try {
+      (void)AdmitFixedCohortBudget(invalid, {1000, 1000});
+    } catch (const std::invalid_argument&) {
+      active_refused = true;
+    }
+    assert(active_refused);
+  }
+  auto missing_late_bound = budget;
+  missing_late_bound.photo_private.resize(4, {30, 40});
+  missing_late_bound.geo_private.resize(4, {70, 80});
+  missing_late_bound.geo_staging_device = {1, 1, 1, 0};
+  bool late_bound_refused = false;
+  try {
+    (void)AdmitFixedCohortBudget(missing_late_bound, {1000, 1000});
+  } catch (const std::invalid_argument&) {
+    late_bound_refused = true;
+  }
+  assert(late_bound_refused);
   auto bad = budget;
   bad.process.host = std::numeric_limits<uint64_t>::max();
   bool refused = false;
