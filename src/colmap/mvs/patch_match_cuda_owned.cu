@@ -1677,9 +1677,18 @@ CudaSelectionStorage::~CudaSelectionStorage() { (void)cudaFree(ptr_); }
 PatchMatchCuda::PatchMatchCuda(const PatchMatchOptions& options,
                                const PatchMatch::Problem& problem,
                                const int owned_tile_threads)
+    : PatchMatchCuda(options, problem, owned_tile_threads, nullptr) {}
+
+PatchMatchCuda::PatchMatchCuda(
+    const PatchMatchOptions& options,
+    const PatchMatch::Problem& problem,
+    const int owned_tile_threads,
+    std::shared_ptr<const GeoPhotoInput> geo_photo_input)
     : options_(options),
       owned_tile_threads_(ValidateOwnedTileThreads(owned_tile_threads)),
       problem_(problem),
+      photo_output_camera_(problem.images->at(problem.ref_image_idx)),
+      geo_photo_input_(std::move(geo_photo_input)),
       ref_width_(0),
       ref_height_(0),
       rotation_in_half_pi_(0) {
@@ -1688,6 +1697,7 @@ PatchMatchCuda::PatchMatchCuda(const PatchMatchOptions& options,
                               options_.window_step,
                               options_.geom_consistency,
                               true);
+  if (geo_photo_input_) geo_photo_input_->Validate(options_, problem_);
   SetBestCudaDevice(std::stoi(options_.gpu_index));
   stream_ = std::make_unique<OwnedCudaStream>();
   try {
@@ -1722,6 +1732,7 @@ void PatchMatchCuda::Run() {
 }
 
 PhotoOutputSnapshot::PhotoOutputSnapshot(int reference_image_idx,
+                                         PhotoOutputCamera camera,
                                          std::vector<int> source_image_idxs,
                                          PatchMatchOptions options,
                                          int device,
@@ -1729,6 +1740,7 @@ PhotoOutputSnapshot::PhotoOutputSnapshot(int reference_image_idx,
                                          const GpuMat<float>& normal,
                                          cudaStream_t stream)
     : reference_image_idx_(reference_image_idx),
+      camera_(std::move(camera)),
       source_image_idxs_(std::move(source_image_idxs)),
       options_(std::move(options)),
       device_(device),
@@ -1783,6 +1795,7 @@ std::shared_ptr<const PhotoOutputSnapshot> PatchMatchCuda::SnapshotPhotoOutput()
   THROW_CHECK_GE(problem_.ref_image_idx, 0);
   return std::shared_ptr<const PhotoOutputSnapshot>(
       new PhotoOutputSnapshot(problem_.ref_image_idx,
+                              photo_output_camera_,
                               problem_.src_image_idxs,
                               options_,
                               stream_->DeviceIndex(),
@@ -2248,7 +2261,7 @@ void PatchMatchCuda::InitSourceImages() {
   }
 
   // Upload source depth maps to device.
-  if (options_.geom_consistency) {
+  if (options_.geom_consistency && !geo_photo_input_) {
     const float kDefaultValue = 0.0f;
     std::vector<float> src_depth_maps_host_data(
         static_cast<size_t>(max_width * max_height *
@@ -2470,7 +2483,9 @@ void PatchMatchCuda::InitWorkspaceMemory() {
 
   depth_map_.Set(0, std::make_unique<GpuMat<float>>(ref_width_, ref_height_));
   if (options_.geom_consistency) {
-    if (problem_.resident_bank) {
+    if (geo_photo_input_) {
+      // Both maps are copied below, after the normal buffer is allocated.
+    } else if (problem_.resident_bank) {
       const dim3 block(16, 16);
       const dim3 grid((ref_width_ + 15) / 16, (ref_height_ + 15) / 16);
       CopyResidentDepth<<<grid, block, 0, stream_->Get()>>>(
@@ -2523,16 +2538,21 @@ void PatchMatchCuda::InitWorkspaceMemory() {
   ComputeCudaConfig();
 
   if (options_.geom_consistency) {
-    THROW_CHECK(!problem_.resident_bank || problem_.resident_ref_normal);
-    const NormalMap& init_normal_map =
-        problem_.resident_bank
-            ? *problem_.resident_ref_normal
-            : problem_.normal_maps->at(problem_.ref_image_idx);
-    THROW_CHECK_EQ(init_normal_map.GetWidth(), ref_width_);
-    THROW_CHECK_EQ(init_normal_map.GetHeight(), ref_height_);
-    normal_map_->CopyToDevice(init_normal_map.GetPtr(),
-                              init_normal_map.GetWidth() * sizeof(float),
-                              stream_->Get());
+    if (geo_photo_input_) {
+      geo_photo_input_->CopyReferenceMaps(
+          *stream_, *depth_map_.Current(), *normal_map_.Current());
+    } else {
+      THROW_CHECK(!problem_.resident_bank || problem_.resident_ref_normal);
+      const NormalMap& init_normal_map =
+          problem_.resident_bank
+              ? *problem_.resident_ref_normal
+              : problem_.normal_maps->at(problem_.ref_image_idx);
+      THROW_CHECK_EQ(init_normal_map.GetWidth(), ref_width_);
+      THROW_CHECK_EQ(init_normal_map.GetHeight(), ref_height_);
+      normal_map_->CopyToDevice(init_normal_map.GetPtr(),
+                                init_normal_map.GetWidth() * sizeof(float),
+                                stream_->Get());
+    }
   } else {
     InitNormalMap<<<elem_wise_grid_size_,
                     elem_wise_block_size_,

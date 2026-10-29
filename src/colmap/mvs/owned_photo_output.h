@@ -3,9 +3,12 @@
 
 #if !defined(COLMAP_HIP_ENABLED)
 #include "colmap/mvs/gpu_mat.h"
+#include "colmap/mvs/image.h"
 #include "colmap/mvs/owned_cuda_execution.h"
 #include "colmap/mvs/patch_match_options.h"
 
+#include <array>
+#include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <utility>
@@ -13,6 +16,35 @@
 
 namespace colmap::mvs::owned {
 class PatchMatchCuda;
+
+// Frozen at producer construction, not reconstructed from a recyclable index
+// at publication. This binds camera/pose and logical path, NOT pixel contents.
+struct PhotoOutputCamera {
+  explicit PhotoOutputCamera(const Image& image)
+      : path(image.GetPath()),
+        width(image.GetWidth()),
+        height(image.GetHeight()) {
+    std::memcpy(K.data(), image.GetK(), sizeof(K));
+    std::memcpy(R.data(), image.GetR(), sizeof(R));
+    std::memcpy(T.data(), image.GetT(), sizeof(T));
+    std::memcpy(P.data(), image.GetP(), sizeof(P));
+    std::memcpy(inv_P.data(), image.GetInvP(), sizeof(inv_P));
+  }
+  bool Matches(const Image& image) const {
+    return path == image.GetPath() && width == image.GetWidth() &&
+           height == image.GetHeight() &&
+           std::memcmp(K.data(), image.GetK(), sizeof(K)) == 0 &&
+           std::memcmp(R.data(), image.GetR(), sizeof(R)) == 0 &&
+           std::memcmp(T.data(), image.GetT(), sizeof(T)) == 0 &&
+           std::memcmp(P.data(), image.GetP(), sizeof(P)) == 0 &&
+           std::memcmp(inv_P.data(), image.GetInvP(), sizeof(inv_P)) == 0;
+  }
+  std::filesystem::path path;
+  size_t width, height;
+  std::array<float, 9> K, R;
+  std::array<float, 3> T;
+  std::array<float, 12> P, inv_P;
+};
 
 // Read-only planar device view. Coordinates are original output orientation.
 struct PhotoOutputView {
@@ -41,6 +73,7 @@ class PhotoOutputSnapshot
   PhotoOutputSnapshot& operator=(const PhotoOutputSnapshot&) = delete;
 
   int ReferenceImageIdx() const { return reference_image_idx_; }
+  const PhotoOutputCamera& Camera() const { return camera_; }
   const std::vector<int>& SourceImageIdxs() const { return source_image_idxs_; }
   const PatchMatchOptions& Options() const { return options_; }
   int DeviceIndex() const { return device_; }
@@ -83,6 +116,7 @@ class PhotoOutputSnapshot
  private:
   friend class PatchMatchCuda;
   PhotoOutputSnapshot(int reference_image_idx,
+                      PhotoOutputCamera camera,
                       std::vector<int> source_image_idxs,
                       PatchMatchOptions options,
                       int device,
@@ -98,6 +132,7 @@ class PhotoOutputSnapshot
   }
 
   const int reference_image_idx_;
+  const PhotoOutputCamera camera_;
   const std::vector<int> source_image_idxs_;
   const PatchMatchOptions options_;
   const int device_;

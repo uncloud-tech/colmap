@@ -129,6 +129,8 @@ CLOSURE = (
     "src/colmap/image/warp.cc",
     "src/colmap/mvs/owned_input_bank.h",
     "src/colmap/mvs/owned_photo_output.h",
+    "src/colmap/mvs/owned_geo_photo_input.h",
+    "src/colmap/mvs/owned_geo_photo_input.cu",
     "src/colmap/mvs/owned_photo_output_state.h",
     "src/colmap/mvs/owned_input_bank.cc",
     "src/colmap/mvs/owned_input_bank.cu",

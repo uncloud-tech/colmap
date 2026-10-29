@@ -12,6 +12,7 @@
 #include "colmap/mvs/normal_map.h"
 #include "colmap/mvs/owned_async_pool.h"
 #include "colmap/mvs/owned_cuda_execution.h"
+#include "colmap/mvs/owned_geo_photo_input.h"
 #include "colmap/mvs/owned_graph.h"
 #include "colmap/mvs/owned_photo_output.h"
 #include "colmap/mvs/owned_photo_output_state.h"
@@ -52,6 +53,11 @@ class PatchMatchCuda {
   PatchMatchCuda(const PatchMatchOptions& options,
                  const PatchMatch::Problem& problem,
                  int owned_tile_threads = 32);
+  // Native opt-in only; the ordinary facade/default constructor is unchanged.
+  PatchMatchCuda(const PatchMatchOptions& options,
+                 const PatchMatch::Problem& problem,
+                 int owned_tile_threads,
+                 std::shared_ptr<const GeoPhotoInput> geo_photo_input);
 
   ~PatchMatchCuda();
 
@@ -108,6 +114,10 @@ class PatchMatchCuda {
   // destruction explicitly drain the owner stream before either can unwind;
   // the shared_ptr alone is not a GPU completion fence.
   const PatchMatch::Problem problem_;
+  const PhotoOutputCamera photo_output_camera_;
+  // Like problem_'s PHOTO binding: outlives stream users, including graphs and
+  // constructor failure. The destructor/constructor catch drains first.
+  const std::shared_ptr<const GeoPhotoInput> geo_photo_input_;
 
   // Created after device selection; drained before resources, destroyed last.
   std::unique_ptr<OwnedCudaStream> stream_;
@@ -147,6 +157,7 @@ class PatchMatchCuda {
                : src_images_texture_->GetObj();
   }
   cudaTextureObject_t SourceDepthTexture() const {
+    if (geo_photo_input_) return geo_photo_input_->SourceDepthTexture();
     return problem_.resident_bank
                ? borrowed_src_depth_
                : (src_depth_maps_texture_ ? src_depth_maps_texture_->GetObj()

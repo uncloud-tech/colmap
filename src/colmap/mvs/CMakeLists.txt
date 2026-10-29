@@ -285,6 +285,7 @@ if(CUDA_ENABLED)
             owned_async_pool.h
             owned_cuda_execution.h
             owned_photo_output.h owned_photo_output_state.h
+            owned_geo_photo_input.h owned_geo_photo_input.cu
             owned_rotation_storage.h
             owned_selection_scratch.h
             owned_tile.h
@@ -332,6 +333,12 @@ if(CUDA_ENABLED)
     COLMAP_ADD_TEST(
         NAME owned_input_bank_cuda_test
         SRCS owned_input_bank_test.cu
+        LINK_LIBS colmap_mvs_cuda
+    )
+
+    COLMAP_ADD_TEST(
+        NAME owned_geo_photo_input_test
+        SRCS owned_geo_photo_input_test.cu
         LINK_LIBS colmap_mvs_cuda
     )
 
