@@ -8,6 +8,7 @@
 #include "colmap/exe/optimized_dense_plan.h"
 #include "colmap/exe/photo_directory_summary.h"
 #if defined(COLMAP_MVS_ENABLED)
+#include "colmap/exe/fixed_cohort.h"
 #include "colmap/exe/mvs.h"
 #endif
 #include "colmap/exe/sfm.h"
@@ -153,6 +154,8 @@ int main(int argc, char** argv) {
   commands.emplace_back("model_splitter", &colmap::RunModelSplitter);
   commands.emplace_back("model_transformer", &colmap::RunModelTransformer);
 #if defined(COLMAP_MVS_ENABLED)
+  commands.emplace_back("experimental_fixed_cohort",
+                        &colmap::RunExperimentalFixedCohort);
   commands.emplace_back("patch_match_stereo",
                         &colmap::RunPatchMatchStereo,
                         kSupportsGracefulShutdown);

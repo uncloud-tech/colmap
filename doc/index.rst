@@ -192,6 +192,7 @@ support (special credits to `Torsten Sattler <https://tsattler.github.io>`_).
    datasets
    gui
    cli
+   experimental_fixed_cohort
    pycolmap/index
    faq
    changelog

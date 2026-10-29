@@ -234,7 +234,22 @@ class NativeBindingTest(unittest.TestCase):
             for w, h, s in ((1, 1, 1), (1, 9, 2), (11, 1, 4), (7, 19, 5), (19, 7, 5)):
                 host, device = current_owned_shape_minimum(w, h, s)
                 checks.append(f'{{ auto m=ResidentPrivateLogicalMinimum({w},{h},{s},false); assert(m.host=={host} && m.device=={device}); }}')
-            source = '''#include "colmap/mvs/owned_fixed_cohort_budget.h"
+            checks.append('''{ auto raw = BuildFixedCohortLogicalInventory(
+    {{5,4},{3,3},{5,4},{3,3}},
+    {{3,{0,2,0},{0,2,0}}, {0,{2,1,2},{2,1,2}},
+     {2,{1,3,1},{1,3,1}}, {1,{3,0,3},{3,0,3}}}, b);
+    assert(raw.caller_inputs.host == b.caller_inputs.host);
+    assert(raw.host_outputs.host == b.host_outputs.host);
+    assert(raw.snapshots.device == b.snapshots.device);
+    assert(raw.geo_staging_device == b.geo_staging_device);
+    for (size_t i=0;i<4;++i) {
+      assert(raw.photo_private[i].host == b.photo_private[i].host);
+      assert(raw.photo_private[i].device == b.photo_private[i].device);
+      assert(raw.geo_private[i].host == b.geo_private[i].host);
+      assert(raw.geo_private[i].device == b.geo_private[i].device);
+    }
+}''')
+            source = '''#include "colmap/mvs/owned_fixed_cohort_inventory.h"
 #include <cassert>
 #include <iostream>
 using namespace colmap::mvs::owned;
@@ -320,7 +335,7 @@ class WorkspaceFixtureBindingTest(unittest.TestCase):
         self.assertIn('MakeWorkspaceFixture', header)
         self.assertIn('b.max_active_owners = 1', header)
         self.assertIn('b.max_active_owners = 2', header)
-        self.assertIn(tool['cpp']('b8007392eb66127cb92bed2b260dbd519e11b766d09364a6955940c806323914'), header)
+        self.assertIn(tool['cpp']('8d4656dd71c4125cf42324459e7dc9bc90ba3ef29492e25c93f02d9336923dac'), header)
         self.assertIn('b.caller_inputs = {12288ULL,0ULL}', header)
         self.assertIn('b.host_outputs = {393216ULL,0ULL}', header)
         self.assertIn('b.snapshots = {0ULL,196608ULL}', header)

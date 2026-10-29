@@ -132,6 +132,7 @@ CLOSURE = (
     "src/colmap/mvs/owned_geo_photo_input.h",
     "src/colmap/mvs/owned_geo_photo_input.cu",
     "src/colmap/mvs/owned_fixed_cohort_budget.h",
+    "src/colmap/mvs/owned_fixed_cohort_inventory.h",
     "src/colmap/mvs/owned_fixed_cohort_pipeline.h",
     "src/colmap/mvs/owned_fixed_cohort_pipeline.cu",
     "src/colmap/mvs/owned_fixed_cohort_validation.h",

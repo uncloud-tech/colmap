@@ -49,7 +49,7 @@ set(COLMAP_EXE_PUBLIC_LIBS
     colmap_util
 )
 if(MVS_ENABLED)
-    list(APPEND COLMAP_EXE_SRCS mvs.h mvs.cc)
+    list(APPEND COLMAP_EXE_SRCS mvs.h mvs.cc fixed_cohort.h fixed_cohort.cc)
     list(APPEND COLMAP_EXE_PUBLIC_LIBS colmap_mvs)
 endif()
 
@@ -136,6 +136,11 @@ endif()
 
 if(MVS_ENABLED)
     COLMAP_ADD_TEST(
+        NAME fixed_cohort_test
+        SRCS fixed_cohort_test.cc
+        LINK_LIBS colmap_exe
+    )
+    COLMAP_ADD_TEST(
         NAME mvs_test
         SRCS mvs_test.cc
         LINK_LIBS colmap_exe
@@ -176,7 +181,7 @@ set(COLMAP_MAIN_SRCS
     vocab_tree.cc
 )
 if(MVS_ENABLED)
-    list(APPEND COLMAP_MAIN_SRCS mvs.cc)
+    list(APPEND COLMAP_MAIN_SRCS mvs.cc fixed_cohort.cc)
 endif()
 
 COLMAP_ADD_EXECUTABLE(

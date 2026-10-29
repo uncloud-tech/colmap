@@ -26,6 +26,7 @@ class PhotoFingerprintTest(unittest.TestCase):
             "src/colmap/mvs/owned_geo_photo_input.h",
             "src/colmap/mvs/owned_geo_photo_input.cu",
             "src/colmap/mvs/owned_fixed_cohort_budget.h",
+            "src/colmap/mvs/owned_fixed_cohort_inventory.h",
             "src/colmap/mvs/owned_fixed_cohort_pipeline.h",
             "src/colmap/mvs/owned_fixed_cohort_pipeline.cu",
             "src/colmap/mvs/owned_fixed_cohort_validation.h",
@@ -107,7 +108,7 @@ class PhotoFingerprintTest(unittest.TestCase):
             self.assertIn(
                 hashlib.sha256(encoded).hexdigest(), output.read_text()
             )
-            self.assertEqual(len(generator.CLOSURE), 43)
+            self.assertEqual(len(generator.CLOSURE), 44)
             self.assertIn(
                 f'kPhotoPhaseV1SourceCommit[] = "{lineage}"', output.read_text()
             )
@@ -138,7 +139,8 @@ class PhotoFingerprintTest(unittest.TestCase):
             for new_header in (
                 "owned_photo_output.h", "owned_photo_output_state.h",
                 "owned_geo_photo_input.h", "owned_geo_photo_input.cu",
-                "owned_fixed_cohort_budget.h", "owned_fixed_cohort_pipeline.h",
+                "owned_fixed_cohort_budget.h", "owned_fixed_cohort_inventory.h",
+                "owned_fixed_cohort_pipeline.h",
                 "owned_fixed_cohort_pipeline.cu",
                 "owned_fixed_cohort_validation.h", "owned_fixed_cohort_validation.cc",
                 "owned_fixed_cohort_workspace.h", "owned_fixed_cohort_workspace.cc",

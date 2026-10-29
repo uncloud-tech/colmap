@@ -26,11 +26,12 @@ phase options, device and duplicate source ordinals. Input pixel/calibration
 immutability and actual native invocation validation remain the caller/native
 contract; metadata never fabricates file identities or attests pixel contents.
 
-The existing resident allocation generator, frozen closure and digest encoding
-are reused verbatim with a base42 content pin, pending independent source
-review. Content changes refuse until explicit reviewed repinning; revision is
-recorded from actual Git HEAD, not accepted as a self-whitelisting declaration.
-No production/native allocation-closure files are changed by this extension.
+The existing resident allocation generator and digest encoding are reused.
+The closure includes the shared native fixed-cohort logical inventory producer;
+Python/native parity tests compare its complete raw payload inventory. The
+content pin is updated for this implementation, pending independent review.
+Content changes refuse until explicit repinning; revision is recorded from
+actual Git HEAD, not accepted as a self-whitelisting declaration.
 
 Every field delivered to experimental FixedCohortBudget is RAW. One aggregate
 3% margin is applied ONLY by native admission, plus separate explicit headroom.
@@ -44,9 +45,12 @@ Classified live-process observation credits remain inside process storage.
 This is experimental/unqualified, not calibrated or a hard physical-fit bound.
 The tiny fixture's snapshot observation 28672 and staging observations
 6144/6144/4608/6144 are NOT calibration and are not model coefficients.
-No default dispatch, CLI, file producer, GPU performance, or full-scene
-qualification is claimed. The generated C++ initializer is solely a direct
-experimental typed-budget binding; it is not a generic wire framework.
+No default dispatch, GPU performance or full-scene qualification is claimed.
+The independent installed experimental_fixed_cohort command now uses the shared
+native raw producer and existing native workspace/runner/map writers; it does
+not require this Python package. See doc/experimental_fixed_cohort.rst. The
+generated C++ initializer remains a direct experimental test binding, not a
+generic wire framework.
 
 CPU-only validation (no install):
   PYTHONPATH=python python -m unittest colmap_reconstruction.fixed_cohort_test

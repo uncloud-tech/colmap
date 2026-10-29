@@ -59,6 +59,7 @@ COLMAP_ADD_LIBRARY(
         poisson_meshing.h poisson_meshing.cc
         normal_map.h normal_map.cc
         owned_input_bank.h owned_input_bank.cc
+        owned_fixed_cohort_inventory.h
         owned_fixed_cohort_validation.h owned_fixed_cohort_validation.cc
         owned_fixed_cohort_workspace.h owned_fixed_cohort_workspace.cc
         owned_cohort.h

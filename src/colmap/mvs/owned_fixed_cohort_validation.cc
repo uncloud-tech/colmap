@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #include "colmap/mvs/owned_fixed_cohort_validation.h"
 
+#include "colmap/mvs/owned_fixed_cohort_inventory.h"
 #include "colmap/mvs/patch_match_execution.h"
 
 #include <algorithm>
@@ -105,37 +106,6 @@ int FixedCohortDevice(const PatchMatchOptions& options) {
   return static_cast<int>(device);
 }
 
-namespace {
-// Known lower-bound inventory only: reuse the current-owned solver envelope.
-// Private source grayscale remains extra to resident-bank solver minima. GEO
-// additionally creates float staging + private depth texture. Physical pitches,
-// array allocation overhead and allocator/context storage require caller
-// bounds.
-void CheckPrivate(const std::vector<Image>& images,
-                  int reference,
-                  const std::vector<int>& sources,
-                  bool geometry,
-                  ByteCharge bound) {
-  const auto& ref = images.at(reference);
-  const auto minimum = ResidentPrivateLogicalMinimum(
-      ref.GetWidth(), ref.GetHeight(), sources.size(), false);
-  uint64_t width = 0, height = 0;
-  for (int index : sources) {
-    width = std::max(width, static_cast<uint64_t>(images.at(index).GetWidth()));
-    height =
-        std::max(height, static_cast<uint64_t>(images.at(index).GetHeight()));
-  }
-  const auto padded =
-      CheckedMultiply(CheckedMultiply(width, height), sources.size());
-  auto device = CheckedAdd(minimum.device, padded);
-  if (geometry) device = CheckedAdd(device, CheckedMultiply(8, padded));
-  Require(
-      bound.host >= CheckedAdd(minimum.host, padded) && bound.device >= device,
-      "fixed-cohort private bound below known logical inventory");
-}
-
-}  // namespace
-
 void ValidateFixedCohortShape(const std::vector<Image>& images,
                               const std::vector<FixedCohortReference>& refs,
                               const FixedCohortBudget& budget) {
@@ -151,7 +121,8 @@ void ValidateFixedCohortShape(const std::vector<Image>& images,
                 producers.insert(ref.reference_image_idx).second,
             "fixed-cohort invalid/duplicate reference");
   }
-  uint64_t input_bytes = 0;
+  std::vector<FixedCohortImageShape> shapes;
+  std::vector<FixedCohortJobShape> jobs;
   for (const auto& image : images) {
     Require(image.GetWidth() && image.GetHeight(),
             "fixed-cohort empty image shape");
@@ -167,21 +138,12 @@ void ValidateFixedCohortShape(const std::vector<Image>& images,
                 std::abs(image.GetK()[8] - 1) < 1e-6f && image.GetK()[0] > 0 &&
                 image.GetK()[4] > 0,
             "fixed-cohort unsupported intrinsics");
-    input_bytes = CheckedAdd(
-        input_bytes, CheckedMultiply(image.GetWidth(), image.GetHeight()));
+    shapes.push_back({image.GetWidth(), image.GetHeight()});
   }
-  Require(budget.caller_inputs.host >= input_bytes &&
-              budget.frozen_inputs.host >= input_bytes,
-          "fixed-cohort input copy bound insufficient");
-  uint64_t maps = 0;
   for (size_t i = 0; i < refs.size(); ++i) {
     const auto& ref = refs[i];
-    maps = CheckedAdd(
-        maps,
-        CheckedMultiply(
-            CheckedMultiply(images[ref.reference_image_idx].GetWidth(),
-                            images[ref.reference_image_idx].GetHeight()),
-            16));
+    jobs.push_back(
+        {ref.reference_image_idx, ref.photo_sources, ref.geo_sources});
     for (const bool geo : {false, true}) {
       const auto& options = geo ? ref.geo_options : ref.photo_options;
       const auto& sources = geo ? ref.geo_sources : ref.photo_sources;
@@ -209,32 +171,24 @@ void ValidateFixedCohortShape(const std::vector<Image>& images,
                     (!geo || producers.count(source)),
                 "fixed-cohort missing source producer or invalid ordinal");
       }
-      if (geo) {
-        uint64_t width = 0, height = 0;
-        for (int index : sources) {
-          width =
-              std::max(width, static_cast<uint64_t>(images[index].GetWidth()));
-          height = std::max(height,
-                            static_cast<uint64_t>(images[index].GetHeight()));
-        }
-        Require(
-            budget.geo_staging_device[i] >=
-                CheckedMultiply(CheckedMultiply(CheckedMultiply(width, height),
-                                                sources.size()),
-                                4),
-            "fixed-cohort GEO staging bound below logical inventory");
-      }
-      CheckPrivate(images,
-                   ref.reference_image_idx,
-                   sources,
-                   geo,
-                   geo ? budget.geo_private[i] : budget.photo_private[i]);
     }
   }
-  const uint64_t host_phases =
-      budget.output_policy == FixedCohortOutputPolicy::kPhotoAndGeo ? 2 : 1;
-  Require(budget.snapshots.device >= maps &&
-              budget.host_outputs.host >= CheckedMultiply(host_phases, maps),
+  const auto minimum = BuildFixedCohortLogicalInventory(shapes, jobs, budget);
+  Require(budget.caller_inputs.host >= minimum.caller_inputs.host &&
+              budget.frozen_inputs.host >= minimum.frozen_inputs.host,
+          "fixed-cohort input copy bound insufficient");
+  for (size_t i = 0; i < refs.size(); ++i) {
+    Require(budget.geo_staging_device[i] >= minimum.geo_staging_device[i],
+            "fixed-cohort GEO staging bound below logical inventory");
+    Require(
+        budget.photo_private[i].host >= minimum.photo_private[i].host &&
+            budget.photo_private[i].device >= minimum.photo_private[i].device &&
+            budget.geo_private[i].host >= minimum.geo_private[i].host &&
+            budget.geo_private[i].device >= minimum.geo_private[i].device,
+        "fixed-cohort private bound below known logical inventory");
+  }
+  Require(budget.snapshots.device >= minimum.snapshots.device &&
+              budget.host_outputs.host >= minimum.host_outputs.host,
           "fixed-cohort snapshot/output bound below logical maps");
 }
 void ValidateFixedCohortPixels(const std::vector<Image>& images,
