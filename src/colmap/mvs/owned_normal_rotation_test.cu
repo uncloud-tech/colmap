@@ -221,6 +221,64 @@ void CheckRotation(size_t width, size_t height, bool wait) {
   }
 }
 
+// Exercise the real legacy cudaMallocPitch -> compact -> cudaFreeAsync seam.
+// Compare subsequent draws rather than opaque curandState padding. The control
+// uses the previous wait-then-destruct release path. Run with compute-sanitizer
+// as well as normally; Nsight API tracing separately verifies release calls.
+TEST(OwnedPrngRelease, CompactedDrawsMatchSynchronousRelease) {
+  OwnedCudaStream stream;
+  for (const auto shape :
+       {std::pair<int, int>{37, 19}, {19, 37}, {1, 65}, {65, 1}, {1, 1}}) {
+    for (int seed : {-1, 0, 7}) {
+      SCOPED_TRACE(::testing::Message()
+                   << shape.first << "x" << shape.second << " seed=" << seed);
+      const PrngBoundaryLayout layout(shape.first, shape.second);
+      auto actual =
+          MakeOwnedPrng(shape.first, shape.second, stream.Get(), seed);
+      auto control =
+          MakeOwnedPrng(shape.first, shape.second, stream.Get(), seed);
+      const size_t original_pitch = actual->GetPitch();
+      EXPECT_GE(original_pitch, shape.first * sizeof(curandState));
+      // Advance full-image states before compaction, as initialization does.
+      GpuMat<float> init_draws(shape.first, shape.second);
+      init_draws.FillWithRandomNumbers(0.0f, 1.0f, *actual, stream.Get());
+      init_draws.FillWithRandomNumbers(0.0f, 1.0f, *control, stream.Get());
+      GpuMat<curandState> compact(layout.Count(), 1);
+      GpuMat<curandState> reference(layout.Count(), 1);
+      const dim3 block(32, 16);
+      const dim3 grid((shape.first + 31) / 32, (shape.second + 15) / 16);
+      {
+        ScopedStreamCompletion completion(stream.Get());
+        CompactOwnedPrngBoundary<<<grid, block, 0, stream.Get()>>>(
+            actual->View(), compact.GetPtr(), layout);
+        actual->ReleaseAfterInitialization(stream.Get());
+        EXPECT_EQ(actual->GetPtr(), nullptr);
+        EXPECT_EQ(actual->GetPitch(), original_pitch);
+        completion.Wait();
+      }
+      actual.reset();  // Must not free the transferred pointer again.
+      {
+        ScopedStreamCompletion completion(stream.Get());
+        CompactOwnedPrngBoundary<<<grid, block, 0, stream.Get()>>>(
+            control->View(), reference.GetPtr(), layout);
+        completion.Wait();
+      }
+      control.reset();
+      GpuMat<float> draws(layout.Count(), 1), expected(layout.Count(), 1);
+      std::vector<float> observed(layout.Count()), oracle(layout.Count());
+      for (int draw = 0; draw < 16; ++draw) {
+        draws.FillWithRandomNumbers(0.0f, 1.0f, compact, stream.Get());
+        expected.FillWithRandomNumbers(0.0f, 1.0f, reference, stream.Get());
+        draws.CopyToHost(
+            observed.data(), observed.size() * sizeof(float), stream.Get());
+        expected.CopyToHost(
+            oracle.data(), oracle.size() * sizeof(float), stream.Get());
+        EXPECT_EQ(observed, oracle);
+      }
+    }
+  }
+}
+
 TEST(OwnedNormalRotation, PitchedTwoPassBitwiseReference) {
   const std::pair<size_t, size_t> shapes[] = {{65, 97},
                                               {97, 65},

@@ -16,8 +16,10 @@ struct OwnedRotationMemoryPhases {
 // InitRefImage + InitWorkspaceMemory retain the canonical reference image,
 // depth/normal, packed current selection, previous selection, cost and
 // workspace. InitRotationStorage adds compact boundary RNG while full-image RNG
-// is still live, waits for compaction, then FREES full RNG BEFORE any swapped
-// owners. No initialization serialization across independent owners is assumed:
+// is still live, enqueues its stream-ordered release after compaction, then
+// waits for physical release BEFORE any swapped owners (synchronous fallback
+// on devices without stream-ordered allocator support). No initialization
+// serialization across independent owners is assumed:
 // each owner must reserve max(initialization, steady), not just retained
 // inventory.
 inline OwnedRotationMemoryPhases BuildOwnedRotationMemoryPhases(

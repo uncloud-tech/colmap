@@ -212,6 +212,7 @@ GpuMat<T>::GpuMat(size_t width,
 
 template <typename T>
 GpuMat<T>::~GpuMat() {
+  if (!array_ptr_) return;
   // Errors during destruction would be invisible to callers anyway; explicitly
   // discard the return value so HIP's [[nodiscard]] cudaFree does not warn.
 #if !defined(COLMAP_HIP_ENABLED) && CUDART_VERSION >= 11020
