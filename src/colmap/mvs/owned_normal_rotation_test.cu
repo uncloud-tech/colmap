@@ -227,8 +227,9 @@ void CheckRotation(size_t width, size_t height, bool wait) {
 // as well as normally; Nsight API tracing separately verifies release calls.
 TEST(OwnedPrngRelease, CompactedDrawsMatchSynchronousRelease) {
   OwnedCudaStream stream;
-  for (const auto shape :
-       {std::pair<int, int>{37, 19}, {19, 37}, {1, 65}, {65, 1}, {1, 1}}) {
+  const std::pair<int, int> shapes[] = {
+      {37, 19}, {19, 37}, {1, 65}, {65, 1}, {1, 1}};
+  for (const auto& shape : shapes) {
     for (int seed : {-1, 0, 7}) {
       SCOPED_TRACE(::testing::Message()
                    << shape.first << "x" << shape.second << " seed=" << seed);
