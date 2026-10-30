@@ -21,6 +21,22 @@ class PhotoFingerprintTest(unittest.TestCase):
     def test_graph_allocation_and_host_boundary_sources_are_attested(self):
         required = {
             "src/colmap/mvs/owned_input_bank.h",
+            "src/colmap/mvs/owned_photo_output.h",
+            "src/colmap/mvs/owned_photo_output_state.h",
+            "src/colmap/mvs/owned_geo_photo_input.h",
+            "src/colmap/mvs/owned_geo_photo_input.cu",
+            "src/colmap/mvs/owned_fixed_cohort_budget.h",
+            "src/colmap/mvs/owned_fixed_cohort_inventory.h",
+            "src/colmap/mvs/owned_fixed_cohort_pipeline.h",
+            "src/colmap/mvs/owned_fixed_cohort_pipeline.cu",
+            "src/colmap/mvs/owned_fixed_cohort_validation.h",
+            "src/colmap/mvs/owned_fixed_cohort_validation.cc",
+            "src/colmap/mvs/owned_fixed_cohort_workspace.h",
+            "src/colmap/mvs/owned_fixed_cohort_workspace.cc",
+            "src/colmap/mvs/owned_pair_run.h",
+            "src/colmap/mvs/native_run_deadline.h",
+            "src/colmap/mvs/owned_rotation_memory.h",
+            "src/colmap/mvs/owned_resident_minima.h",
             "src/colmap/mvs/owned_input_bank.cc",
             "src/colmap/mvs/owned_input_bank.cu",
             "src/colmap/mvs/owned_cuda_execution.h",
@@ -36,6 +52,7 @@ class PhotoFingerprintTest(unittest.TestCase):
             "src/colmap/mvs/patch_match.cc",
             "src/colmap/mvs/patch_match_cuda_owned.h",
             "src/colmap/mvs/patch_match_options.h",
+            "src/colmap/mvs/optimized_photo_options.h",
         }
         self.assertTrue(required <= set(generator.CLOSURE))
         resident_spec = importlib.util.spec_from_file_location(
@@ -91,7 +108,7 @@ class PhotoFingerprintTest(unittest.TestCase):
             self.assertIn(
                 hashlib.sha256(encoded).hexdigest(), output.read_text()
             )
-            self.assertEqual(len(generator.CLOSURE), 28)
+            self.assertEqual(len(generator.CLOSURE), 44)
             self.assertIn(
                 f'kPhotoPhaseV1SourceCommit[] = "{lineage}"', output.read_text()
             )
@@ -119,6 +136,21 @@ class PhotoFingerprintTest(unittest.TestCase):
             self.assertNotEqual(first, output.read_text())
             self.assertIn(f'"{lineage}";', output.read_text())
             original = output.read_text()
+            for new_header in (
+                "owned_photo_output.h", "owned_photo_output_state.h",
+                "owned_geo_photo_input.h", "owned_geo_photo_input.cu",
+                "owned_fixed_cohort_budget.h", "owned_fixed_cohort_inventory.h",
+                "owned_fixed_cohort_pipeline.h",
+                "owned_fixed_cohort_pipeline.cu",
+                "owned_fixed_cohort_validation.h", "owned_fixed_cohort_validation.cc",
+                "owned_fixed_cohort_workspace.h", "owned_fixed_cohort_workspace.cc",
+            ):
+                added = root / "src/colmap/mvs" / new_header
+                added.write_bytes(b"dirty snapshot allocation\n")
+                with self.assertRaisesRegex(ValueError, new_header):
+                    generator.generate(root, output)
+                self.assertEqual(original, output.read_text())
+                added.write_bytes(b"TEST-EVIDENCE\n")
             source = root / cache_header
             source.write_bytes(b"changed\n")
             with self.assertRaisesRegex(ValueError, cache_header):

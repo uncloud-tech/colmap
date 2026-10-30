@@ -59,6 +59,9 @@ COLMAP_ADD_LIBRARY(
         poisson_meshing.h poisson_meshing.cc
         normal_map.h normal_map.cc
         owned_input_bank.h owned_input_bank.cc
+        owned_fixed_cohort_inventory.h
+        owned_fixed_cohort_validation.h owned_fixed_cohort_validation.cc
+        owned_fixed_cohort_workspace.h owned_fixed_cohort_workspace.cc
         owned_cohort.h
         optimized_photo_delivery.h
         optimized_photo_options.h
@@ -185,6 +188,11 @@ COLMAP_ADD_TEST(
     LINK_LIBS colmap_mvs
 )
 COLMAP_ADD_TEST(
+    NAME owned_fixed_cohort_workspace_test
+    SRCS owned_fixed_cohort_workspace_test.cc
+    LINK_LIBS colmap_mvs
+)
+COLMAP_ADD_TEST(
     NAME workspace_test
     SRCS workspace_test.cc
     LINK_LIBS colmap_mvs
@@ -284,6 +292,10 @@ if(CUDA_ENABLED)
             owned_graph_coordinator.h
             owned_async_pool.h
             owned_cuda_execution.h
+            owned_photo_output.h owned_photo_output_state.h
+            owned_geo_photo_input.h owned_geo_photo_input.cu
+            owned_fixed_cohort_budget.h
+            owned_fixed_cohort_pipeline.h owned_fixed_cohort_pipeline.cu
             owned_rotation_storage.h
             owned_selection_scratch.h
             owned_tile.h
@@ -331,6 +343,44 @@ if(CUDA_ENABLED)
     COLMAP_ADD_TEST(
         NAME owned_input_bank_cuda_test
         SRCS owned_input_bank_test.cu
+        LINK_LIBS colmap_mvs_cuda
+    )
+
+    if(TESTS_ENABLED)
+        target_link_libraries(colmap_mvs_owned_fixed_cohort_workspace_test colmap_mvs_cuda)
+    endif()
+    COLMAP_ADD_TEST(
+        NAME owned_fixed_cohort_pipeline_test
+        SRCS owned_fixed_cohort_pipeline_test.cu
+             owned_fixed_cohort_workspace_execution_test.cu
+        LINK_LIBS colmap_mvs_cuda
+    )
+    if(TESTS_ENABLED)
+        # Test-only canonical RAW binding. No public execution interface.
+        set(FIXED_COHORT_FIXTURE_DIR "${CMAKE_CURRENT_BINARY_DIR}/workspace_fixture")
+        add_custom_target(fixed_cohort_workspace_fixture
+            COMMAND ${Python3_EXECUTABLE}
+                "${CMAKE_CURRENT_SOURCE_DIR}/testdata/generate_fixed_cohort_workspace_fixture.py"
+                --output "${FIXED_COHORT_FIXTURE_DIR}/fixed_cohort_workspace_synthetic.h"
+            BYPRODUCTS "${FIXED_COHORT_FIXTURE_DIR}/fixed_cohort_workspace_synthetic.h"
+            VERBATIM)
+        add_dependencies(colmap_mvs_owned_fixed_cohort_pipeline_test
+            fixed_cohort_workspace_fixture)
+        target_include_directories(colmap_mvs_owned_fixed_cohort_pipeline_test
+            PRIVATE "${FIXED_COHORT_FIXTURE_DIR}")
+        set(COLMAP_FIXED_COHORT_EXTERNAL_HEADER "" CACHE FILEPATH
+            "Optional explicit generated test-only real-workspace request header")
+        if(COLMAP_FIXED_COHORT_EXTERNAL_HEADER)
+            configure_file("${COLMAP_FIXED_COHORT_EXTERNAL_HEADER}"
+                "${FIXED_COHORT_FIXTURE_DIR}/fixed_cohort_workspace_external.h" COPYONLY)
+            target_compile_definitions(colmap_mvs_owned_fixed_cohort_pipeline_test
+                PRIVATE COLMAP_FIXED_COHORT_EXTERNAL_FIXTURE)
+        endif()
+    endif()
+
+    COLMAP_ADD_TEST(
+        NAME owned_geo_photo_input_test
+        SRCS owned_geo_photo_input_test.cu
         LINK_LIBS colmap_mvs_cuda
     )
 
@@ -575,6 +625,23 @@ endif()
 
 # Dependency-free topology/argument packing regression, including CUDA-off builds.
 if(TESTS_ENABLED)
+    add_executable(owned_fixed_cohort_budget_test owned_fixed_cohort_budget_test.cc)
+    target_include_directories(owned_fixed_cohort_budget_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+    target_compile_features(owned_fixed_cohort_budget_test PRIVATE cxx_std_17)
+    target_link_libraries(owned_fixed_cohort_budget_test PRIVATE Threads::Threads)
+    target_compile_options(owned_fixed_cohort_budget_test PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-UNDEBUG>
+        $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>)
+    add_test(NAME mvs/owned_fixed_cohort_budget_test COMMAND owned_fixed_cohort_budget_test)
+
+    add_executable(owned_photo_output_cpu_test owned_photo_output_test.cc)
+    target_include_directories(owned_photo_output_cpu_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+    target_compile_features(owned_photo_output_cpu_test PRIVATE cxx_std_17)
+    target_compile_options(owned_photo_output_cpu_test PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-UNDEBUG>
+        $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>)
+    add_test(NAME mvs/owned_photo_output_cpu_test COMMAND owned_photo_output_cpu_test)
+
     add_executable(owned_graph_cpu_test owned_graph_test.cc)
     target_include_directories(owned_graph_cpu_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
     target_compile_features(owned_graph_cpu_test PRIVATE cxx_std_17)
