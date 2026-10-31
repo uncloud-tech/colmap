@@ -87,6 +87,86 @@ class ReconstructionTest(unittest.TestCase):
             with self.assertRaisesRegex(NativeFailure, 'exit 7'):
                 process.run([sys.executable, '-c', 'raise SystemExit(7)'])
 
+    @unittest.skipUnless(sys.platform == 'linux' and hasattr(os, 'pidfd_open'),
+                         'Linux pidfds required for PID-reuse-safe descendant checks')
+    def test_owned_process_drains_term_ignoring_descendant_after_leader_exit(self) -> None:
+        from colmap_reconstruction.process import NativeProcess
+        import select
+        import signal
+        import socket
+        import threading
+
+        # The descendant acknowledges readiness only after ignoring TERM. Its
+        # leader cannot exit until we hold a pidfd, so cleanup never targets a
+        # recycled PID. A readable pidfd means exited, including a legitimate
+        # orphan zombie on Linux hosts whose PID 1 does not promptly reap.
+        script = '''
+import os, signal, socket, sys
+read_fd, write_fd = os.pipe()
+if os.fork():
+    os.close(write_fd)
+    assert os.read(read_fd, 1) == b'!'
+    os._exit(0)
+os.close(read_fd)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+signal.alarm(20)
+with socket.socket(socket.AF_UNIX) as ready:
+    ready.settimeout(5)
+    ready.connect(sys.argv[1])
+    ready.sendall(('%d %d\\n' % (os.getpid(), os.getppid())).encode())
+    assert ready.recv(1) == b'!'
+os.write(write_fd, b'!')
+os.close(write_fd)
+while True:
+    signal.pause()
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            process = NativeProcess(Path(directory), timeout_seconds=5)
+            failures = []
+
+            def run():
+                try:
+                    process.run([sys.executable, '-c', script, str(ready_path)])
+                except BaseException as error:
+                    failures.append(error)
+
+            ready_path = Path(directory) / 'ready.sock'
+            pidfd = None
+            worker = threading.Thread(target=run)
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.settimeout(5)
+                listener.bind(str(ready_path))
+                listener.listen(1)
+                worker.start()
+                try:
+                    connection, _ = listener.accept()
+                    with connection:
+                        connection.settimeout(5)
+                        with connection.makefile('rb') as message:
+                            descendant, leader = map(int, message.readline(128).split())
+                        pidfd = os.pidfd_open(descendant)
+                        self.assertEqual(os.getpgid(descendant), leader)
+                        self.assertEqual(os.getpgid(leader), leader)
+                        self.assertEqual(select.select([pidfd], [], [], 0)[0], [])
+                        connection.sendall(b'!')
+                    worker.join(timeout=8)
+                    self.assertFalse(worker.is_alive(), 'native run did not finish')
+                    self.assertEqual(failures, [])
+                    self.assertIsNone(process.child)
+                    self.assertEqual(select.select([pidfd], [], [], 3)[0], [pidfd],
+                                     'TERM-ignoring descendant survived leader exit')
+                finally:
+                    if pidfd is not None:
+                        try:
+                            signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+                            self.assertEqual(select.select([pidfd], [], [], 3)[0], [pidfd])
+                        except ProcessLookupError:
+                            pass
+                        finally:
+                            os.close(pidfd)
+                    worker.join(timeout=8)
+                    self.assertFalse(worker.is_alive(), 'native worker leaked')
+
     def test_cli_refuses_hard_caps_and_existing_workspace_before_native_launch(self) -> None:
         from colmap_reconstruction.cli import main
         with tempfile.TemporaryDirectory() as directory:

@@ -3,6 +3,7 @@
 
 No pycolmap, source imports, CUDA, dataset-specific headers or private tooling.
 """
+import json
 import os
 import re
 from pathlib import Path
@@ -82,9 +83,66 @@ class FixedCohortCommandTest(unittest.TestCase):
         args = list(self.args)
         for key in ('depth_min', 'depth_max', 'sigma_spatial'):
             args[args.index('--PatchMatchStereo.' + key) + 1] = '-1'
+        args += ['--PatchMatchStereo.owned_distinct_source_cache', '1']
+        device = os.environ.get('COLMAP_TEST_CUDA_DEVICE', '0')
+        args[args.index('--PatchMatchStereo.gpu_index') + 1] = device
         result = self.invoke(args + ['--resolve_workspace_plan', '1'])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(self.output.exists())
+
+        # The native CPU plan is an independent typed oracle, not a fabricated
+        # execution receipt. Its source vectors reflect native deduplication
+        # and hash iteration of the ordered, duplicate-containing input config.
+        plan_path = self.root / 'plan.json'
+        planned = subprocess.run([
+            os.environ['COLMAP_TEST_EXECUTABLE'], 'optimized_dense_plan',
+            '--workspace_path', str(self.workspace), '--output_path', str(plan_path),
+            '--source_cap', '3', '--num_samples', '15', '--gpu_index', device,
+            '--owned_tex_lookahead', 'false'],
+            capture_output=True, text=True, timeout=40)
+        self.assertEqual(planned.returncode, 0, planned.stdout + planned.stderr)
+        plan = json.loads(plan_path.read_text())
+        names = {image['index']: image['name'] for image in plan['images']}
+        expected_depths = {'a.pgm': (3.75, 8.75),
+                           'nested/b.pgm': (4.5, 10.0),
+                           'c.pgm': (5.25, 11.25)}
+        for phase in ('photo', 'geo'):
+            jobs = plan['phases'][phase]['jobs']
+            self.assertEqual(len(jobs), 3)
+            self.assertEqual({names[job['reference']] for job in jobs}, set(self.names))
+            for job in jobs:
+                name = names[job['reference']]
+                self.assertEqual((job['options']['depth_min'], job['options']['depth_max']),
+                                 expected_depths[name])
+                self.assertEqual(job['options']['sigma_spatial'], 5)
+                self.assertEqual(len(job['sources']), 2)
+                self.assertEqual({names[index] for index in job['sources']},
+                                 set(self.names) - {name})
+
+        if os.environ.get('COLMAP_TEST_OBSERVED_CUDA'):
+            # One tiny actual adapter execution, not a new GPU matrix. Only
+            # this branch proves that execution retained the typed plan facts.
+            report_path = self.root / 'execution.json'
+            execution_args = args + ['--resolve_workspace_plan', '1',
+                                     '--report_path', str(report_path)]
+            execution_args[execution_args.index('--prepare_only') + 1] = '0'
+            execution_args[execution_args.index('--unknown_device_bytes') + 1] = str(4 << 20)
+            execution_args[execution_args.index('--unknown_provenance') + 1] = (
+                'tiny 20x10 fixture: explicit 4 MiB unknown device allowance, uncalibrated')
+            executed = self.invoke(execution_args)
+            self.assertEqual(executed.returncode, 0, executed.stdout + executed.stderr)
+            report = json.loads(report_path.read_text())
+            self.assertEqual(report['status'], 'completed')
+            self.assertEqual(report['effective_backend'], 'experimental_fixed_cohort')
+            for phase in ('photo', 'geo'):
+                # Compare lists, never sets/sorted sources: native effective
+                # order and duplicate resolution must survive the adapter.
+                self.assertEqual(report['phases'][phase], [
+                    {key: job[key] for key in ('reference', 'sources', 'options')}
+                    for job in plan['phases'][phase]['jobs']])
+            # Keep the subsequent prepare-only refusal's no-output assertion.
+            self.output = self.root / 'refused-output'
+            args[args.index('--output_path') + 1] = str(self.output)
         # No implicit PHOTO producer expansion to repair incomplete configs.
         self.config.write_text('a.pgm\nnested/b.pgm,c.pgm\n')
         refused = self.invoke(args + ['--resolve_workspace_plan', '1'])
