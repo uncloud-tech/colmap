@@ -309,6 +309,18 @@ class FixedCohortCommandTest(unittest.TestCase):
     def test_observed_execution_preserves_manual_maps_and_budget_counts(self):
         args = self.args.copy()
         args[args.index('--prepare_only') + 1] = '0'
+        # Execution-only allowance for this tiny fixture, not a calibrated
+        # production bound. At the observed 512-byte pitch, three retained
+        # depth+normal snapshots add 51,840 bytes over logical inventory;
+        # the largest serialized GEO staging adds 12,960 more (3 sources,
+        # including duplicates). Their 64,800-byte discrepancy exceeds the
+        # original ~64 KiB aggregate margin. Declaring 4 MiB unknown device
+        # overhead (process remains 1 MiB) supplies >158,000 bytes in the SAME
+        # 3% margin. CPU boundary tests retain their independent 1 MiB values.
+        args[args.index('--unknown_device_bytes') + 1] = str(4 << 20)
+        args[args.index('--unknown_provenance') + 1] = (
+            'tiny 20x10 GPU fixture: explicit 4 MiB unknown device allowance; '
+            '512-byte snapshot/staging pitch evidence, not physical-fit proof')
         args[args.index('--PatchMatchStereo.gpu_index') + 1] = os.environ.get('COLMAP_TEST_CUDA_DEVICE', '0')
         args += ['--output_policy', 'photo_and_geo', '--PatchMatchStereo.num_iterations', '1']
         control = self.invoke(args)
@@ -320,8 +332,12 @@ class FixedCohortCommandTest(unittest.TestCase):
             for count in (1, 2, 3):
                 for graphs in (0, 1):
                     with self.subTest(storage=storage, count=count, graphs=graphs):
-                        prepared = self.invoke(self.args + ['--active_owners', str(count),
-                                                          '--photo_source_storage', storage])
+                        # Derive each count's cap from the exact execution
+                        # envelope, including its fixture-only allowance.
+                        prepare_args = args.copy()
+                        prepare_args[prepare_args.index('--prepare_only') + 1] = '1'
+                        prepared = self.invoke(prepare_args + ['--active_owners', str(count),
+                                                              '--photo_source_storage', storage])
                         self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
                         match = re.search(r'admitted host=(\d+) device=(\d+)', prepared.stdout)
                         self.assertIsNotNone(match, prepared.stdout)
