@@ -214,17 +214,22 @@ class RefusalAndLifetimeTest(unittest.TestCase):
         import tempfile
         from pathlib import Path
         closure = runpy.run_path(str(self.root / 'scripts/resident/generate_resident_allocation_fingerprint.py'))['CLOSURE']
-        with tempfile.TemporaryDirectory(prefix='cohort-source-', dir=self.root) as directory:
-            root = Path(directory)
-            for name in closure:
-                target = root / name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if name.endswith('owned_fixed_cohort_pipeline.cu'):
-                    target.write_bytes((self.root / name).read_bytes() + b'\n// unknown content\n')
-                else:
-                    target.symlink_to(self.root / name)
-            with self.assertRaisesRegex(ValueError, 'unknown.*fingerprint'):
-                self.forecast(source_root=root)
+        for changed in ('src/colmap/mvs/owned_fixed_cohort_pipeline.cu',
+                        'src/colmap/mvs/owned_fixed_cohort_budget.h',
+                        'src/colmap/mvs/owned_fixed_cohort_inventory.h',
+                        'src/colmap/exe/fixed_cohort.cc'):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory(
+                    prefix='cohort-source-', dir=self.root) as directory:
+                root = Path(directory)
+                for name in closure:
+                    target = root / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    if name == changed:
+                        target.write_bytes((self.root / name).read_bytes() + b'\n// unknown content\n')
+                    else:
+                        target.symlink_to(self.root / name)
+                with self.assertRaisesRegex(ValueError, 'unknown.*fingerprint'):
+                    self.forecast(source_root=root)
 
 
 class NativeBindingTest(unittest.TestCase):
@@ -373,7 +378,7 @@ class WorkspaceFixtureBindingTest(unittest.TestCase):
         self.assertIn('MakeWorkspaceFixture', header)
         self.assertIn('b.max_active_owners = 1', header)
         self.assertIn('b.max_active_owners = 2', header)
-        self.assertIn(tool['cpp']('f74e0a7b322dc8d204a7100b1aec48f0a5686383acc08456a27a2b427481b1be'), header)
+        self.assertIn(tool['cpp']('9f46d6f3340f2cf0f0b93bfa552fe45f0ca1c3e33f18fa080698b1313113275c'), header)
         self.assertIn('b.caller_inputs = {12288ULL,0ULL}', header)
         self.assertIn('b.host_outputs = {393216ULL,0ULL}', header)
         self.assertIn('b.snapshots = {0ULL,196608ULL}', header)

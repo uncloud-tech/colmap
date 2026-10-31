@@ -36,6 +36,110 @@ int main() {
   private_config.photo_source_storage = FixedCohortPhotoSourceStorage::kPrivate;
   const auto private_inventory =
       BuildFixedCohortLogicalInventory(shapes, jobs, private_config);
+  // Storage policy compares both admitted phase counts, not their max/sum.
+  assert(PreferSharedFixedCohortCounts({1, 2}, {2, 2}));
+  assert(PreferSharedFixedCohortCounts({2, 1}, {2, 2}));
+  assert(!PreferSharedFixedCohortCounts({1, 3}, {2, 2}));
+  assert(!PreferSharedFixedCohortCounts({3, 1}, {2, 2}));
+  assert(!PreferSharedFixedCohortCounts({2, 2}, {2, 2}));
+  // Auto is a metadata-only request; equal admitted counts prefer private.
+  const auto automatic = SelectFixedCohortPhotoSourceStorage(
+      shapes, jobs, private_config, {100000, 100000});
+  assert(automatic.budget.photo_source_storage ==
+         FixedCohortPhotoSourceStorage::kPrivate);
+  assert(automatic.budget.max_active_owners == 2);
+  // Same canonical inputs, one margin. A large repeated PHOTO source and
+  // tiny closed GEO producers isolate the storage/count decision.
+  const std::vector<FixedCohortImageShape> auto_images =
+      {{1, 1}, {1, 1}, {100, 100}};
+  const std::vector<FixedCohortJobShape> auto_jobs =
+      {{0, {2, 2, 2, 2}, {1}}, {1, {2, 2, 2, 2}, {0}}};
+  auto auto_config = private_config;
+  auto_config.max_active_owners = 1;
+  const auto choose = [&](ByteCharge cap, bool phases = false,
+                          size_t ceiling = 0) {
+    return SelectFixedCohortPhotoSourceStorage(
+        auto_images, auto_jobs, auto_config, cap, ceiling, phases);
+  };
+  for (bool phases : {false, true}) {
+    const auto better = choose({1000000, 50000}, phases);
+    assert(better.budget.photo_source_storage ==
+           FixedCohortPhotoSourceStorage::kShared);
+    assert(better.budget.max_active_owners == 2);
+    assert(FixedCohortPhaseActiveOwners(better.budget, false) == 2);
+    assert(better.reason == "shared dominates admitted PHOTO/GEO counts");
+    assert(choose({1000000, 20000}, phases).reason ==
+           "only shared fits complete pipeline");
+    assert(choose({65000, 50000}, phases).reason ==
+           "only private fits complete pipeline");
+    assert(choose({1000000, 1000000}, phases).reason ==
+           "equal counts prefer private");
+    assert(choose({1000000, 50000}, phases, 1).reason ==
+           "equal counts prefer private");
+    bool neither = false;
+    try {
+      choose({0, 0}, phases);
+    } catch (const FixedCohortCapacityRefusal& error) {
+      const std::string message = error.what();
+      neither = message.find("private:") != std::string::npos &&
+                message.find("shared:") != std::string::npos &&
+                message.find("host and device capacity") != std::string::npos;
+    }
+    assert(neither);
+  }
+  assert(auto_config.photo_source_storage ==
+         FixedCohortPhotoSourceStorage::kPrivate);
+  assert(auto_config.photo_private.size() == 2);  // Request not mutated.
+  // No-overlap, opposed aspect ratios: global padding and extra host union
+  // erase any gain. Even unlimited memory cannot promote a tied shared plan.
+  const auto padded_auto = SelectFixedCohortPhotoSourceStorage(
+      {{10, 1}, {1, 10}}, {{0, {1}, {1}}, {1, {0}, {0}}},
+      auto_config, {1000000, 1000000});
+  assert(padded_auto.budget.photo_source_storage ==
+         FixedCohortPhotoSourceStorage::kPrivate);
+  auto malformed_config = auto_config;
+  malformed_config.unknown_provenance.clear();
+  bool malformed_not_capacity = false;
+  try {
+    SelectFixedCohortPhotoSourceStorage(auto_images, auto_jobs,
+                                        malformed_config, {0, 0});
+  } catch (const FixedCohortCapacityRefusal&) {
+    assert(false);
+  } catch (const std::invalid_argument&) {
+    malformed_not_capacity = true;
+  }
+  assert(malformed_not_capacity);
+  // Overflow at the full ceiling must not masquerade as singleton refusal.
+  auto overflowing_config = auto_config;
+  overflowing_config.process.device = maximum - 100000;
+  bool auto_overflow = false;
+  try {
+    SelectFixedCohortPhotoSourceStorage(auto_images, auto_jobs,
+                                        overflowing_config, {0, 0});
+  } catch (const std::overflow_error&) {
+    auto_overflow = true;
+  }
+  assert(auto_overflow);
+  bool shared_padding_overflow = false;
+  try {
+    SelectFixedCohortPhotoSourceStorage(
+        {{1, 1}, {1, 1}, {1ull << 32, 1}, {1, 1ull << 32}},
+        {{0, {2}, {1}}, {1, {3}, {0}}}, auto_config, {0, 0});
+  } catch (const std::overflow_error&) {
+    shared_padding_overflow = true;
+  }
+  assert(shared_padding_overflow);
+  bool zero_shape = false;
+  try {
+    SelectFixedCohortPhotoSourceStorage(
+        {{1, 1}, {1, 1}, {100, 100}, {0, 100}},
+        auto_jobs, auto_config, {0, 0});
+  } catch (const FixedCohortCapacityRefusal&) {
+    assert(false);
+  } catch (const std::invalid_argument&) {
+    zero_shape = true;
+  }
+  assert(zero_shape);
   // Three distinct layers, global extent 5x7, not five source ordinals.
   assert(shared.photo_shared.host == 105 && shared.photo_shared.device == 105);
   assert(shared.photo_private[0].host ==
@@ -641,6 +745,50 @@ int main() {
           tiny, {maximum, CheckedAdd(admitted_tiny.device, tiny.headroom_reserve.device)});
       assert(counts[heavy_photo ? 0 : 1].count == 1);
       assert(counts[heavy_photo ? 1 : 0].count == 3);
+    }
+  }
+  // Mirror new actual-CLI AUTO fixture cap derivation, including the explicit
+  // GPU-only allowance. It is test overhead, not estimator calibration.
+  for (uint64_t unknown_device : {1ull << 20, 4ull << 20}) {
+    FixedCohortBudget config;
+    config.max_active_owners = 1;
+    config.process = {1 << 20, 1 << 20};
+    config.unknown = {1 << 20, unknown_device};
+    config.unknown_provenance = "uncalibrated tiny fixture allowance";
+    config.headroom_reserve = {1 << 20, 1 << 20};
+    const std::vector<FixedCohortImageShape> tiny_images(3, {20, 10});
+    std::vector<FixedCohortJobShape> tiny_jobs;
+    for (int i = 0; i < 3; ++i)
+      tiny_jobs.push_back({i, std::vector<int>(20, (i + 1) % 3),
+                          {(i + 1) % 3}});
+    for (const bool shared_mode : {false, true}) {
+      for (size_t count : {1, 3}) {
+        config.photo_source_storage =
+            shared_mode ? FixedCohortPhotoSourceStorage::kShared
+                        : FixedCohortPhotoSourceStorage::kPrivate;
+        config.max_active_owners = count;
+        const auto explicit_budget = BuildFixedCohortLogicalInventory(
+            tiny_images, tiny_jobs, config);
+        const auto admitted =
+            AdmitFixedCohortBudget(explicit_budget, {maximum, maximum});
+        const ByteCharge caps{
+            1 << 30, CheckedAdd(admitted.device, config.headroom_reserve.device)};
+        const auto chosen = SelectFixedCohortPhotoSourceStorage(
+            tiny_images, tiny_jobs, config, caps, count);
+        assert(chosen.budget.photo_source_storage ==
+               explicit_budget.photo_source_storage);
+        assert(chosen.budget.max_active_owners == count);
+        assert(chosen.budget.photo_shared.device == (shared_mode ? 600 : 0));
+        assert(chosen.budget.snapshots.device == explicit_budget.snapshots.device);
+        if (shared_mode || count == 3) {
+          const auto phases = SelectFixedCohortPhotoSourceStorage(
+              tiny_images, tiny_jobs, config, caps, 0, true);
+          assert(phases.budget.photo_source_storage ==
+                 explicit_budget.photo_source_storage);
+          assert(FixedCohortPhaseActiveOwners(phases.budget, false) == count);
+          assert(FixedCohortPhaseActiveOwners(phases.budget, true) == 3);
+        }
+      }
     }
   }
   auto bad = budget;

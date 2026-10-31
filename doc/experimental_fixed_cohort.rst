@@ -168,11 +168,37 @@ Explicit shared PHOTO mode
 
 ``--photo_source_storage private`` is the unchanged CLI default. Explicitly use
 ``--photo_source_storage shared`` to bind the shared PHOTO grayscale union to
-both canonical inventory/admission and execution. Only ``private`` and ``shared``
-are supported; other values refuse before workspace loading or output/device
-side effects. There is no automatic selection. ``--prepare_only 1`` uses the same
+both canonical inventory/admission and execution. Other values except ``auto``
+refuse before workspace loading or output/device side effects.
+``--prepare_only 1`` uses the same
 selection and reports its logical host/device union payload (zero for private),
 without allocating a device bank or claiming physical VRAM measurement.
+
+Opt-in ``--photo_source_storage auto`` requires ``--auto_active_owners 1``;
+it is a selection request, not a third runtime bank mode. The native metadata
+producer evaluates **both** private and shared inventories before pixel decode,
+bank or solver allocation, under the same effective observed FREE/caps, user
+ceiling, process/unknown declarations, single 3% margin and reserves. It supports
+both common owner selection and ``--auto_phase_active_owners 1``. No second CUDA
+capacity query is used to compare candidates.
+
+Shared is chosen only if it admits at least as many PHOTO **and** GEO owners
+with at least one strictly higher count, or if private cannot fit a complete
+pipeline and shared can. Equal or incomparable feasible counts prefer private;
+if only private fits it is retained. Neither fitting reports both capacity
+reasons. Malformed/unsupported inputs, overflow (including the full effective
+ceiling in either mode) and query errors fail closed, never trigger fallback.
+Global padding, zero source overlap and the additional shared host payload can
+erase sharing gains or make it infeasible.
+
+The report records requested ``auto``, effective storage, selection reason and
+chosen PHOTO/GEO counts. On successful execution it also records actual uploaded
+union payload and the limits passed to each phase's coordinator (not measured
+owner overlap). The selected canonical budget drives actual bank and owner
+allocation as well as forecasts; there is no late OOM/partial-run fallback.
+This is logical memory admissibility, not fastest execution, physical fit or a
+general maximality claim. Observed FREE remains racy, incremental and unreserved;
+no live credit, quality reduction or default promotion is implied.
 
 For typed native API callers, ``FixedCohortBudget::photo_source_storage =
 FixedCohortPhotoSourceStorage::kShared`` is the equivalent opt-in.

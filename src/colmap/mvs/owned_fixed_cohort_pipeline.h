@@ -42,6 +42,8 @@ struct FixedCohortResult {
   // Logical padded payload actually constructed/uploaded, not CUDA physical
   // allocation bytes. Zero in default private mode. Released at PHOTO barrier.
   ByteCharge actual_photo_shared;
+  // Limits actually passed to each phase's coordinator, not observed overlap.
+  std::array<size_t, 2> phase_owner_limits{};
   uint64_t actual_snapshot_bytes = 0;
   std::vector<uint64_t> actual_geo_staging_bytes;
 };
