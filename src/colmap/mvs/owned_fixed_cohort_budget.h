@@ -184,12 +184,12 @@ inline FixedCohortActiveSelection SelectFixedCohortActiveOwners(
     FixedCohortBudget budget, ByteCharge capacity, size_t ceiling = 0) {
   // Validate every declaration independently of capacity. Never interpret a
   // malformed bound or arithmetic overflow as a smaller admissible candidate.
-  budget.max_active_owners = 1;
+  const auto limit = ceiling ? std::min(ceiling, budget.photo_private.size())
+                             : budget.photo_private.size();
+  budget.max_active_owners = limit;
   AdmitFixedCohortBudget(budget,
                          {std::numeric_limits<uint64_t>::max(),
                           std::numeric_limits<uint64_t>::max()});
-  const auto limit = ceiling ? std::min(ceiling, budget.photo_private.size())
-                             : budget.photo_private.size();
   size_t chosen = 0;
   for (size_t count = 1; count <= limit; ++count) {
     budget.max_active_owners = count;

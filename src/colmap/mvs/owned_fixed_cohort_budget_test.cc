@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
+#include "colmap/mvs/owned_cohort_lifecycle_test_util.h"
 #include "colmap/mvs/owned_fixed_cohort_inventory.h"
 #include "colmap/mvs/owned_pair_run.h"
 
@@ -283,6 +284,28 @@ int main() {
   assert(SelectFixedCohortActiveOwners(four, {822, 889}).count == 4);
   assert(SelectFixedCohortActiveOwners(four, {10000, 10000}, 3).count == 3);
   assert(SelectFixedCohortActiveOwners(four, {10000, 10000}, 99).count == 4);
+  // Singleton fits and count two exceeds capacity, but count four overflows.
+  // Capacity refusal must not hide malformed in-ceiling arithmetic.
+  auto overflowing = four;
+  overflowing.photo_private.assign(4, {10, 5000000000000000000ull});
+  overflowing.geo_private = overflowing.photo_private;
+  bool later_overflow_refused = false;
+  try {
+    SelectFixedCohortActiveOwners(overflowing,
+                                 {10000, 6000000000000000000ull});
+  } catch (const std::overflow_error&) {
+    later_overflow_refused = true;
+  }
+  assert(later_overflow_refused);
+  // An explicit ceiling excludes arithmetic outside the search envelope.
+  assert(SelectFixedCohortActiveOwners(
+             overflowing, {10000, 6000000000000000000ull}, 2)
+             .count == 1);
+  // Positive private charges make demand strictly increase with count.
+  // Across this capacity interval, count three remains the highest fit.
+  for (uint64_t host_cap : {uint64_t{812}, uint64_t{817}, uint64_t{821}})
+    assert(SelectFixedCohortActiveOwners(four, {host_cap, 10000}).count == 3);
+  assert(SelectFixedCohortActiveOwners(four, {822, 10000}).count == 4);
   bool singleton_refused = false;
   try {
     SelectFixedCohortActiveOwners(four, {718, 10000});
@@ -319,6 +342,7 @@ int main() {
   // before retirement/join makes credits reusable, including injected failure.
   for (size_t active : {size_t{3}, size_t{4}}) {
     for (bool fail : {false, true}) {
+      CohortLifecycleRendezvous lifecycle(active, std::chrono::seconds(1));
       std::atomic<size_t> cleaned{0};
       std::vector<std::atomic<bool>> live(7);
       for (auto& value : live) value = false;
@@ -342,6 +366,7 @@ int main() {
               coordinator.BeginPreparation(job);
               coordinator.ReadyAndWait(job);
               Payload payload(live[job]);
+              if (!fail) lifecycle.Observe(0, job);
               if (fail && job == 2)
                 throw std::runtime_error("injected owner failure");
               coordinator.SolverDone(job);
@@ -355,14 +380,47 @@ int main() {
               ++cleaned;
             });
       } catch (const std::runtime_error& e) {
-        failed = std::string(e.what()) == "injected owner failure";
+        if (std::string(e.what()) != "injected owner failure") throw;
+        failed = true;
       }
       assert(failed == fail);
+      if (!fail) assert(lifecycle.Observed(0) == active);
       for (const auto& value : live) assert(!value);
       assert(cleaned == coordinator.AdmittedCount());
       assert(coordinator.ReservedBytes().host == 0);
       assert(coordinator.ReservedBytes().device == 0);
     }
+  }
+  // A silent two-owner clamp cannot satisfy the three/four-owner proof.
+  // Timeout must propagate through cancellation, cleanup, retirement and join.
+  for (size_t target : {size_t{3}, size_t{4}}) {
+    CohortLifecycleRendezvous lifecycle(target, std::chrono::milliseconds(50));
+    PairCoordinator coordinator({41, 41},
+                                {1, 1},
+                                2,
+                                std::vector<ByteCharge>(4, {10, 10}),
+                                std::chrono::seconds(3));
+    bool timed_out = false;
+    try {
+      RunRollingOwners(
+          coordinator,
+          [&](size_t job) {
+            coordinator.BeginPreparation(job);
+            coordinator.ReadyAndWait(job);
+            lifecycle.Observe(0, job);
+            coordinator.SolverDone(job);
+            coordinator.BeginOutput(job);
+            coordinator.EndOutput(job);
+          },
+          [](size_t, const char*) {});
+    } catch (const std::runtime_error& e) {
+      timed_out = std::string(e.what()) ==
+                  "owner lifecycle rendezvous timed out";
+    }
+    assert(timed_out);
+    assert(lifecycle.Observed(0) == 2);
+    assert(coordinator.ReservedBytes().host == 0);
+    assert(coordinator.ReservedBytes().device == 0);
   }
   four.max_active_owners = 1;
   four.headroom_reserve = {};

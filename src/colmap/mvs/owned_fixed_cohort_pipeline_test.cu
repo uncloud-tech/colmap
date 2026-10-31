@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
+#include "colmap/mvs/owned_cohort_lifecycle_test_util.h"
 #include "colmap/mvs/owned_fixed_cohort_pipeline.h"
 #include "colmap/mvs/patch_match_cuda_owned.h"
 
@@ -189,13 +190,25 @@ TEST(FixedCohortPipeline, FourJobsPreserveIdentityAcrossRollingOwners) {
         budget.max_active_owners = active;
         const auto dispatch =
             active == 1 ? PairDispatch::kSerial : PairDispatch::kPair;
+        CohortLifecycleRendezvous lifecycle(active);
         const auto result = RunFixedCohortPhotoGeo(
             images,
             refs,
             budget,
             {128ull << 20, 128ull << 20},
             NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
-            dispatch);
+            dispatch,
+            32,
+            nullptr,
+            [&](bool geo, size_t owner, int iteration, int sweep) {
+              if (iteration == 1 && sweep == 1)
+                lifecycle.Observe(geo ? 1 : 0, owner);
+            });
+        // First-sweep callbacks hold live solvers until all first-cohort
+        // owners arrive, independently of requested/selected count. Enabling
+        // this diagnostic synchronizes sweeps; no kernel overlap is claimed.
+        EXPECT_EQ(lifecycle.Observed(0), active);
+        EXPECT_EQ(lifecycle.Observed(1), active);
         EXPECT_EQ(result.actual_photo_shared.host,
                   storage == FixedCohortPhotoSourceStorage::kShared ? 80 : 0);
         EXPECT_EQ(result.actual_photo_shared.device,
@@ -209,6 +222,10 @@ TEST(FixedCohortPipeline, FourJobsPreserveIdentityAcrossRollingOwners) {
             (storage == FixedCohortPhotoSourceStorage::kShared ? "_shared"
                                                                : "_private");
         RecordProperty(key + "_selected_active_owners", std::to_string(active));
+        RecordProperty(key + "_observed_photo_owner_highwater",
+                       std::to_string(lifecycle.Observed(0)));
+        RecordProperty(key + "_observed_geo_owner_highwater",
+                       std::to_string(lifecycle.Observed(1)));
         RecordProperty(key + "_actual_photo_shared_host",
                        std::to_string(result.actual_photo_shared.host));
         RecordProperty(key + "_actual_photo_shared_device",
