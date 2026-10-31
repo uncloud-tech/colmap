@@ -64,7 +64,8 @@ components; the output root must not exist. Then run the installed executable::
       --PatchMatchStereo.num_threads 1 --PatchMatchStereo.gpu_index 0 \
       --max_load_image_size 512 --active_owners 1 \
       --PatchMatchStereo.owned_cuda_graphs 0 \
-      --output_policy final_geo_only --deadline_seconds 300 \
+      --output_policy final_geo_only --photo_source_storage private \
+      --deadline_seconds 300 \
       --host_capacity_bytes "$HOST_CAP_BYTES" \
       --device_capacity_bytes "$DEVICE_CAP_BYTES" \
       --reserve_host_bytes "$HOST_RESERVE_BYTES" \
@@ -105,12 +106,20 @@ Linux/cgroup host and native GPU headroom observations do not impose hard caps;
 apply appropriate external process/resource limits. Pitch/context/allocator
 and codec behavior are not physically calibrated by this inventory.
 
-Typed native shared PHOTO mode
------------------------------
+Explicit shared PHOTO mode
+--------------------------
 
-``FixedCohortBudget::photo_source_storage =
-FixedCohortPhotoSourceStorage::kShared`` is an explicit native API opt-in;
-there is no CLI/default promotion. Pass this declaration through the existing
+``--photo_source_storage private`` is the unchanged CLI default. Explicitly use
+``--photo_source_storage shared`` to bind the shared PHOTO grayscale union to
+both canonical inventory/admission and execution. Only ``private`` and ``shared``
+are supported; other values refuse before workspace loading or output/device
+side effects. There is no automatic selection. ``--prepare_only 1`` uses the same
+selection and reports its logical host/device union payload (zero for private),
+without allocating a device bank or claiming physical VRAM measurement.
+
+For typed native API callers, ``FixedCohortBudget::photo_source_storage =
+FixedCohortPhotoSourceStorage::kShared`` is the equivalent opt-in.
+Pass this declaration through the existing
 ``BuildFixedCohortLogicalInventory`` (or Python ``forecast_fixed_cohort`` with
 ``PhotoSourceStorage.SHARED``) before admission. The runner actually constructs
 the existing host/device grayscale bank from its frozen, loaded pixels; it does

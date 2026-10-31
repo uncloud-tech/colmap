@@ -285,6 +285,22 @@ void ExerciseWorkspace(WorkspaceFixture fixture, bool external) {
                   shared_budget.photo_shared.host);
         EXPECT_EQ(shared.actual_photo_shared.device,
                   shared_budget.photo_shared.device);
+        const auto key =
+            std::string(graphs ? "graph" : "stream") + "_active" +
+            std::to_string(active) +
+            (retain ? "_photo_and_geo_shared" : "_final_geo_only_shared");
+        ::testing::Test::RecordProperty(
+            key + "_actual_photo_shared_host",
+            std::to_string(shared.actual_photo_shared.host));
+        ::testing::Test::RecordProperty(
+            key + "_actual_photo_shared_device",
+            std::to_string(shared.actual_photo_shared.device));
+        ::testing::Test::RecordProperty(
+            key + "_declared_photo_shared_host",
+            std::to_string(shared_budget.photo_shared.host));
+        ::testing::Test::RecordProperty(
+            key + "_declared_photo_shared_device",
+            std::to_string(shared_budget.photo_shared.device));
         ASSERT_EQ(shared.photo.size(), retain ? 4 : 0);
         ASSERT_EQ(shared.geo.size(), 4);
         EXPECT_EQ(shared.actual_snapshot_bytes, actual.actual_snapshot_bytes);

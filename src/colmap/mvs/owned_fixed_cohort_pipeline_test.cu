@@ -201,6 +201,14 @@ TEST(FixedCohortPipeline, FourJobsPreserveIdentityAcrossRollingOwners) {
             std::to_string(active) +
             (storage == FixedCohortPhotoSourceStorage::kShared ? "_shared"
                                                                : "_private");
+        RecordProperty(key + "_actual_photo_shared_host",
+                       std::to_string(result.actual_photo_shared.host));
+        RecordProperty(key + "_actual_photo_shared_device",
+                       std::to_string(result.actual_photo_shared.device));
+        RecordProperty(key + "_declared_photo_shared_host",
+                       std::to_string(budget.photo_shared.host));
+        RecordProperty(key + "_declared_photo_shared_device",
+                       std::to_string(budget.photo_shared.device));
         RecordProperty(key + "_before_copy_available_host",
                        std::to_string(result.before_copy_available.host));
         RecordProperty(key + "_before_copy_available_device",

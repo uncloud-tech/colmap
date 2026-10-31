@@ -70,6 +70,7 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
     owned::ByteCharge capacity{};
     owned::FixedCohortBudget declarations;
     std::string output_policy = "final_geo_only";
+    std::string photo_source_storage = "private";
     OptionManager options;
     options.AddRequiredOption("workspace_path", &workspace_path);
     options.AddRequiredOption(
@@ -88,6 +89,9 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
     options.AddDefaultOption("tile_threads", &tile_threads);
     options.AddDefaultOption(
         "output_policy", &output_policy, "final_geo_only or photo_and_geo");
+    options.AddDefaultOption("photo_source_storage",
+                             &photo_source_storage,
+                             "private (default) or shared PHOTO grayscale union");
     options.AddRequiredOption("deadline_seconds", &deadline_seconds);
     // OptionManager supports strings, but not uint64_t. Parse byte quantities
     // losslessly after its normal required-option handling.
@@ -137,6 +141,15 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
     else {
       Require(output_policy == "photo_and_geo", "invalid output_policy");
       declarations.output_policy = owned::FixedCohortOutputPolicy::kPhotoAndGeo;
+    }
+    if (photo_source_storage == "private")
+      declarations.photo_source_storage =
+          owned::FixedCohortPhotoSourceStorage::kPrivate;
+    else {
+      Require(photo_source_storage == "shared",
+              "invalid photo_source_storage: expected private or shared");
+      declarations.photo_source_storage =
+          owned::FixedCohortPhotoSourceStorage::kShared;
     }
     auto photo_options = *options.patch_match_stereo;
     Require(photo_options.geom_consistency && photo_options.filter,
@@ -200,6 +213,9 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
                                                        tile_threads);
     check_deadline();
     const auto admitted = owned::AdmitFixedCohortBudget(budget, capacity);
+    std::cout << "photo_source_storage=" << photo_source_storage
+              << "; logical PHOTO union host=" << budget.photo_shared.host
+              << " device=" << budget.photo_shared.device << " bytes\n";
     std::cout << "experimental unqualified logical envelope; admitted host="
               << admitted.host << " device=" << admitted.device
               << " bytes (single 3% margin); no physical-fit guarantee\n";
