@@ -1,0 +1,4 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-3-Clause
+bindir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1
+exec python3 -I -B "$bindir/@RECONSTRUCTION_MODULE_PATH@" --colmap "$bindir/colmap" "$@"

@@ -2,11 +2,14 @@
 #include "colmap/exe/fixed_cohort.h"
 
 #include "colmap/controllers/option_manager.h"
+#include "colmap/exe/optimized_dense_plan_options.h"
+#include "colmap/mvs/generated/resident_allocation_fingerprint.h"
 #include "colmap/mvs/model.h"
 #include "colmap/mvs/owned_fixed_cohort_inventory.h"
 #include "colmap/mvs/owned_fixed_cohort_validation.h"
 #include "colmap/mvs/owned_fixed_cohort_workspace.h"
 #include "colmap/mvs/owned_tile.h"
+#include "colmap/mvs/patch_match.h"
 #include "colmap/util/file.h"
 #include "colmap/util/misc.h"
 #include "colmap/util/string.h"
@@ -78,10 +81,35 @@ Config ReadConfig(const fs::path& path) {
 }
 }  // namespace
 
+std::vector<owned::FixedCohortWorkspaceReference>
+ResolveFixedCohortWorkspacePlan(
+    const std::vector<std::string>& names,
+    const std::vector<owned::BankJob>& photo,
+    const std::vector<owned::BankJob>& geo) {
+  Require(photo.size() == geo.size(), "native PHOTO/GEO graph differs");
+  std::vector<owned::FixedCohortWorkspaceReference> named;
+  for (size_t i = 0; i < photo.size(); ++i) {
+    Require(photo[i].reference_image_idx == geo[i].reference_image_idx,
+            "native PHOTO/GEO reference differs");
+    owned::FixedCohortWorkspaceReference ref;
+    ref.reference = names.at(photo[i].reference_image_idx);
+    for (int source : photo[i].source_image_idxs)
+      ref.photo_sources.push_back(names.at(source));
+    for (int source : geo[i].source_image_idxs)
+      ref.geo_sources.push_back(names.at(source));
+    ref.photo_options = photo[i].options;
+    ref.geo_options = geo[i].options;
+    named.push_back(std::move(ref));
+  }
+  return named;
+}
+
 int RunExperimentalFixedCohort(int argc, char** argv) {
   const auto entry = mvs::NativeRunDeadline::Clock::now();
   try {
     fs::path workspace_path, output_path, photo_config_path, geo_config_path;
+    fs::path report_path;
+    bool resolve_workspace_plan = false;
     bool prepare_only = false, auto_active_owners = false;
     bool observe_capacities = false, auto_phase_active_owners = false;
     int active_owners_ceiling = 0;
@@ -99,6 +127,14 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
         "output_path",
         &output_path,
         "Fresh isolated output root; unused in prepare_only");
+    options.AddDefaultOption(
+        "resolve_workspace_plan",
+        &resolve_workspace_plan,
+        "Resolve native per-reference depths/options and effective ordered "
+        "sources; no global depth inference");
+    options.AddDefaultOption(
+        "report_path", &report_path,
+        "Optional fresh typed execution report; never written for prepare_only");
     options.AddDefaultOption("photo_config_path", &photo_config_path);
     options.AddDefaultOption("geo_config_path", &geo_config_path);
     options.AddDefaultOption(
@@ -226,18 +262,48 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
     auto geo_options = photo_options;
     photo_options.geom_consistency = false;
     photo_options.filter = false;
-    // The native validator requires explicit positive sigma, depth range,
-    // thread count and one device; no default sigma/depth inference here.
-    if (photo_config_path.empty())
-      photo_config_path = workspace_path / "stereo/patch-match.cfg";
-    if (geo_config_path.empty()) geo_config_path = photo_config_path;
-    const auto photo_config = ReadConfig(photo_config_path);
-    const auto geo_config = ReadConfig(geo_config_path);
-    Require(photo_config.size() == geo_config.size(),
-            "PHOTO/GEO reference set differs");
-    std::map<std::string, std::vector<std::string>> geo_sources;
-    for (const auto& [name, sources] : geo_config)
-      geo_sources.emplace(name, sources);
+    // The original explicit-config mode retains its existing invocation-global
+    // options. The opt-in workspace adapter instead consumes native typed jobs;
+    // NEVER infer a global depth envelope or re-resolve serialized sources.
+    Require(!resolve_workspace_plan ||
+                (photo_config_path.empty() && geo_config_path.empty() &&
+                 max_load_image_size == -1),
+            "workspace plan conflicts with explicit configs/load resize");
+    Require(report_path.empty() ||
+                (!fs::exists(report_path) &&
+                 !fs::is_symlink(fs::symlink_status(report_path))),
+            "fresh report_path required");
+    if (!prepare_only) {
+      // Refuse existing output roots before metadata/pixel preparation; retain
+      // the later atomic create_directory as the actual ownership boundary.
+      Require(!fs::exists(output_path) &&
+                  !fs::is_symlink(fs::symlink_status(output_path)),
+              "fresh output_path required");
+    }
+    std::vector<owned::FixedCohortWorkspaceReference> named;
+    if (resolve_workspace_plan) {
+      mvs::NativeRunDeadlineGuard resolution_guard(deadline);
+      mvs::PatchMatchController controller(
+          geo_options, workspace_path.string(), "COLMAP", "");
+      const auto graph = controller.ResolveDensePlanGraph();
+      named = ResolveFixedCohortWorkspacePlan(graph.names, graph.photo, graph.geo);
+    } else {
+      if (photo_config_path.empty())
+        photo_config_path = workspace_path / "stereo/patch-match.cfg";
+      if (geo_config_path.empty()) geo_config_path = photo_config_path;
+      const auto photo_config = ReadConfig(photo_config_path);
+      const auto geo_config = ReadConfig(geo_config_path);
+      Require(photo_config.size() == geo_config.size(),
+              "PHOTO/GEO reference set differs");
+      std::map<std::string, std::vector<std::string>> geo_sources;
+      for (const auto& [name, sources] : geo_config)
+        geo_sources.emplace(name, sources);
+      for (const auto& [name, sources] : photo_config) {
+        Require(geo_sources.count(name), "PHOTO/GEO reference set differs");
+        named.push_back(
+            {name, sources, geo_sources.at(name), photo_options, geo_options});
+      }
+    }
     if (auto_storage) {
       Require(max_load_image_size == -1 || max_load_image_size > 0,
               "fixed-cohort invalid load image size");
@@ -252,21 +318,22 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
         image.Downsize(max_load_image_size, max_load_image_size);
       shapes.push_back({image.GetWidth(), image.GetHeight()});
     }
-    std::vector<owned::FixedCohortWorkspaceReference> named;
     std::vector<owned::FixedCohortJobShape> jobs;
     std::vector<owned::FixedCohortReference> references;
-    for (const auto& [name, sources] : photo_config) {
-      Require(geo_sources.count(name), "PHOTO/GEO reference set differs");
-      named.push_back(
-          {name, sources, geo_sources.at(name), photo_options, geo_options});
+    for (const auto& spec : named) {
+      CheckName(spec.reference);
       owned::FixedCohortReference ref;
-      ref.reference_image_idx = model.GetImageIdx(name);
-      for (const auto& source : sources)
+      ref.reference_image_idx = model.GetImageIdx(spec.reference);
+      for (const auto& source : spec.photo_sources) {
+        CheckName(source);
         ref.photo_sources.push_back(model.GetImageIdx(source));
-      for (const auto& source : geo_sources.at(name))
+      }
+      for (const auto& source : spec.geo_sources) {
+        CheckName(source);
         ref.geo_sources.push_back(model.GetImageIdx(source));
-      ref.photo_options = photo_options;
-      ref.geo_options = geo_options;
+      }
+      ref.photo_options = spec.photo_options;
+      ref.geo_options = spec.geo_options;
       jobs.push_back(
           {ref.reference_image_idx, ref.photo_sources, ref.geo_sources});
       references.push_back(std::move(ref));
@@ -440,6 +507,42 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
       if (result.output_policy == owned::FixedCohortOutputPolicy::kPhotoAndGeo)
         write_maps(result.photo.at(i), ".photometric.bin");
       write_maps(result.geo.at(i), ".geometric.bin");
+    }
+    if (!report_path.empty()) {
+      using dense_plan::Json;
+      std::vector<std::pair<std::string, Json>> phases;
+      for (const bool geo : {false, true}) {
+        std::vector<Json> records;
+        for (const auto& ref : references) {
+          std::vector<Json> sources;
+          for (int idx : geo ? ref.geo_sources : ref.photo_sources)
+            sources.emplace_back(idx);
+          records.push_back(Json::Object({
+              {"reference", Json(ref.reference_image_idx)},
+              {"sources", Json::Array(sources)},
+              {"options", dense_plan::OptionsJson(
+                              geo ? ref.geo_options : ref.photo_options)}}));
+        }
+        phases.emplace_back(geo ? "geo" : "photo", Json::Array(records));
+      }
+      dense_plan::WriteNewAtomic(report_path, Json::Object({
+          {"schema_version", Json(1)},
+          {"status", Json("completed")},
+          {"requested_backend", Json("experimental_fixed_cohort")},
+          {"effective_backend", Json("experimental_fixed_cohort")},
+          {"allocation_fingerprint",
+           Json(std::string(mvs::kResidentAllocationFingerprint))},
+          {"requested_storage", Json(photo_source_storage)},
+          {"storage_reason", Json(storage_reason)},
+          {"selection", Json(auto_active_owners ? "automatic" : "manual")},
+          {"host_capacity_bytes", Json(std::to_string(capacity.host))},
+          {"device_capacity_bytes", Json(std::to_string(capacity.device))},
+          {"effective_storage", Json(effective_storage)},
+          {"photo_active_owners",
+           Json(static_cast<int>(result.phase_owner_limits[0]))},
+          {"geo_active_owners",
+           Json(static_cast<int>(result.phase_owner_limits[1]))},
+          {"phases", Json::Object(phases)}}).Dump() + "\n");
     }
     std::cout
         << "Completed experimental PHOTO->GEO; standard depth/normal maps: "

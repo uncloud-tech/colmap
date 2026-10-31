@@ -70,6 +70,44 @@ class FixedCohortCommandTest(unittest.TestCase):
         self.assertIn(expected, result.stdout + result.stderr)
         self.assertFalse(self.output.exists())
 
+    def test_native_workspace_plan_resolves_distinct_depths_without_global_envelope(self):
+        # Per-camera translations change the SAME sparse points' depth ranges.
+        images = []
+        for i, name in enumerate(self.names):
+            images.append(f'{i+1} 1 0 0 0 {i} 0 {i} 1 {name}\n10 5 1 11 5 2\n')
+        (self.workspace / 'sparse/images.txt').write_text(''.join(images))
+        (self.workspace / 'sparse/points3D.txt').write_text(
+            '1 0 0 5 128 128 128 0 1 0 2 0 3 0\n'
+            '2 0 0 7 128 128 128 0 1 1 2 1 3 1\n')
+        args = list(self.args)
+        for key in ('depth_min', 'depth_max', 'sigma_spatial'):
+            args[args.index('--PatchMatchStereo.' + key) + 1] = '-1'
+        result = self.invoke(args + ['--resolve_workspace_plan', '1'])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.output.exists())
+        # No implicit PHOTO producer expansion to repair incomplete configs.
+        self.config.write_text('a.pgm\nnested/b.pgm,c.pgm\n')
+        refused = self.invoke(args + ['--resolve_workspace_plan', '1'])
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertFalse(self.output.exists())
+
+    def test_same_executable_build_identity(self):
+        import json
+        result = subprocess.run([os.environ['COLMAP_TEST_EXECUTABLE'], 'reconstruction_info'],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        identity = json.loads(result.stdout)
+        self.assertRegex(identity['source_commit'], r'^[0-9a-f]{40}$')
+        self.assertRegex(identity['allocation_fingerprint'], r'^[0-9a-f]{64}$')
+        if os.environ.get('COLMAP_EXPECT_ALLOCATION_FINGERPRINT'):
+            self.assertEqual(identity['allocation_fingerprint'],
+                             os.environ['COLMAP_EXPECT_ALLOCATION_FINGERPRINT'])
+        for arguments in (['--not_an_option'], ['--gpu_index', '-1', '--deadline_seconds', '1'],
+                          ['--gpu_index', '0', '--deadline_seconds', '0']):
+            refused = subprocess.run([os.environ['COLMAP_TEST_EXECUTABLE'], 'reconstruction_info',
+                                      *arguments], capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(refused.returncode, 0)
+
     def test_help_and_parser(self):
         result = self.invoke(['--help'])
         self.assertEqual(result.returncode, 0, result.stderr)

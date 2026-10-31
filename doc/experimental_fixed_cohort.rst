@@ -32,8 +32,8 @@ the same references; GEO may use only these PHOTO producers. PHOTO may use
 additional workspace images. All workspace images are loaded, not just sources.
 Keep workspace files immutable for the full invocation.
 
-The full existing ``PatchMatchStereo.*`` options are available. This first
-entry uses **explicit global** positive ``depth_min``, ``depth_max`` and
+The full existing ``PatchMatchStereo.*`` options are available. The default
+explicit-config mode uses **explicit global** positive ``depth_min``, ``depth_max`` and
 ``sigma_spatial``, an explicit positive ``num_threads`` and a single canonical
 GPU index. It never infers a depth range or sigma. Global bounds are not a
 substitute for differing per-reference bounds in earlier benchmark fixtures.
@@ -47,6 +47,30 @@ Manual higher counts are supported up to the number of configured jobs, using
 the same canonical resource gates. Graphs are selected with
 ``--PatchMatchStereo.owned_cuda_graphs 1``. There is no performance or quality
 promotion implied by these settings.
+
+Native per-reference workspace plan (opt-in)
+-------------------------------------------
+
+``--resolve_workspace_plan 1`` consumes the existing typed native
+``ResolveDensePlanGraph`` API directly from ``stereo/patch-match.cfg``.
+Native auto/all selectors are resolved ONCE by that API. It retains the native
+per-reference depth/sigma/options and effective ordered sources (including any
+remaining duplicates), without a second controller transformation, global depth
+envelope or source sorting. Missing PHOTO producers for GEO refuse. The same
+PHOTO-complete-before-GEO barrier, canonical inventory and resource controls
+apply. This mode conflicts with explicit PHOTO/GEO config paths and
+``max_load_image_size`` other than -1. Resize only by an explicit earlier
+undistortion choice. Default manual-mode behavior is unchanged.
+
+Optional ``--report_path NEW`` atomically publishes typed JSON only after every
+requested native map has been written successfully. It records completed
+backend, generated allocation fingerprint, requested/effective storage and
+reason, actual phase owner limits (not observed concurrency), and per-reference
+options/source lists. Exact capacity-byte values are decimal strings. It never
+writes a report in ``prepare_only`` mode. Existing report/output paths refuse
+before preparation; the eventual publication remains atomically no-clobber.
+``colmap-reconstruct`` uses this mode; see ``reconstruction-cli.md`` for the
+installed photos-to-fusion workflow and its experimental limitations.
 
 Invocation
 ----------

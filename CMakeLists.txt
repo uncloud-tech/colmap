@@ -537,3 +537,6 @@ install(
     DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/cmake
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/colmap
     FILES_MATCHING PATTERN "Find*.cmake")
+
+# Stdlib-only installed experimental reconstruction frontend.
+include(python/install_reconstruction.cmake)

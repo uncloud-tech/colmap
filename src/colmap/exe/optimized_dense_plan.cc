@@ -11,6 +11,12 @@
 #include <fstream>
 #include <iostream>
 
+#if defined(COLMAP_MVS_ENABLED)
+#include "colmap/mvs/generated/photo_phase_fingerprint.h"
+#include "colmap/mvs/generated/resident_allocation_fingerprint.h"
+#include "colmap/mvs/owned_fixed_cohort_validation.h"
+#endif
+
 #if defined(COLMAP_CUDA_ENABLED) && defined(COLMAP_MVS_ENABLED) &&      \
     defined(COLMAP_DOWNLOAD_ENABLED) && !defined(COLMAP_HIP_ENABLED) && \
     defined(__linux__)
@@ -26,6 +32,66 @@
 #endif
 
 namespace colmap {
+int RunReconstructionInfo(int argc, char** argv) {
+#if defined(COLMAP_MVS_ENABLED)
+  try {
+#if defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
+    constexpr bool cuda = true;
+#else
+    constexpr bool cuda = false;
+#endif
+    using dense_plan::Json;
+    std::vector<std::pair<std::string, Json>> fields = {
+        {"schema_version", Json(1)},
+        {"cuda_compiled", Json(cuda)},
+        {"source_commit", Json(std::string(mvs::kPhotoPhaseV1SourceCommit))},
+        {"lineage_sha", Json(std::string(mvs::kPhotoPhaseV1Lineage))},
+        {"fingerprint", Json(std::string(mvs::kPhotoPhaseV1Fingerprint))},
+        {"allocation_fingerprint",
+         Json(std::string(mvs::kResidentAllocationFingerprint))}};
+    if (argc != 1) {
+      if (argc != 5 || std::string(argv[1]) != "--gpu_index" ||
+          std::string(argv[3]) != "--deadline_seconds")
+        throw std::invalid_argument(
+            "reconstruction_info accepts no arguments or "
+            "--gpu_index N --deadline_seconds N");
+      const auto integer = [](const char* text) {
+        int value;
+        const auto end = text + std::char_traits<char>::length(text);
+        const auto parsed = std::from_chars(text, end, value);
+        if (parsed.ec != std::errc() || parsed.ptr != end || value < 0)
+          throw std::invalid_argument("invalid resource observation integer");
+        return value;
+      };
+      const int device = integer(argv[2]), seconds = integer(argv[4]);
+      const auto deadline = mvs::NativeRunDeadline::FromBudget(
+          std::chrono::seconds(seconds));
+      mvs::NativeRunDeadlineGuard guard(deadline);
+      // Same native FREE host/cgroup and CUDA observer as fixed-cohort
+      // admission. This is only a pre-stage reserve sanity check, NOT an
+      // SfM/fusion memory model, reservation or inferred process credit.
+      const auto observed = mvs::owned::ObserveFixedCohortCapacities(device);
+      fields.emplace_back("available_host_bytes",
+                          Json(std::to_string(observed.available.host)));
+      fields.emplace_back("available_device_bytes",
+                          Json(std::to_string(observed.available.device)));
+      fields.emplace_back("device_uuid", Json(observed.device_uuid));
+      guard.Check();
+    }
+    std::cout << Json::Object(fields).Dump() << '\n';
+    return EXIT_SUCCESS;
+  } catch (const std::exception& error) {
+    std::cerr << "reconstruction_info: " << error.what() << '\n';
+    return EXIT_FAILURE;
+  }
+#else
+  (void)argc;
+  (void)argv;
+  std::cerr << "reconstruction requires MVS support\n";
+  return EXIT_FAILURE;
+#endif
+}
+
 namespace {
 using dense_plan::Json;
 namespace fs = std::filesystem;

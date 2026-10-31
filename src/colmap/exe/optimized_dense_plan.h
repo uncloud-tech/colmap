@@ -52,6 +52,10 @@ namespace colmap {
 // complete actual PHOTO maps + exact native GEO bank revalidation are
 // mandatory.
 int RunOptimizedDensePlan(int argc, char** argv);
+// Same-executable generated build identity; no workspace or CUDA context by
+// default. Optional --gpu_index N --deadline_seconds N observes FREE host/cgroup
+// and selected CUDA device with the canonical native observer (not admission).
+int RunReconstructionInfo(int argc, char** argv);
 
 struct OptimizedDensePlanArguments {
   std::filesystem::path workspace_path;
