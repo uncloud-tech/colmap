@@ -326,6 +326,25 @@ TEST_F(UndistortionPreview,
   }
 }
 
+TEST_F(UndistortionPreview, BudgetedCliRefusesMalformedBytesAndUnsupportedModes) {
+  const auto before = ImageTreeSnapshot(root);
+  const std::vector<std::vector<std::string>> cases = {
+      {"--host_budget_bytes", "-1"},
+      {"--host_budget_bytes", "+1"},
+      {"--host_budget_bytes", "01"},
+      {"--host_budget_bytes", "18446744073709551616"},
+      {"--policy_host_bytes", "1"},
+      {"--reserve_host_bytes", "1"},
+      {"--host_budget_bytes", "1", "--output_type", "PMVS"},
+      {"--host_budget_bytes", "1", "--dry_run", "1"}};
+  for (const auto& extra : cases) {
+    auto args = Args();
+    args.insert(args.end(), extra.begin(), extra.end());
+    EXPECT_EQ(Undistort(args), EXIT_FAILURE);
+    EXPECT_EQ(ImageTreeSnapshot(root), before);
+  }
+}
+
 TEST(ImageRegistrator, Nominal) {
   const auto test_path = CreateTestDir();
   const auto database_path = test_path / "database.db";

@@ -22,6 +22,7 @@ COLMAP_ADD_LIBRARY(
         reconstruction_clustering.h reconstruction_clustering.cc
         rotation_averaging.h rotation_averaging.cc
         undistorters.h undistorters.cc
+        undistortion_resource.h
         reconstruction_input_summary.h reconstruction_input_summary.cc
     PUBLIC_LINK_LIBS
         colmap_calibration

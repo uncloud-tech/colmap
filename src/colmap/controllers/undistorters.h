@@ -34,6 +34,15 @@ class COLMAPUndistorter : public BaseController {
     // Number of threads to use for undistortion. A value of -1 uses all
     // available CPU cores.
     int num_threads = -1;
+
+    // Optional logical phase cap (zero preserves the legacy path). Includes
+    // known concurrent bitmap payload plus raw unknown-cost policy, one 3%
+    // aggregate margin, then reserve. NOT a whole physical-memory guarantee.
+    // Bounded mode: COLMAP, Linux/MVS observation, uint8 1-4 channel inputs,
+    // perspective/spherical cameras, no ROI. No quality reduction.
+    uint64_t host_budget_bytes = 0;
+    uint64_t policy_host_bytes = 0;
+    uint64_t reserve_host_bytes = 0;
   };
 
   COLMAPUndistorter(Options options,
@@ -45,7 +54,7 @@ class COLMAPUndistorter : public BaseController {
   void Run();
 
  private:
-  bool Undistort(image_t image_id) const;
+  bool Undistort(image_t image_id, int expected_file_channels = 0) const;
   void WritePatchMatchConfig(const std::vector<std::string>& image_names) const;
   void WriteFusionConfig(const std::vector<std::string>& image_names) const;
   void WriteScript(bool geometric) const;

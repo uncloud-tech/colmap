@@ -8,6 +8,8 @@
 #include "colmap/util/hash_containers.h"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 
 namespace colmap {
 namespace {
@@ -211,6 +213,15 @@ Camera UndistortCamera(const UndistortCameraOptions& options,
     // Clip the scaling factors.
     scale_x = std::clamp(scale_x, options.min_scale, options.max_scale);
     scale_y = std::clamp(scale_y, options.min_scale, options.max_scale);
+
+    // Reject malformed/nonfinite geometry before converting to size_t. This
+    // does not change valid warp/resize arithmetic or the rounding convention.
+    THROW_CHECK(std::isfinite(scale_x));
+    THROW_CHECK(std::isfinite(scale_y));
+    THROW_CHECK_LT(scale_x * undistorted_camera.width,
+                   static_cast<double>(std::numeric_limits<size_t>::max()));
+    THROW_CHECK_LT(scale_y * undistorted_camera.height,
+                   static_cast<double>(std::numeric_limits<size_t>::max()));
 
     // Scale undistorted camera dimensions.
     const size_t orig_undistorted_camera_width = undistorted_camera.width;

@@ -32,6 +32,42 @@ void WriteImageOIIO(const int width,
   ASSERT_TRUE(output->close());
 }
 
+TEST(Bitmap, BoundedReadValidatesHeaderBeforePixelAllocation) {
+  const auto dir = CreateTestDir();
+  const auto path = dir / "input.png";
+  Bitmap source(10, 8, true);
+  source.Fill(BitmapColor<uint8_t>(1, 2, 3));
+  ASSERT_TRUE(source.Write(path));
+  Bitmap image;
+  EXPECT_ANY_THROW(image.Read(path, true, false, 11, 8, 3));
+  EXPECT_EQ(image.Width(), 0);
+  EXPECT_ANY_THROW(image.Read(path, true, false, 10, 8, 1));
+  EXPECT_EQ(image.Width(), 0);
+  ASSERT_TRUE(image.Read(path, true, false, 10, 8, 3));
+  EXPECT_EQ(image.Width(), 10);
+  const auto high_depth = dir / "input16.png";
+  auto output = OIIO::ImageOutput::create(high_depth.string());
+  ASSERT_NE(output, nullptr);
+  ASSERT_TRUE(output->open(high_depth.string(),
+      OIIO::ImageSpec(10, 8, 3, OIIO::TypeDesc::UINT16)));
+  std::vector<uint16_t> pixels(10 * 8 * 3, 1234);
+  ASSERT_TRUE(output->write_image(OIIO::TypeDesc::UINT16, pixels.data()));
+  ASSERT_TRUE(output->close());
+  Bitmap unsupported;
+  EXPECT_ANY_THROW(unsupported.Read(high_depth, true, false, 10, 8, 3));
+  EXPECT_EQ(unsupported.Width(), 0);
+  // Normal grayscale -> RGB conversion remains supported and byte-identical.
+  Bitmap grey(10, 8, false);
+  grey.Fill(BitmapColor<uint8_t>(42));
+  ASSERT_TRUE(grey.Write(dir / "grey.png"));
+  Bitmap converted, control;
+  ASSERT_TRUE(converted.Read(dir / "grey.png", true, false, 10, 8, 1));
+  ASSERT_TRUE(control.Read(dir / "grey.png"));
+  for (int y = 0; y < 8; ++y)
+    for (int x = 0; x < 10; ++x)
+      EXPECT_EQ(converted.GetPixel(x, y), control.GetPixel(x, y));
+}
+
 TEST(BitmapColor, Empty) {
   BitmapColor<uint8_t> color;
   EXPECT_EQ(color.r, 0);

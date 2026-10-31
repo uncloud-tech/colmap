@@ -9,6 +9,8 @@
 #include "colmap/util/testing.h"
 
 #include <filesystem>
+#include <fstream>
+#include <limits>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -42,6 +44,239 @@ Reconstruction CreateSyntheticReconstructionWithBitmaps(
 
   return reconstruction;
 }
+
+#if defined(__linux__) && defined(COLMAP_MVS_ENABLED)
+TEST(COLMAPUndistorter, BudgetedSingletonRefusesBeforeDecodeAndPublication) {
+  const auto dir = CreateTestDir();
+  CreateDirIfNotExists(dir / "inputs");
+  auto reconstruction = CreateSyntheticReconstructionWithBitmaps(dir / "inputs");
+  UndistortCameraOptions camera_options;
+  camera_options.max_image_size = 20;
+  COLMAPUndistorter::Options options;
+  options.host_budget_bytes = 1;
+  options.num_threads = 4;
+  COLMAPUndistorter undistorter(options, camera_options, reconstruction,
+                                dir / "inputs", dir / "output");
+  try {
+    undistorter.Run();
+    FAIL() << "expected singleton no-fit";
+  } catch (const std::runtime_error& error) {
+    EXPECT_THAT(error.what(), testing::HasSubstr("before decode"));
+  }
+  EXPECT_FALSE(ExistsDir(dir / "output"));
+}
+
+TEST(COLMAPUndistorter, BudgetedWorkersPreserveNativeBytes) {
+  const auto dir = CreateTestDir();
+  CreateDirIfNotExists(dir / "inputs");
+  auto reconstruction = CreateSyntheticReconstructionWithBitmaps(
+      dir / "inputs", 4, 100, 100);
+  // Nonuniform pixels make the full-size antialiased warp path observable.
+  for (const auto& [id, image] : reconstruction.Images()) {
+    Bitmap bitmap(100, 100, true);
+    for (int y = 0; y < 100; ++y)
+      for (int x = 0; x < 100; ++x)
+        bitmap.SetPixel(x, y, BitmapColor<uint8_t>(x * 2, y * 2, (x + y) % 256));
+    ASSERT_TRUE(bitmap.Write(dir / "inputs" / image.Name()));
+  }
+  UndistortCameraOptions camera_options;
+  camera_options.max_image_size = 20;
+  COLMAPUndistorter::Options options;
+  options.num_threads = 4;
+  COLMAPUndistorter control(options, camera_options, reconstruction,
+                            dir / "inputs", dir / "control");
+  control.Run();
+  // 61,200 known bytes per indirect RGB job. Two fit, three do not.
+  options.host_budget_bytes = 150000;
+  COLMAPUndistorter bounded(options, camera_options, reconstruction,
+                            dir / "inputs", dir / "bounded");
+  bounded.Run();
+  options.host_budget_bytes = 70000;  // automatically reduced to one worker
+  COLMAPUndistorter serial(options, camera_options, reconstruction,
+                           dir / "inputs", dir / "serial");
+  serial.Run();
+  for (const auto& path : GetRecursiveFileList(dir / "control")) {
+    const auto name = std::filesystem::relative(path, dir / "control");
+    std::vector<char> expected, actual, one;
+    ReadBinaryBlob(path, &expected);
+    ReadBinaryBlob(dir / "bounded" / name, &actual);
+    ReadBinaryBlob(dir / "serial" / name, &one);
+    EXPECT_EQ(expected, actual) << name;
+    EXPECT_EQ(expected, one) << name;
+  }
+}
+
+TEST(COLMAPUndistorter, BudgetedMalformedUnsupportedAndHeaderMismatch) {
+  const auto dir = CreateTestDir();
+  CreateDirIfNotExists(dir / "inputs");
+  auto reconstruction = CreateSyntheticReconstructionWithBitmaps(dir / "inputs");
+  COLMAPUndistorter::Options options;
+  options.host_budget_bytes = uint64_t{1} << 30;
+  UndistortCameraOptions camera_options;
+  camera_options.max_image_size = 20;
+  camera_options.roi_min_x = 0.1;
+  COLMAPUndistorter roi(options, camera_options, reconstruction,
+                        dir / "inputs", dir / "roi");
+  EXPECT_THROW(roi.Run(), std::invalid_argument);
+  camera_options.roi_min_x = 0;
+  camera_options.max_scale = std::numeric_limits<double>::quiet_NaN();
+  COLMAPUndistorter malformed(options, camera_options, reconstruction,
+                              dir / "inputs", dir / "nan");
+  EXPECT_THROW(malformed.Run(), std::invalid_argument);
+  camera_options.max_scale = 2;
+  const auto id = reconstruction.RegImageIds().front();
+  Bitmap wrong_shape(101, 100, true);
+  ASSERT_TRUE(wrong_shape.Write(dir / "inputs" / reconstruction.Image(id).Name()));
+  COLMAPUndistorter mismatched(options, camera_options, reconstruction,
+                               dir / "inputs", dir / "mismatch");
+  EXPECT_THROW(mismatched.Run(), std::invalid_argument);
+  EXPECT_FALSE(ExistsDir(dir / "mismatch"));
+}
+
+TEST(COLMAPUndistorter, BudgetedPerspectiveModelsSphericalAndCopyThrough) {
+  const auto dir = CreateTestDir();
+  CreateDirIfNotExists(dir / "inputs");
+  auto reconstruction = CreateSyntheticReconstructionWithBitmaps(dir / "inputs");
+  const auto camera_id = reconstruction.Cameras().begin()->first;
+  for (const auto model : {CameraModelId::kSimpleRadial, CameraModelId::kRadial,
+                           CameraModelId::kOpenCV, CameraModelId::kPinhole,
+                           CameraModelId::kEquirectangular}) {
+    reconstruction.Camera(camera_id) = Camera::CreateFromModelId(
+        camera_id, model, 100, 100, 100);
+    UndistortCameraOptions camera_options;
+    camera_options.max_image_size = 20;
+    COLMAPUndistorter::Options options;
+    options.num_threads = 2;
+    const auto label = std::to_string(static_cast<int>(model));
+    COLMAPUndistorter control(options, camera_options, reconstruction,
+                              dir / "inputs", dir / (label + "control"));
+    control.Run();
+    options.host_budget_bytes = uint64_t{1} << 30;
+    COLMAPUndistorter bounded(options, camera_options, reconstruction,
+                              dir / "inputs", dir / (label + "bounded"));
+    bounded.Run();
+    for (const auto& [id, image] : reconstruction.Images()) {
+      std::vector<char> expected, actual;
+      ReadBinaryBlob(dir / (label + "control") / "images" / image.Name(), &expected);
+      ReadBinaryBlob(dir / (label + "bounded") / "images" / image.Name(), &actual);
+      EXPECT_EQ(expected, actual);
+    }
+    if (model == CameraModelId::kPinhole || model == CameraModelId::kEquirectangular) {
+      camera_options.max_image_size = -1;
+      options.host_budget_bytes = 1;  // No native pixel vector on copy-through.
+      COLMAPUndistorter copied(options, camera_options, reconstruction,
+                               dir / "inputs", dir / (label + "copy"));
+      copied.Run();
+      for (const auto& [id, image] : reconstruction.Images()) {
+        std::vector<char> expected, actual;
+        ReadBinaryBlob(dir / "inputs" / image.Name(), &expected);
+        ReadBinaryBlob(dir / (label + "copy") / "images" / image.Name(), &actual);
+        EXPECT_EQ(expected, actual);
+      }
+    }
+  }
+}
+
+TEST(COLMAPUndistorter, BudgetedHeterogeneousDimensions) {
+  const auto dir = CreateTestDir();
+  CreateDirIfNotExists(dir / "inputs");
+  SyntheticDatasetOptions synthetic;
+  synthetic.num_rigs = 1;
+  synthetic.num_cameras_per_rig = 2;
+  synthetic.num_frames_per_rig = 2;
+  synthetic.camera_width = 100;
+  synthetic.camera_height = 100;
+  synthetic.image_extension = ".png";
+  Reconstruction reconstruction;
+  SynthesizeDataset(synthetic, &reconstruction);
+  auto& smaller = reconstruction.Camera(reconstruction.Cameras().begin()->first);
+  smaller.width = 50;
+  smaller.height = 40;
+  for (const auto& [id, image] : reconstruction.Images()) {
+    const auto& camera = *image.CameraPtr();
+    Bitmap bitmap(camera.width, camera.height, true);
+    bitmap.Fill(BitmapColor<uint8_t>(17, 41, 83));
+    ASSERT_TRUE(bitmap.Write(dir / "inputs" / image.Name()));
+  }
+  UndistortCameraOptions camera_options;
+  camera_options.max_image_size = 20;
+  COLMAPUndistorter::Options options;
+  options.host_budget_bytes = 150000;
+  options.num_threads = 4;
+  COLMAPUndistorter bounded(options, camera_options, reconstruction,
+                            dir / "inputs", dir / "bounded");
+  bounded.Run();
+  for (const auto& [id, image] : reconstruction.Images()) {
+    Bitmap actual;
+    ASSERT_TRUE(actual.Read(dir / "bounded/images" / image.Name()));
+    const auto expected = UndistortCamera(camera_options, *image.CameraPtr());
+    EXPECT_EQ(actual.Width(), expected.width);
+    EXPECT_EQ(actual.Height(), expected.height);
+  }
+}
+
+TEST(COLMAPUndistorter, BudgetedWorkerHeaderExceptionDrains) {
+  const auto dir = CreateTestDir();
+  CreateDirIfNotExists(dir / "inputs");
+  auto reconstruction = CreateSyntheticReconstructionWithBitmaps(dir / "inputs", 4);
+  UndistortCameraOptions camera_options;
+  camera_options.max_image_size = 20;
+  COLMAPUndistorter::Options options;
+  options.num_threads = 4;
+  options.host_budget_bytes = uint64_t{1} << 30;
+  COLMAPUndistorter undistorter(options, camera_options, reconstruction,
+                                dir / "inputs", dir / "output");
+  bool replaced = false;
+  undistorter.SetCheckIfStoppedFunc([&] {
+    if (!replaced) {
+      // After inventory but before task submission: the SAME decoder must
+      // reject a changed header before payload. Exercise exception, not false.
+      Bitmap changed(101, 100, true);
+      EXPECT_TRUE(changed.Write(dir / "inputs" /
+          reconstruction.Image(reconstruction.RegImageIds().front()).Name()));
+      replaced = true;
+    }
+    return false;
+  });
+  EXPECT_ANY_THROW(undistorter.Run());
+  EXPECT_TRUE(replaced);
+  EXPECT_FALSE(ExistsFile(dir / "output/stereo/fusion.cfg"));
+  EXPECT_FALSE(ExistsFile(dir / "output/sparse/cameras.bin"));
+}
+
+TEST(COLMAPUndistorter, BudgetedFailureAndCancellationDrainWithoutCompletion) {
+  const auto dir = CreateTestDir();
+  CreateDirIfNotExists(dir / "inputs");
+  auto reconstruction = CreateSyntheticReconstructionWithBitmaps(dir / "inputs", 4);
+  COLMAPUndistorter::Options options;
+  options.host_budget_bytes = uint64_t{1} << 30;
+  options.num_threads = 2;
+  UndistortCameraOptions camera_options;
+  camera_options.max_image_size = 20;
+  // Header preflight succeeds, then output Write fails on a directory.
+  const auto name = reconstruction.Image(reconstruction.RegImageIds().front()).Name();
+  CreateDirIfNotExists(dir / "failed");
+  CreateDirIfNotExists(dir / "failed/images");
+  CreateDirIfNotExists(dir / "failed/images" / name);
+  COLMAPUndistorter failed(options, camera_options, reconstruction,
+                           dir / "inputs", dir / "failed");
+  EXPECT_THROW(failed.Run(), std::runtime_error);
+  EXPECT_FALSE(ExistsFile(dir / "failed/stereo/fusion.cfg"));
+  EXPECT_FALSE(ExistsFile(dir / "failed/sparse/cameras.bin"));
+  COLMAPUndistorter cancelled(options, camera_options, reconstruction,
+                              dir / "inputs", dir / "cancelled");
+  int checks = 0;
+  cancelled.SetCheckIfStoppedFunc([&checks] { return ++checks >= 2; });
+  EXPECT_THROW(cancelled.Run(), std::runtime_error);
+  EXPECT_FALSE(ExistsFile(dir / "cancelled/stereo/fusion.cfg"));
+  EXPECT_FALSE(ExistsFile(dir / "cancelled/sparse/cameras.bin"));
+  // Completed output bodies are stable after Run returns: no owned tasks left.
+  for (const auto& path : GetRecursiveFileList(dir / "cancelled/images")) {
+    Bitmap bitmap;
+    EXPECT_TRUE(bitmap.Read(path));
+  }
+}
+#endif
 
 TEST(COLMAPUndistorter, Integration) {
   const auto temp_dir = CreateTestDir();

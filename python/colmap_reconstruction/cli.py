@@ -250,10 +250,14 @@ class Reconstruction:
         counts = analyzed[selected]
         self.registered_images = counts['num_registered_images']
         write_json(self.assets / 'sparse-model.json', dict(name=selected, policy=policy, counts=counts))
-        self.resources()
+        phase_capacity = self.resources()['host']
+        self.process.host_budget_bytes = phase_capacity
         self.native('image_undistorter', '--image_path', a.photos, '--input_path', sparse / selected,
             '--output_path', self.dense, '--max_image_size', a.max_image_size,
-            '--num_patch_match_src_images', a.source_cap, '--num_threads', a.threads)
+            '--num_patch_match_src_images', a.source_cap, '--num_threads', a.threads,
+            '--host_budget_bytes', phase_capacity,
+            '--policy_host_bytes', a.loader_scratch_host_bytes + a.process_host_bytes + a.unknown_host_bytes,
+            '--reserve_host_bytes', a.reserve_host_bytes)
 
     def plan(self):
         a = self.args
