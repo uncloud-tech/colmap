@@ -46,12 +46,15 @@ class ReconstructionTest(unittest.TestCase):
             native = temp / 'prefix/bin/colmap'
             shutil.copy(Path(__file__).with_name('fake_native.py'), native)
             native.chmod(0o755)
-            for scenario in ('good', 'defaults', 'depth', 'source-order', 'fingerprint', 'fusion', 'resources'):
+            for scenario in ('good', 'defaults', 'depth', 'source-order', 'fingerprint', 'fusion', 'resources',
+                             'fusion-input', 'fusion-output', 'fusion-unsupported'):
                 calls = temp / (scenario + '.jsonl')
                 workspace = temp / scenario
                 scenario_env = dict(env, FAKE_CALLS=str(calls), PYTHONPATH='/absent/lab:/absent/photogram')
                 if scenario not in ('good', 'defaults'):
-                    scenario_env['FAKE_BAD_' + {'depth': 'DEPTH', 'source-order': 'ORDER', 'fingerprint': 'FP', 'fusion': 'FUSION', 'resources': 'FREE'}[scenario]] = '1'
+                    scenario_env['FAKE_BAD_' + {'depth': 'DEPTH', 'source-order': 'ORDER', 'fingerprint': 'FP', 'fusion': 'FUSION', 'resources': 'FREE',
+                        'fusion-input': 'FUSION_INPUT', 'fusion-output': 'FUSION_OUTPUT',
+                        'fusion-unsupported': 'FUSION_UNSUPPORTED'}[scenario]] = '1'
                 result = subprocess.run([str(temp / 'prefix/bin/colmap-reconstruct'),
                     '--experimental-local', '--photos', str(temp), '--workspace', str(workspace),
                     *(allowances() if scenario != 'defaults' else [])],
@@ -76,6 +79,11 @@ class ReconstructionTest(unittest.TestCase):
                             self.assertEqual(policy['terms'][name]['origin'], 'default')
                             self.assertEqual(policy['terms'][name]['classification'], 'conservative-policy')
                             self.assertEqual(dense['--' + name], str(value))
+                        fusion = [a for c, a in map(json.loads, calls.read_text().splitlines())
+                                  if c == 'stereo_fusion'][0]
+                        self.assertEqual(fusion['--StereoFusion.host_budget_bytes'], str(16 * 1024**3))
+                        self.assertEqual(fusion['--StereoFusion.policy_host_bytes'], str(2 * 1024**3))
+                        self.assertEqual(fusion['--StereoFusion.reserve_host_bytes'], str(512 * 1024**2))
                         self.assertIsNone(policy['whole_pipeline_physical_fit'])
                         self.assertEqual(json.loads((workspace / 'planning/resource-policy.json').read_text()), policy)
                     self.assertEqual(commands, ['reconstruction_info', 'feature_extractor',

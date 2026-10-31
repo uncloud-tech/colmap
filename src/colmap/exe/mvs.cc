@@ -1017,6 +1017,9 @@ int RunStereoFuser(int argc, char** argv) {
   std::string pmvs_option_name = "option-all";
   std::string output_type = "PLY";
   std::filesystem::path output_path;
+  std::string fusion_host_budget = "0";
+  std::string fusion_policy_host = "0";
+  std::string fusion_reserve_host = "0";
 
   bool optimized_only = false;
   std::filesystem::path optimized_dispatch_receipt;
@@ -1030,6 +1033,11 @@ int RunStereoFuser(int argc, char** argv) {
   options.AddDefaultOption("output_type", &output_type, "{BIN, TXT, PLY}");
   options.AddRequiredOption("output_path", &output_path);
   options.AddStereoFusionOptions();
+  // Byte counts use strict string parsing; BaseOptionManager deliberately
+  // does not support uint64 options and unsigned Boost parsing accepts -1.
+  options.AddDefaultOption("StereoFusion.host_budget_bytes", &fusion_host_budget);
+  options.AddDefaultOption("StereoFusion.policy_host_bytes", &fusion_policy_host);
+  options.AddDefaultOption("StereoFusion.reserve_host_bytes", &fusion_reserve_host);
   options.AddDefaultOption("optimized_only", &optimized_only);
   options.AddDefaultOption("optimized_dispatch_receipt",
                            &optimized_dispatch_receipt);
@@ -1038,6 +1046,14 @@ int RunStereoFuser(int argc, char** argv) {
   }
 
   try {
+    options.stereo_fusion->host_budget_bytes = mvs::owned::ParseBytes(
+        CanonicalCliUnsigned(fusion_host_budget, "fusion host budget"));
+    options.stereo_fusion->policy_host_bytes = mvs::owned::ParseBytes(
+        CanonicalCliUnsigned(fusion_policy_host, "fusion host policy"));
+    options.stereo_fusion->reserve_host_bytes = mvs::owned::ParseBytes(
+        CanonicalCliUnsigned(fusion_reserve_host, "fusion host reserve"));
+    if (!options.stereo_fusion->Check())
+      throw std::invalid_argument("unsupported budgeted fusion options");
     bool project = false, strict_request = false;
     for (int i = 1; i < argc; ++i) {
       const std::string arg(argv[i]);
@@ -1069,15 +1085,22 @@ int RunStereoFuser(int argc, char** argv) {
   options.stereo_fusion->require_complete_inputs = optimized_only;
   // The CLI discards the returned model. PLY/VIS are written directly from
   // the fuser, so do not duplicate the dense points in a Reconstruction.
-  RunStereoFuserWithMaterialization(output_path,
-                                    workspace_path,
-                                    workspace_format,
-                                    pmvs_option_name,
-                                    input_type,
-                                    *options.stereo_fusion,
-                                    output_type,
-                                    {},
-                                    /*materialize_ply=*/false);
+  try {
+    RunStereoFuserWithMaterialization(output_path,
+                                     workspace_path,
+                                     workspace_format,
+                                     pmvs_option_name,
+                                     input_type,
+                                     *options.stereo_fusion,
+                                     output_type,
+                                     {},
+                                     /*materialize_ply=*/false);
+  } catch (const mvs::FusionResourceError& error) {
+    // Run drains workers before propagating; never serialize partial output or
+    // publish an optimized dispatch receipt on logical resource exhaustion.
+    LOG(ERROR) << error.what();
+    return 3;
+  }
 
   if (optimized_only)
     mvs::PublishOptimizedReceipt(optimized_dispatch_receipt,
@@ -1132,6 +1155,10 @@ Reconstruction RunStereoFuserWithMaterialization(
       << "Invalid `output_type` " << output_type
       << " - supported values are 'bin', 'ply' and 'txt'.";
 
+  if (options.host_budget_bytes && (materialize_ply || output_type != "ply"))
+    throw std::invalid_argument(
+        "budgeted fusion supports CLI PLY only; dense model materialization is unaccounted");
+
   mvs::StereoFusion fuser(
       options, workspace_path, workspace_format, pmvs_option_name, input_type);
   fuser.SetCheckIfStoppedFunc(std::move(check_if_stopped));
@@ -1139,6 +1166,8 @@ Reconstruction RunStereoFuserWithMaterialization(
   fuser.Run();
 
   const bool stopped = fuser.CheckIfStopped();
+  if (stopped && options.host_budget_bytes)
+    throw std::runtime_error("budgeted fusion cancelled; no partial output");
   if (stopped && fuser.GetFusedPoints().empty()) {
     return {};
   }

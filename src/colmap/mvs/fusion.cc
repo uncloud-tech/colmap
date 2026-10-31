@@ -4,6 +4,8 @@
 
 #include "colmap/math/math.h"
 #include "colmap/mvs/fusion_dependencies.h"
+#include "colmap/mvs/owned_fixed_cohort_validation.h"
+#include "colmap/util/oiio_utils.h"
 #include "colmap/util/eigen_alignment.h"
 #include "colmap/util/endian.h"
 #include "colmap/util/file.h"
@@ -14,8 +16,10 @@
 
 #include <fstream>
 #include <iterator>
+#include <limits>
 
 #include <Eigen/Geometry>
+#include <OpenImageIO/imageio.h>
 
 namespace colmap {
 namespace mvs {
@@ -72,6 +76,16 @@ void StereoFusionOptions::Print() const {
 }
 
 bool StereoFusionOptions::Check() const {
+  if (host_budget_bytes) {
+    CHECK_OPTION_EQ(use_mmap, true);
+    CHECK_OPTION_EQ(use_cache, false);
+    CHECK_OPTION_EQ(num_threads, 1);
+    CHECK_OPTION_EQ(max_image_size, -1);
+    CHECK_OPTION_EQ(mask_path.empty(), true);
+  } else {
+    CHECK_OPTION_EQ(policy_host_bytes, 0);
+    CHECK_OPTION_EQ(reserve_host_bytes, 0);
+  }
   if (use_mmap) {
     CHECK_OPTION_EQ(max_image_size, -1);
     CHECK_OPTION_EQ(use_cache, false);
@@ -115,6 +129,13 @@ void StereoFusion::Run() {
   Timer run_timer;
   run_timer.Start();
 
+  output_ledger_.reset();
+  resource_failed_.store(false);
+  if (options_.host_budget_bytes) {
+    // A repeated Run must not inherit uncharged output capacities.
+    std::vector<PlyPoint>().swap(fused_points_);
+    std::vector<std::vector<int>>().swap(fused_points_visibility_);
+  }
   fused_points_.clear();
   fused_points_visibility_.clear();
 
@@ -165,6 +186,70 @@ void StereoFusion::Run() {
                             true);
     }
   }
+  if (options_.host_budget_bytes) {
+    // Inventory every distinct eligible input before RGB decode or mask
+    // allocation. Validate complete map bodies now, keeping their immutable
+    // mapping owners for the run. Mapping payload is not a resident charge.
+    const auto capacity = std::min(options_.host_budget_bytes,
+                                   owned::ObserveFixedCohortHostAvailable());
+    FusionLogicalBudget budget(capacity, options_.policy_host_bytes,
+                               options_.reserve_host_bytes);
+    FusionInputInventory inventory;
+    const auto& model = workspace_->GetModel();
+    std::vector<char> seen(model.images.size(), false);
+    mapped_depth_maps_.clear();
+    mapped_normal_maps_.clear();
+    mapped_depth_maps_.resize(model.images.size());
+    mapped_normal_maps_.resize(model.images.size());
+    for (const auto& name : image_names) {
+      const auto idx = model.GetImageIdx(name);
+      if (!FusionInputsAvailable(name, workspace_->GetBitmapPath(idx),
+                                  workspace_->GetDepthMapPath(idx),
+                                  workspace_->GetNormalMapPath(idx), true))
+        continue;
+      if (seen.at(idx)) continue;
+      seen.at(idx) = true;
+      const auto& image = model.images.at(idx);
+      inventory.AddImage(image.GetWidth(), image.GetHeight());
+      // Bitmap's decoder/CloneAsRGB currently multiply int dimensions.
+      // Refuse unsupported shapes before that arithmetic or any decode.
+      if (FusionCheckedMultiply(
+              FusionCheckedMultiply(image.GetWidth(), image.GetHeight()), 3) >
+          static_cast<uint64_t>(std::numeric_limits<int>::max()))
+        throw std::invalid_argument("budgeted fusion bitmap shape exceeds int decoder range");
+      mapped_depth_maps_[idx] = std::make_unique<FusionMappedMat>(
+          workspace_->GetDepthMapPath(idx), image.GetWidth(), image.GetHeight(), 1);
+      mapped_normal_maps_[idx] = std::make_unique<FusionMappedMat>(
+          workspace_->GetNormalMapPath(idx), image.GetWidth(), image.GetHeight(), 3);
+    }
+    LOG(INFO) << "Fusion logical retained input bytes: " << inventory.retained_bytes
+              << ", initialization peak: " << inventory.peak_bytes
+              << ", mapped file payload (not resident floor/free credit): "
+              << inventory.mapped_bytes
+              << ", unknown-cost policy: " << options_.policy_host_bytes
+              << ", reserve: " << options_.reserve_host_bytes
+              << ", effective host capacity: " << capacity;
+    budget.Check(inventory.peak_bytes, 0);
+    // Header-only shape/channel checks prevent an inconsistent bitmap from
+    // allocating a larger payload than the model before the post-Read check.
+    EnsureOpenImageIOInitialized();
+    for (size_t idx = 0; idx < seen.size(); ++idx) {
+      if (!seen[idx]) continue;
+      const auto input = OIIO::ImageInput::open(
+          workspace_->GetBitmapPath(idx).string());
+      if (!input) throw std::invalid_argument("fusion invalid bitmap header");
+      const auto& spec = input->spec();
+      const auto& image = model.images.at(idx);
+      const bool valid = spec.width == image.GetWidth() &&
+                         spec.height == image.GetHeight() &&
+                         spec.depth == 1 && spec.nchannels >= 1 &&
+                         spec.nchannels <= 4;
+      input->close();
+      if (!valid) throw std::invalid_argument("fusion bitmap/model shape mismatch");
+    }
+    output_ledger_ = std::make_unique<FusionOutputLedger>(
+        budget, inventory.retained_bytes);
+  }
   if (!options_.use_cache && !options_.use_mmap) {
     workspace_->Load(image_names);
   }
@@ -199,8 +284,10 @@ void StereoFusion::Run() {
     used_images_.assign(model.images.size(), false);
     fused_images_.assign(model.images.size(), false);
     depth_map_sizes_.clear();
-    mapped_depth_maps_.clear();
-    mapped_normal_maps_.clear();
+    if (!options_.host_budget_bytes) {
+      mapped_depth_maps_.clear();
+      mapped_normal_maps_.clear();
+    }
     decoded_bitmaps_.clear();
     atomic_pixel_masks_.clear();
     mapped_depth_maps_.resize(model.images.size());
@@ -242,10 +329,12 @@ void StereoFusion::Run() {
       }
       width = image.GetWidth();
       height = image.GetHeight();
-      mapped_depth_maps_[image_idx] = std::make_unique<FusionMappedMat>(
-          workspace_->GetDepthMapPath(image_idx), width, height, 1);
-      mapped_normal_maps_[image_idx] = std::make_unique<FusionMappedMat>(
-          workspace_->GetNormalMapPath(image_idx), width, height, 3);
+      if (!options_.host_budget_bytes) {
+        mapped_depth_maps_[image_idx] = std::make_unique<FusionMappedMat>(
+            workspace_->GetDepthMapPath(image_idx), width, height, 1);
+        mapped_normal_maps_[image_idx] = std::make_unique<FusionMappedMat>(
+            workspace_->GetNormalMapPath(image_idx), width, height, 3);
+      }
       auto bitmap = std::make_unique<Bitmap>();
       THROW_CHECK(bitmap->Read(workspace_->GetBitmapPath(image_idx), true));
       THROW_CHECK_EQ(bitmap->Width(), width);
@@ -311,7 +400,13 @@ void StereoFusion::Run() {
         }
         const int thread_id =
             options_.use_mmap ? mapped_thread_id : thread_pool.GetThreadIndex();
-        Fuse(thread_id, image_idx, row, col);
+        if (resource_failed_.load()) return;
+        try {
+          Fuse(thread_id, image_idx, row, col);
+        } catch (const FusionResourceError&) {
+          resource_failed_.store(true);
+          throw;
+        }
       }
     }
   };
@@ -340,6 +435,7 @@ void StereoFusion::Run() {
 
     try {
       for (int row_start = 0; row_start < height; row_start += kRowStride) {
+        if (resource_failed_.load()) break;
         thread_pool.AddTask(ProcessImageRows,
                             row_start,
                             height,
@@ -356,6 +452,8 @@ void StereoFusion::Run() {
         thread_pool.Wait();
       } catch (...) {
       }
+      if (resource_failed_.load())
+        throw FusionResourceError("fusion runtime output budget exhausted; workers drained");
       std::rethrow_exception(error);
     }
     VerifyMappedInputs();
@@ -365,15 +463,24 @@ void StereoFusion::Run() {
 
     total_fused_points = 0;
     for (const auto& task_fused_points : task_fused_points_) {
-      total_fused_points += task_fused_points.size();
+      total_fused_points = options_.host_budget_bytes
+                               ? FusionCheckedAdd(total_fused_points,
+                                                  task_fused_points.size())
+                               : total_fused_points + task_fused_points.size();
     }
     LOG(INFO) << StringPrintf(
         " in %.3fs (%d points)", timer.ElapsedSeconds(), total_fused_points);
   }
 
   VerifyMappedInputs();
-  fused_points_.reserve(total_fused_points);
-  fused_points_visibility_.reserve(total_fused_points);
+  if (output_ledger_) {
+    // Task buffers remain live through both allocations and the merge.
+    output_ledger_->Reserve(fused_points_, total_fused_points);
+    output_ledger_->Reserve(fused_points_visibility_, total_fused_points);
+  } else {
+    fused_points_.reserve(total_fused_points);
+    fused_points_visibility_.reserve(total_fused_points);
+  }
   for (size_t thread_id = 0; thread_id < task_fused_points_.size();
        ++thread_id) {
     fused_points_.insert(fused_points_.end(),
@@ -387,8 +494,14 @@ void StereoFusion::Run() {
           fused_points_visibility_.end(),
           std::make_move_iterator(visibility.begin()),
           std::make_move_iterator(visibility.end()));
-      std::vector<std::vector<int>>().swap(visibility);
-      std::vector<PlyPoint>().swap(task_fused_points_[thread_id]);
+      if (output_ledger_) {
+        // Inner visibility allocations moved to final storage, not freed.
+        output_ledger_->Release(visibility);
+        output_ledger_->Release(task_fused_points_[thread_id]);
+      } else {
+        std::vector<std::vector<int>>().swap(visibility);
+        std::vector<PlyPoint>().swap(task_fused_points_[thread_id]);
+      }
       continue;
     }
     fused_points_visibility_.insert(
@@ -668,9 +781,22 @@ void StereoFusion::Fuse(const int thread_id,
     fused_point.b =
         TruncateCast<float, uint8_t>(std::round(Median(fused_point_b)));
 
-    task_fused_points_[thread_id].push_back(fused_point);
-    task_fused_points_visibility_[thread_id].emplace_back(
-        fused_point_visibility.begin(), fused_point_visibility.end());
+    if (output_ledger_) {
+      auto& points = task_fused_points_[thread_id];
+      auto& visibility = task_fused_points_visibility_[thread_id];
+      output_ledger_->GrowForAppend(points);
+      output_ledger_->GrowForAppend(visibility);
+      std::vector<int> indices;
+      output_ledger_->Reserve(indices, fused_point_visibility.size());
+      indices.insert(indices.end(), fused_point_visibility.begin(),
+                     fused_point_visibility.end());
+      points.push_back(fused_point);
+      visibility.push_back(std::move(indices));
+    } else {
+      task_fused_points_[thread_id].push_back(fused_point);
+      task_fused_points_visibility_[thread_id].emplace_back(
+          fused_point_visibility.begin(), fused_point_visibility.end());
+    }
   }
 }
 

@@ -142,6 +142,7 @@ class Reconstruction:
             if effective[side] <= getattr(self.args, 'reserve_' + side + '_bytes'):
                 raise NativeFailure(side + ' reserve unavailable before native stage; '
                                     'lower workload or free capacity (budgets cannot raise FREE)')
+        return effective
 
     def dense_arguments(self):
         a = self.args
@@ -185,13 +186,21 @@ class Reconstruction:
         self.prepare()
         self.plan()
         self.dense_stage()
-        self.resources()
+        phase_capacity = self.resources()['host']
+        # Use the same absolute phase capacity for best-effort direct-child RSS
+        # monitoring. Native accounting owns the one 3% margin and reserve;
+        # Python only hands off raw policy, never a second forecast/margin.
+        self.process.host_budget_bytes = phase_capacity
         self.native('stereo_fusion', '--workspace_path', self.dense,
             '--workspace_format', 'COLMAP', '--input_type', 'geometric',
             '--output_path', self.workspace / 'points.ply', '--optimized_only', 'true',
             '--optimized_dispatch_receipt', self.assets / 'fusion.receipt',
             '--StereoFusion.max_image_size', '-1', '--StereoFusion.use_mmap', 'true',
-            '--StereoFusion.use_cache', 'false', '--StereoFusion.num_threads', '1')
+            '--StereoFusion.use_cache', 'false', '--StereoFusion.num_threads', '1',
+            '--StereoFusion.host_budget_bytes', phase_capacity,
+            '--StereoFusion.policy_host_bytes', self.args.loader_scratch_host_bytes
+                + self.args.process_host_bytes + self.args.unknown_host_bytes,
+            '--StereoFusion.reserve_host_bytes', self.args.reserve_host_bytes)
         receipt = json.loads((self.assets / 'fusion.receipt').read_bytes())
         if any(receipt.get(key) != expected for key, expected in dict(
                 schema_version=1, phase='fusion', backend='cpu', cache=False,

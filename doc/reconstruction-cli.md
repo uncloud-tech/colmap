@@ -75,7 +75,7 @@ arbitrary raw-camera qualification):
 
 These values were declarations in that execution, **not measured usage or
 calibrated bounds**. A new scene or device is not guaranteed to fit. They do not
-scale from hardware size or pretend to forecast SfM/fusion. Native input-derived
+scale from hardware size or pretend to forecast SfM or complete fusion physical usage. Native input-derived
 allocations are predictions; FREE capacity is an observation (racy, not reserved);
 these allowances are policy. Already-live usage is already excluded from FREE
 and is **not subtracted again**. Process/unknown allowances cover additional
@@ -96,9 +96,32 @@ SfM/decoding/fusion physical memory models remain unavailable. Before heavy
 stages, `reconstruction_info --gpu_index N --deadline_seconds N` reuses the native
 FREE host/cgroup and selected-device observer for reserve sanity checks; it is
 not a physical stage forecast. Identity-only `reconstruction_info` creates no
-CUDA context. These reserve checks and direct-child RSS monitoring (when a host
-budget is supplied) are best-effort,
-not whole-process-tree isolation. No universal 8GB, physical-fit, quality,
+CUDA context. Immediately before fusion, the installed frontend automatically hands
+observed host capacity (limited by any user cap) to native fusion and the existing
+direct-child RSS monitor. No extra byte flags are required. Native fusion again
+limits that phase cap by its own observed host/cgroup FREE before allocation.
+
+This optional native logical budget supports only single-thread, full-resolution
+COLMAP mmap fusion, without cache or external masks. Other budgeted settings
+refuse. Distinct configured inputs contribute retained RGB plus atomic masks
+(`4 * sum(width * height)`); the ordered initialization peak includes temporary
+char and atomic mask coexistence (`max(4*sum(area), 4*prefix + 5*area)`). Mapped
+depth/normal payload (`16*sum(area)`) is reported separately, never a resident
+floor or free credit. Bitmap headers and complete map sizes are checked before
+decoding. Input refusal precedes RGB/mask allocation.
+
+Output point, visibility-container and visibility-integer vector capacities are
+checked before growth, including old/new buffers and task/final merge overlap.
+Unknown scratch, decoder, metadata, allocator and traversal costs remain explicit
+policy: the existing raw loader-scratch + process-host + unknown-host allowances
+are summed once. Native applies one aggregate 3% margin to accounted inputs,
+outputs and policy, then adds the separate reserve. Runtime checks use this same
+frozen capacity, not FREE-minus-already-live storage a second time. Budget
+exhaustion drains workers and exits with code 3, without output serialization or
+a success receipt. Unbudgeted native fusion retains its old behavior; set
+`StereoFusion.host_budget_bytes` to opt in, with optional `policy_host_bytes` and
+`reserve_host_bytes` in the same namespace. These logical checks and direct-child
+RSS monitoring remain best-effort, not whole-process-tree isolation. No universal 8GB, physical-fit, quality,
 throughput or performance-qualified claim is made. `--require-hard-memory-cap`
 always refuses before creating outputs. External OS limits remain the user's
 responsibility where required.

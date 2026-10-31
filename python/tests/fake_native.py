@@ -19,7 +19,7 @@ if os.environ.get('FAKE_CALLS'):
         stream.write(json.dumps([command, args]) + '\n')
 models = json.loads(os.environ.get('FAKE_SPARSE_MODELS', '{"0":{"num_registered_images":2,"num_points3D":4}}'))
 identity = dict(schema_version=1, cuda_compiled=True, source_commit='a' * 40,
-                allocation_fingerprint=os.environ.get('FAKE_ALLOCATION_FP', '779e24575750cdf9c40b19cf8d71084de8ccf813de20f4002a1440ee79edd76d'),
+                allocation_fingerprint=os.environ.get('FAKE_ALLOCATION_FP', 'a48178e1be1a810c4383c30b0cb0242919ab59b5e39246fa215651de4f7d115f'),
                 available_host_bytes=str(16 * 1024**3),
                 available_device_bytes='0' if os.environ.get('FAKE_BAD_FREE') else str(8 * 1024**3))
 
@@ -95,6 +95,15 @@ elif command == 'experimental_fixed_cohort':
           allocation_fingerprint='c' * 64 if os.environ.get('FAKE_BAD_FP') else identity['allocation_fingerprint'],
           effective_storage='private', photo_active_owners=2, geo_active_owners=2, phases=phases))
 elif command == 'stereo_fusion':
+    if os.environ.get('FAKE_BAD_FUSION_INPUT'):
+        print('fusion logical host budget exhausted before decode', file=sys.stderr)
+        raise SystemExit(3)
+    if os.environ.get('FAKE_BAD_FUSION_OUTPUT'):
+        print('fusion runtime output budget exhausted; workers drained', file=sys.stderr)
+        raise SystemExit(3)
+    if os.environ.get('FAKE_BAD_FUSION_UNSUPPORTED'):
+        print('unsupported budgeted fusion options', file=sys.stderr)
+        raise SystemExit(1)
     assert args['--optimized_only'] == 'true'
     assert args['--StereoFusion.use_mmap'] == 'true'
     workspace = Path(args['--workspace_path'])

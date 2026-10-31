@@ -51,6 +51,7 @@ COLMAP_ADD_LIBRARY(
         depth_map.h depth_map.cc
         fusion.h fusion.cc
         fusion_dependencies.h
+        fusion_resource.h
         fusion_mapped_mat.h fusion_mapped_mat.cc
         image.h image.cc
         mat.h mat.cc
@@ -598,7 +599,8 @@ if(TESTS_ENABLED)
             optimized_photo_delivery_test
             optimized_photo_options_test optimized_photo_paths_test
             optimized_photo_prepared_test
-            optimized_photo_concurrency_test fusion_dependencies_test)
+            optimized_photo_concurrency_test fusion_dependencies_test
+            fusion_resource_test)
         add_executable(colmap_mvs_${contract_test} ${contract_test}.cc)
         target_include_directories(colmap_mvs_${contract_test} PRIVATE
             "${PROJECT_SOURCE_DIR}/src" "${CMAKE_CURRENT_BINARY_DIR}")
