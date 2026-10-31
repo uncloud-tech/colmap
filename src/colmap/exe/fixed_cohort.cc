@@ -82,7 +82,7 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
   try {
     fs::path workspace_path, output_path, photo_config_path, geo_config_path;
     bool prepare_only = false, auto_active_owners = false;
-    bool observe_capacities = false;
+    bool observe_capacities = false, auto_phase_active_owners = false;
     int active_owners_ceiling = 0;
     int max_load_image_size = -1, active_owners = 1, tile_threads = 32;
     int deadline_seconds = 0;
@@ -111,6 +111,10 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
         "auto_active_owners",
         &auto_active_owners,
         "Select largest memory-admissible count, not throughput optimum");
+    options.AddDefaultOption("auto_phase_active_owners",
+                             &auto_phase_active_owners,
+                             "Independent PHOTO/GEO memory-admissible counts; "
+                             "requires auto_active_owners");
     options.AddDefaultOption(
         "observe_capacities",
         &observe_capacities,
@@ -160,6 +164,8 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
     const bool device_cap = cap_present("device_capacity_bytes");
     Require(observe_capacities || (host_cap && device_cap),
             "manual mode requires host_capacity_bytes and device_capacity_bytes");
+    Require(!auto_phase_active_owners || auto_active_owners,
+            "auto_phase_active_owners requires auto_active_owners");
     Require(!observe_capacities || auto_active_owners,
             "observe_capacities requires auto_active_owners");
     for (const auto& [name, value] : byte_options) {
@@ -281,7 +287,16 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
                    "no inferred live credit; may reject feasible work\n";
     }
     std::string count_reason = "manual";
-    if (auto_active_owners) {
+    std::array<owned::FixedCohortActiveSelection, 2> phase_selection;
+    if (auto_phase_active_owners) {
+      phase_selection = owned::SelectFixedCohortPhaseActiveOwners(
+          budget, capacity, active_owners_ceiling);
+      budget.phase_active_owners = {phase_selection[0].count,
+                                    phase_selection[1].count};
+      budget.max_active_owners =
+          std::max(phase_selection[0].count, phase_selection[1].count);
+      count_reason = "phase-specific (see PHOTO/GEO)";
+    } else if (auto_active_owners) {
       const auto selection = owned::SelectFixedCohortActiveOwners(
           budget, capacity, active_owners_ceiling);
       budget.max_active_owners = selection.count;
@@ -294,6 +309,12 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
               << "; selection=" << (auto_active_owners ? "automatic" : "manual")
               << "; limiting_reason=" << count_reason
               << "; memory admissibility only, not throughput optimum\n";
+    if (auto_phase_active_owners) {
+      for (size_t i = 0; i < 2; ++i)
+        std::cout << (i ? "GEO" : "PHOTO")
+                  << " active_owners=" << phase_selection[i].count
+                  << "; limiting_reason=" << phase_selection[i].reason << '\n';
+    }
     const auto dispatch = budget.max_active_owners == 1
                               ? owned::PairDispatch::kSerial
                               : owned::PairDispatch::kPair;

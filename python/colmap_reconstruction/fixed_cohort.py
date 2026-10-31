@@ -31,7 +31,7 @@ import subprocess
 
 from .model import _add, _mul, current_owned_shape_minimum, exact_int
 
-_FIXED_COHORT_FINGERPRINT = 'b3c975af62332e81e9054b2f3237d0c3990804816cb5c2815160523619d795c6'
+_FIXED_COHORT_FINGERPRINT = 'f74e0a7b322dc8d204a7100b1aec48f0a5686383acc08456a27a2b427481b1be'
 _PROFILE = 'fresh-fixed-cohort/current-owned-shape-lower-bound-v1/unqualified'
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -227,6 +227,7 @@ class FixedCohortBudget:
     photo_shared: ByteCharge = ByteCharge()
     photo_source_storage: PhotoSourceStorage = PhotoSourceStorage.PRIVATE
     output_policy: OutputPolicy = OutputPolicy.PHOTO_AND_GEO
+    phase_active_owners: tuple[int, int] = (0, 0)
     profile: str = _PROFILE
     physical_fit_certified: bool = False
     calibration_certified: bool = False
@@ -238,11 +239,11 @@ class FixedCohortBudget:
 
     @property
     def photo_peak(self):
-        return self.retained + self.photo_shared + active_peak(self.photo_private, self.max_active_owners)
+        return self.retained + self.photo_shared + active_peak(self.photo_private, self.phase_active_owners[0] or self.max_active_owners)
 
     @property
     def geo_peak(self):
-        return self.retained + active_peak(self.geo_private, self.max_active_owners)
+        return self.retained + active_peak(self.geo_private, self.phase_active_owners[1] or self.max_active_owners)
 
     @property
     def peak(self):
@@ -277,6 +278,7 @@ class FixedCohortBudget:
             lines.append(f'b.{name} = {charge(getattr(self, name))};')
         lines.append(f'b.unknown_provenance = {text(self.unknown_provenance)};')
         lines.append(f'b.max_active_owners = {self.max_active_owners};')
+        lines.append(f'b.phase_active_owners = {{{self.phase_active_owners[0]},{self.phase_active_owners[1]}}};')
         for name in ('photo_private', 'geo_private'):
             lines.append(f'b.{name} = {{' + ','.join(map(charge, getattr(self, name))) + '};')
         lines.append('b.geo_staging_device = {' + ','.join(str(x)+'ULL' for x in self.geo_staging_device) + '};')
@@ -291,7 +293,8 @@ def forecast_fixed_cohort(images, jobs, *, max_active_owners, source_root,
                           already_live_process=(ByteCharge(), ByteCharge()),
                           already_live_process_provenance=('', ''),
                           output_policy=OutputPolicy.PHOTO_AND_GEO,
-                          photo_source_storage=PhotoSourceStorage.PRIVATE):
+                          photo_source_storage=PhotoSourceStorage.PRIVATE,
+                          phase_active_owners=(0, 0)):
     """Evaluate metadata only; capacities and the aggregate margin belong native.
 
     Process is caller-classified raw storage (not a new coefficient). Live
@@ -306,6 +309,16 @@ def forecast_fixed_cohort(images, jobs, *, max_active_owners, source_root,
         raise ValueError('expected typed OutputPolicy')
     images, jobs = tuple(images), tuple(jobs)
     exact_int(max_active_owners, 1, max(2, len(jobs)))
+    phase_active_owners = tuple(phase_active_owners)
+    for count in phase_active_owners:
+        exact_int(count, 0, len(jobs))
+    if len(phase_active_owners) != 2:
+        raise ValueError('expected PHOTO/GEO counts')
+    if phase_active_owners != (0, 0):
+        for count in phase_active_owners:
+            exact_int(count, 1, len(jobs))
+        if max(phase_active_owners) != max_active_owners:
+            raise ValueError('phase count maximum must match max_active_owners')
     if not images or not jobs:
         raise ValueError('empty fixed cohort')
     for image in images:
@@ -372,4 +385,5 @@ def forecast_fixed_cohort(images, jobs, *, max_active_owners, source_root,
         ByteCharge(0, maps), process, unknown, unknown_provenance, headroom_reserve,
         max_active_owners, tuple(photo), tuple(geo), tuple(staging),
         _bind_source(source_root), images, jobs, live, provenance,
-        ByteCharge(union_bytes, union_bytes), photo_source_storage, output_policy)
+        ByteCharge(union_bytes, union_bytes), photo_source_storage, output_policy,
+        phase_active_owners)
