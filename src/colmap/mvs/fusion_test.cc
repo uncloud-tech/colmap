@@ -457,6 +457,7 @@ TEST(StereoFusion, BudgetRejectsUnsupportedModes) {
   StereoFusionOptions options;
   options.host_budget_bytes = 1000000;
   options.num_threads = 1;
+  options.use_mmap = true;
   EXPECT_TRUE(options.Check());
   options.num_threads = 2;
   EXPECT_FALSE(options.Check());
