@@ -202,6 +202,13 @@ inline ByteCharge AdmitFixedCohortBudget(const FixedCohortBudget& budget,
   return admitted;
 }
 
+// Only this refusal is recoverable when comparing canonical storage plans.
+// Malformed declarations, unsupported inputs and overflow must propagate.
+class FixedCohortCapacityRefusal : public std::invalid_argument {
+ public:
+  using std::invalid_argument::invalid_argument;
+};
+
 // Largest MEMORY-admissible count, not a measured throughput optimum. Metadata
 // only: callers select before loading pixels or allocating candidate payloads.
 struct FixedCohortActiveSelection {
@@ -239,7 +246,7 @@ inline FixedCohortActiveSelection SelectFixedCohortActiveOwners(
                                  : host         ? "host capacity"
                                                 : "device capacity";
       if (!chosen)
-        throw std::invalid_argument(
+        throw FixedCohortCapacityRefusal(
             "fixed-cohort " +
             std::string(phase ? (*phase ? "GEO " : "PHOTO ") : "") +
             "no singleton fits: " + reason);

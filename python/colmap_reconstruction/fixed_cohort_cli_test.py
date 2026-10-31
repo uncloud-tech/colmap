@@ -93,6 +93,66 @@ class FixedCohortCommandTest(unittest.TestCase):
         self.assertEqual(self.invoke().returncode, 0)
         self.assertEqual(sentinel.read_text(), 'preserve')
 
+    def test_auto_storage_requires_auto_owners_and_reports_effective_binding(self):
+        refused = self.invoke(self.args + ['--photo_source_storage', 'auto'])
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn('auto storage requires auto_active_owners', refused.stderr)
+        for phase in (False, True):
+            args = self.args + ['--photo_source_storage', 'auto', '--auto_active_owners', '1']
+            if phase:
+                args += ['--auto_phase_active_owners', '1']
+            result = self.invoke(args)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('requested_photo_source_storage=auto; effective_photo_source_storage=private', result.stdout)
+            self.assertIn('equal counts prefer private', result.stdout)
+            self.assertIn('PHOTO active_owners=3; GEO active_owners=3', result.stdout)
+            self.assertFalse(self.output.exists())
+        (self.workspace / 'images/a.pgm').unlink()
+        args[args.index('--host_capacity_bytes') + 1] = '0'
+        refused = self.invoke(args)
+        self.assertIn('auto PHOTO source storage: private:', refused.stderr)
+        self.assertIn('; shared:', refused.stderr)
+        self.assertNotIn('Cannot read', refused.stderr)
+
+    def test_auto_storage_native_caps_and_fail_closed_before_decode(self):
+        args = self.phase_args(heavy_photo=True)
+        for phase in (False, True):
+            for cap_storage, cap_count, expected_storage, expected_count in (
+                    ('shared', 1, 'shared', 1),
+                    ('shared', 3, 'shared', 3),
+                    ('private', 3, 'private', 3)):
+                prepared = self.invoke(args + ['--photo_source_storage', cap_storage,
+                                               '--active_owners', str(cap_count)])
+                self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+                match = re.search(r'admitted host=(\d+) device=(\d+)', prepared.stdout)
+                bounded = args + ['--auto_active_owners', '1', '--photo_source_storage', 'auto']
+                bounded[bounded.index('--device_capacity_bytes') + 1] = str(int(match.group(2)) + (1 << 20))
+                if phase:
+                    bounded += ['--auto_phase_active_owners', '1']
+                result = self.invoke(bounded)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f'effective_photo_source_storage={expected_storage}', result.stdout)
+                geo_count = 3 if phase else expected_count
+                self.assertIn(f'PHOTO active_owners={expected_count}; GEO active_owners={geo_count}', result.stdout)
+        # Unsupported options must not be classified as an ordinary capacity
+        # refusal, nor masked by missing pixels or an alternate storage plan.
+        (self.workspace / 'images/a.pgm').unlink()
+        invalid = args + ['--auto_active_owners', '1', '--photo_source_storage', 'auto']
+        invalid[invalid.index('--device_capacity_bytes') + 1] = '0'
+        invalid[invalid.index('--PatchMatchStereo.sigma_spatial') + 1] = '-1'
+        result = self.invoke(invalid)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('invalid phase options', result.stderr)
+        self.assertNotIn('no singleton fits', result.stderr)
+        invalid[invalid.index('--PatchMatchStereo.sigma_spatial') + 1] = '5'
+        (self.workspace / 'sparse/cameras.txt').write_text(
+            '1 SIMPLE_RADIAL 20 10 20 10 5 0.1\n')
+        result = self.invoke(invalid)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('requires undistorted cameras', result.stderr)
+        self.assertNotIn('no singleton fits', result.stderr)
+        self.assertFalse(self.output.exists())
+
     def test_automatic_count_and_ceiling_before_payload_decode(self):
         (self.workspace / 'images/d.pgm').write_bytes(
             b'P5\n20 10\n255\n' + bytes(range(200)))
@@ -211,11 +271,11 @@ class FixedCohortCommandTest(unittest.TestCase):
         self.output.mkdir()
         sentinel = self.output / 'sentinel'
         sentinel.write_text('preserve')
-        for value in ('auto', 'SHARED', ''):
+        for value in ('AUTO', 'SHARED', ''):
             with self.subTest(value=value):
                 result = self.invoke(self.args + ['--photo_source_storage', value])
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertIn('invalid photo_source_storage: expected private or shared',
+                self.assertIn('invalid photo_source_storage: expected private, shared or auto',
                               result.stdout + result.stderr)
                 self.assertEqual(list(self.output.iterdir()), [sentinel])
                 self.assertEqual(sentinel.read_text(), 'preserve')
@@ -431,6 +491,49 @@ class FixedCohortCommandTest(unittest.TestCase):
                         self.assertIn(f'{heavy} active_owners=1;', result.stdout)
                         self.assertIn(f'{light} active_owners=3;', result.stdout)
                         self.assertEqual({p.relative_to(output): p.read_bytes() for p in output.rglob('*.bin')}, expected)
+
+    @unittest.skipUnless(os.environ.get('COLMAP_TEST_OBSERVED_CUDA'),
+                         'explicit real CUDA execution opt-in required')
+    def test_auto_storage_execution_matches_explicit_effective_mode(self):
+        args = self.phase_args(heavy_photo=True)
+        original_inputs = {p.relative_to(self.workspace): p.read_bytes()
+                           for p in self.workspace.rglob('*') if p.is_file()}
+        args[args.index('--unknown_device_bytes') + 1] = str(4 << 20)
+        args[args.index('--unknown_provenance') + 1] = (
+            'tiny 20x10 fixture: explicit 4 MiB unknown device allowance, uncalibrated')
+        args[args.index('--PatchMatchStereo.gpu_index') + 1] = os.environ.get('COLMAP_TEST_CUDA_DEVICE', '0')
+        args += ['--output_policy', 'photo_and_geo', '--PatchMatchStereo.num_iterations', '1']
+        for storage in ('private', 'shared'):
+            for count in (1, 3):
+                prepared = self.invoke(args + ['--photo_source_storage', storage,
+                                               '--active_owners', str(count)])
+                self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+                match = re.search(r'admitted host=(\d+) device=(\d+)', prepared.stdout)
+                cap = int(match.group(2)) + (1 << 20)
+                control_path = self.root / f'auto-control-{storage}-{count}'
+                control_args = args + ['--photo_source_storage', storage, '--active_owners', str(count)]
+                control_args[control_args.index('--prepare_only') + 1] = '0'
+                control_args[control_args.index('--output_path') + 1] = str(control_path)
+                control = self.invoke(control_args)
+                self.assertEqual(control.returncode, 0, control.stdout + control.stderr)
+                expected = {p.relative_to(control_path): p.read_bytes() for p in control_path.rglob('*.bin')}
+                self.assertEqual(len(expected), 12)
+                output = self.root / f'auto-{storage}-{count}'
+                run = args + ['--auto_active_owners', '1', '--photo_source_storage', 'auto',
+                              '--active_owners_ceiling', str(count), '--observe_capacities', '1']
+                run[run.index('--prepare_only') + 1] = '0'
+                run[run.index('--device_capacity_bytes') + 1] = str(cap)
+                run[run.index('--output_path') + 1] = str(output)
+                result = self.invoke(run)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f'effective_photo_source_storage={storage}', result.stdout)
+                self.assertIn(f'PHOTO active_owners={count}; GEO active_owners={count}', result.stdout)
+                union_bytes = 600 if storage == 'shared' else 0
+                self.assertIn(f'photo_source_storage={storage}; logical PHOTO union host={union_bytes} device={union_bytes}', result.stdout)
+                self.assertIn(f'executed PHOTO owner_limit={count}; GEO owner_limit={count}; actual PHOTO union host={union_bytes} device={union_bytes}', result.stdout)
+                self.assertEqual({p.relative_to(output): p.read_bytes() for p in output.rglob('*.bin')}, expected)
+        self.assertEqual({p.relative_to(self.workspace): p.read_bytes()
+                          for p in self.workspace.rglob('*') if p.is_file()}, original_inputs)
 
     def test_cap_refusal(self):
         self.args[self.args.index('--host_capacity_bytes') + 1] = '1'

@@ -158,6 +158,7 @@ FixedCohortResult RunFixedCohortPhotoGeo(
     // Retain the entire once-margined peak, even in the smaller phase. No
     // per-owner re-margin or snapshot sharing credit is issued.
     const auto phase_count = FixedCohortPhaseActiveOwners(budget, geo);
+    result.phase_owner_limits[geo] = phase_count;
     const auto active = FixedCohortActivePeak(charges, phase_count);
     const ByteCharge process{reserved.host - active.host,
                              reserved.device - active.device};

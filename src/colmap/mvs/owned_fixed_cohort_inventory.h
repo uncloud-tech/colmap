@@ -94,4 +94,83 @@ inline FixedCohortBudget BuildFixedCohortLogicalInventory(
   budget.snapshots = {0, maps};
   return budget;
 }
+// Componentwise policy, not a throughput or general maximality claim. Keep
+// private for ties and incomparable admitted PHOTO/GEO counts.
+inline bool PreferSharedFixedCohortCounts(std::array<size_t, 2> private_counts,
+                                          std::array<size_t, 2> shared_counts) {
+  return shared_counts[0] >= private_counts[0] &&
+         shared_counts[1] >= private_counts[1] &&
+         shared_counts != private_counts;
+}
+
+// Auto is a selection request, never a runtime storage enum. The returned
+// canonical budget binds both actual allocation and reporting.
+struct FixedCohortStorageSelection {
+  FixedCohortBudget budget;
+  std::string reason;
+};
+
+inline FixedCohortStorageSelection SelectFixedCohortPhotoSourceStorage(
+    const std::vector<FixedCohortImageShape>& images,
+    const std::vector<FixedCohortJobShape>& jobs,
+    FixedCohortBudget declarations,
+    ByteCharge capacity,
+    size_t ceiling = 0,
+    bool phase_counts = false) {
+  for (const auto& image : images)
+    if (!image.width || !image.height)
+      throw std::invalid_argument("fixed-cohort empty image shape");
+  std::array<FixedCohortBudget, 2> budgets;
+  // Validate BOTH full effective ceilings before interpreting any capacity
+  // refusal. No alternate plan may hide malformed input or arithmetic overflow.
+  for (size_t i = 0; i < 2; ++i) {
+    declarations.photo_source_storage =
+        i ? FixedCohortPhotoSourceStorage::kShared
+          : FixedCohortPhotoSourceStorage::kPrivate;
+    budgets[i] = BuildFixedCohortLogicalInventory(images, jobs, declarations);
+    budgets[i].phase_active_owners = {};
+    budgets[i].max_active_owners =
+        ceiling ? std::min(ceiling, jobs.size()) : jobs.size();
+    AdmitFixedCohortBudget(budgets[i],
+                           {std::numeric_limits<uint64_t>::max(),
+                            std::numeric_limits<uint64_t>::max()});
+  }
+  std::array<std::string, 2> refusals;
+  for (size_t i = 0; i < 2; ++i) {
+    auto& budget = budgets[i];
+    try {
+      if (phase_counts) {
+        const auto selected =
+            SelectFixedCohortPhaseActiveOwners(budget, capacity, ceiling);
+        budget.phase_active_owners = {selected[0].count, selected[1].count};
+        budget.max_active_owners =
+            std::max(selected[0].count, selected[1].count);
+      } else {
+        budget.max_active_owners =
+            SelectFixedCohortActiveOwners(budget, capacity, ceiling).count;
+      }
+    } catch (const FixedCohortCapacityRefusal& error) {
+      refusals[i] = error.what();
+    }
+  }
+  if (!refusals[0].empty() && !refusals[1].empty())
+    throw FixedCohortCapacityRefusal(
+        "auto PHOTO source storage: private: " + refusals[0] +
+        "; shared: " + refusals[1] +
+        "; increase limiting capacity or reduce declared workload");
+  if (!refusals[0].empty())
+    return {budgets[1], "only shared fits complete pipeline"};
+  if (!refusals[1].empty())
+    return {budgets[0], "only private fits complete pipeline"};
+  const auto p = std::array<size_t, 2>{
+      FixedCohortPhaseActiveOwners(budgets[0], false),
+      FixedCohortPhaseActiveOwners(budgets[0], true)};
+  const auto s = std::array<size_t, 2>{
+      FixedCohortPhaseActiveOwners(budgets[1], false),
+      FixedCohortPhaseActiveOwners(budgets[1], true)};
+  if (PreferSharedFixedCohortCounts(p, s))
+    return {budgets[1], "shared dominates admitted PHOTO/GEO counts"};
+  return {budgets[0], s == p ? "equal counts prefer private"
+                           : "shared does not dominate; prefer private"};
+}
 }  // namespace colmap::mvs::owned

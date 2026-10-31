@@ -16,6 +16,11 @@ struct FixedCohortWorkspaceReference {
   PatchMatchOptions geo_options;
 };
 
+// Metadata only: Model stores K but discards the original camera model.
+// Reuse this check before automatic storage comparison and pixel preparation.
+void ValidateFixedCohortWorkspaceCameras(
+    const std::filesystem::path& workspace_path);
+
 // Experimental data adapter, not a controller, forecast producer, or file
 // writer. Owns immutable native pixels/calibration and exact resolved options.
 // Native indices refer to Model order, never sparse reconstruction IDs.

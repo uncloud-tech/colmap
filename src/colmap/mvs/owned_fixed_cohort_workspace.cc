@@ -53,6 +53,17 @@ uint64_t HeaderScratchMinimum(const Image& original, const Image& resized) {
 }
 }  // namespace
 
+void ValidateFixedCohortWorkspaceCameras(
+    const std::filesystem::path& workspace_path) {
+  // Model intentionally stores only K, so check the camera model before that
+  // information is discarded. No new sparse-model parser or calibration math.
+  Reconstruction reconstruction;
+  reconstruction.Read(workspace_path / "sparse");
+  for (const auto& [id, camera] : reconstruction.Cameras())
+    Require(camera.IsUndistorted(),
+            "fixed-cohort requires undistorted cameras");
+}
+
 PreparedFixedCohortWorkspace PrepareFixedCohortWorkspace(
     const std::filesystem::path& workspace_path,
     int max_load_image_size,
@@ -84,15 +95,7 @@ PreparedFixedCohortWorkspace PrepareFixedCohortWorkspace(
   guard.Check();
   const auto admitted = AdmitFixedCohortBudget(budget, capacity);
 
-  // Model intentionally stores only K, so check the camera model before that
-  // information is discarded. No new sparse-model parser or calibration math.
-  {
-    Reconstruction reconstruction;
-    reconstruction.Read(workspace_path / "sparse");
-    for (const auto& [id, camera] : reconstruction.Cameras())
-      Require(camera.IsUndistorted(),
-              "fixed-cohort requires undistorted cameras");
-  }
+  ValidateFixedCohortWorkspaceCameras(workspace_path);
   guard.Check();
   PreparedFixedCohortWorkspace result;
   result.budget_ = budget;

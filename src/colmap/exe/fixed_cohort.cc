@@ -6,6 +6,7 @@
 #include "colmap/mvs/owned_fixed_cohort_inventory.h"
 #include "colmap/mvs/owned_fixed_cohort_validation.h"
 #include "colmap/mvs/owned_fixed_cohort_workspace.h"
+#include "colmap/mvs/owned_tile.h"
 #include "colmap/util/file.h"
 #include "colmap/util/misc.h"
 #include "colmap/util/string.h"
@@ -129,7 +130,8 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
         "output_policy", &output_policy, "final_geo_only or photo_and_geo");
     options.AddDefaultOption("photo_source_storage",
                              &photo_source_storage,
-                             "private (default) or shared PHOTO grayscale union");
+                             "private (default), shared PHOTO grayscale union, "
+                             "or auto selection (requires auto_active_owners)");
     options.AddRequiredOption("deadline_seconds", &deadline_seconds);
     // OptionManager supports strings, but not uint64_t. Parse byte quantities
     // losslessly after its normal required-option handling.
@@ -205,12 +207,15 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
       Require(output_policy == "photo_and_geo", "invalid output_policy");
       declarations.output_policy = owned::FixedCohortOutputPolicy::kPhotoAndGeo;
     }
-    if (photo_source_storage == "private")
+    const bool auto_storage = photo_source_storage == "auto";
+    Require(!auto_storage || auto_active_owners,
+            "auto storage requires auto_active_owners");
+    if (photo_source_storage == "private" || auto_storage)
       declarations.photo_source_storage =
           owned::FixedCohortPhotoSourceStorage::kPrivate;
     else {
       Require(photo_source_storage == "shared",
-              "invalid photo_source_storage: expected private or shared");
+              "invalid photo_source_storage: expected private, shared or auto");
       declarations.photo_source_storage =
           owned::FixedCohortPhotoSourceStorage::kShared;
     }
@@ -233,16 +238,23 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
     std::map<std::string, std::vector<std::string>> geo_sources;
     for (const auto& [name, sources] : geo_config)
       geo_sources.emplace(name, sources);
+    if (auto_storage) {
+      Require(max_load_image_size == -1 || max_load_image_size > 0,
+              "fixed-cohort invalid load image size");
+      owned::ValidateOwnedTileThreads(tile_threads);
+      owned::ValidateFixedCohortWorkspaceCameras(workspace_path);
+    }
     mvs::Model model;
     model.Read(workspace_path, "COLMAP");
     std::vector<owned::FixedCohortImageShape> shapes;
-    for (auto image : model.images) {
+    for (auto& image : model.images) {
       if (max_load_image_size > 0)
         image.Downsize(max_load_image_size, max_load_image_size);
       shapes.push_back({image.GetWidth(), image.GetHeight()});
     }
     std::vector<owned::FixedCohortWorkspaceReference> named;
     std::vector<owned::FixedCohortJobShape> jobs;
+    std::vector<owned::FixedCohortReference> references;
     for (const auto& [name, sources] : photo_config) {
       Require(geo_sources.count(name), "PHOTO/GEO reference set differs");
       named.push_back(
@@ -257,10 +269,15 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
       ref.geo_options = geo_options;
       jobs.push_back(
           {ref.reference_image_idx, ref.photo_sources, ref.geo_sources});
+      references.push_back(std::move(ref));
     }
-    model = mvs::Model();  // Release the extra sparse model before decoding.
     auto budget =
         owned::BuildFixedCohortLogicalInventory(shapes, jobs, declarations);
+    // Common invocation validation must not become a capacity refusal or a
+    // reason to try another storage mode. This checks metadata only.
+    if (auto_storage)
+      owned::ValidateFixedCohortShape(model.images, references, budget);
+    model = mvs::Model();  // Release the extra sparse model before decoding.
     if (observe_capacities) {
       check_deadline();
       // A blocking CUDA initialization/query shares the original deadline;
@@ -288,6 +305,18 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
     }
     std::string count_reason = "manual";
     std::array<owned::FixedCohortActiveSelection, 2> phase_selection;
+    std::string storage_reason = "explicit storage";
+    if (auto_storage) {
+      auto selected = owned::SelectFixedCohortPhotoSourceStorage(
+          shapes,
+          jobs,
+          declarations,
+          capacity,
+          active_owners_ceiling,
+          auto_phase_active_owners);
+      budget = std::move(selected.budget);
+      storage_reason = std::move(selected.reason);
+    }
     if (auto_phase_active_owners) {
       phase_selection = owned::SelectFixedCohortPhaseActiveOwners(
           budget, capacity, active_owners_ceiling);
@@ -302,6 +331,20 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
       budget.max_active_owners = selection.count;
       count_reason = selection.reason;
     }
+    const char* effective_storage =
+        budget.photo_source_storage ==
+                owned::FixedCohortPhotoSourceStorage::kShared
+            ? "shared"
+            : "private";
+    if (auto_storage)
+      std::cout << "requested_photo_source_storage=auto; "
+                   "effective_photo_source_storage="
+                << effective_storage
+                << "; storage_reason=" << storage_reason << '\n'
+                << "PHOTO active_owners="
+                << owned::FixedCohortPhaseActiveOwners(budget, false)
+                << "; GEO active_owners="
+                << owned::FixedCohortPhaseActiveOwners(budget, true) << '\n';
     // Selection/refusal precedes workspace decode, frozen pixels, banks and
     // private solver allocation. Never probe fit by attempting allocations.
     owned::AdmitFixedCohortBudget(budget, capacity);
@@ -331,7 +374,7 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
                                                        tile_threads);
     check_deadline();
     const auto admitted = owned::AdmitFixedCohortBudget(budget, capacity);
-    std::cout << "photo_source_storage=" << photo_source_storage
+    std::cout << "photo_source_storage=" << effective_storage
               << "; logical PHOTO union host=" << budget.photo_shared.host
               << " device=" << budget.photo_shared.device << " bytes\n";
     std::cout << "experimental unqualified logical envelope; admitted host="
@@ -361,6 +404,12 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
     // Atomic no-clobber ownership: never remove/reuse a preexisting path.
     Require(fs::create_directory(output_path), "fresh output_path required");
     const auto result = prepared.Run();
+    if (auto_storage)
+      std::cout << "executed PHOTO owner_limit=" << result.phase_owner_limits[0]
+                << "; GEO owner_limit=" << result.phase_owner_limits[1]
+                << "; actual PHOTO union host=" << result.actual_photo_shared.host
+                << " device=" << result.actual_photo_shared.device
+                << " bytes; coordinator limits, not observed overlap\n";
     for (size_t i = 0; i < named.size(); ++i) {
       const auto write_maps = [&](const owned::FixedCohortResult::Maps& maps,
                                   const char* suffix) {
