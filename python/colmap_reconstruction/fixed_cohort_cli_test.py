@@ -310,17 +310,17 @@ class FixedCohortCommandTest(unittest.TestCase):
         args = self.args.copy()
         args[args.index('--prepare_only') + 1] = '0'
         # Execution-only allowance for this tiny fixture, not a calibrated
-        # production bound. At the observed 512-byte pitch, three retained
-        # depth+normal snapshots add 51,840 bytes over logical inventory;
-        # the largest serialized GEO staging adds 12,960 more (3 sources,
-        # including duplicates). Their 64,800-byte discrepancy exceeds the
-        # original ~64 KiB aggregate margin. Declaring 4 MiB unknown device
+        # production bound. Owner buffers showed 512-byte pitches; snapshot
+        # and staging pitches were not logged. Assuming matching pitches,
+        # three depth+normal snapshots would add 51,840 bytes and the largest
+        # GEO staging 12,960 bytes (3 sources including duplicates). This
+        # hypothesized 64,800-byte delta exceeds the original ~64 KiB margin. Declaring 4 MiB unknown device
         # overhead (process remains 1 MiB) supplies >158,000 bytes in the SAME
         # 3% margin. CPU boundary tests retain their independent 1 MiB values.
         args[args.index('--unknown_device_bytes') + 1] = str(4 << 20)
         args[args.index('--unknown_provenance') + 1] = (
             'tiny 20x10 GPU fixture: explicit 4 MiB unknown device allowance; '
-            '512-byte snapshot/staging pitch evidence, not physical-fit proof')
+            'snapshot/staging pitch hypothesis, not physical-fit proof')
         args[args.index('--PatchMatchStereo.gpu_index') + 1] = os.environ.get('COLMAP_TEST_CUDA_DEVICE', '0')
         args += ['--output_policy', 'photo_and_geo', '--PatchMatchStereo.num_iterations', '1']
         control = self.invoke(args)
