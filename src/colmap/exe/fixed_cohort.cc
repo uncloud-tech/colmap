@@ -32,6 +32,24 @@ void CheckName(const std::string& name) {
     Require(component != ".." && component != "." && !component.empty(),
             "unsafe image name for output");
 }
+// Preserve absence separately from an explicit (possibly invalid) byte string.
+// A notifier also works with the existing project-file option parser.
+class FixedCohortOptionManager : public OptionManager {
+ public:
+  void AddOptionalBytes(const std::string& name,
+                        std::string* value,
+                        std::set<std::string>* supplied) {
+    desc_->add_options()(
+        name.c_str(),
+        boost::program_options::value<std::string>()->notifier(
+            [name, value, supplied](const std::string& text) {
+              *value = text;
+              supplied->insert(name);
+            }),
+        "Required manually; optional upper bound on observed FREE capacity");
+    RegisterOption(name, value);
+  }
+};
 using Config = std::vector<std::pair<std::string, std::vector<std::string>>>;
 Config ReadConfig(const fs::path& path) {
   Config result;
@@ -64,6 +82,7 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
   try {
     fs::path workspace_path, output_path, photo_config_path, geo_config_path;
     bool prepare_only = false, auto_active_owners = false;
+    bool observe_capacities = false;
     int active_owners_ceiling = 0;
     int max_load_image_size = -1, active_owners = 1, tile_threads = 32;
     int deadline_seconds = 0;
@@ -72,7 +91,8 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
     owned::FixedCohortBudget declarations;
     std::string output_policy = "final_geo_only";
     std::string photo_source_storage = "private";
-    OptionManager options;
+    std::set<std::string> supplied_caps;
+    FixedCohortOptionManager options;
     options.AddRequiredOption("workspace_path", &workspace_path);
     options.AddRequiredOption(
         "output_path",
@@ -83,7 +103,7 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
     options.AddDefaultOption(
         "prepare_only",
         &prepare_only,
-        "CPU preparation only: NO reconstruction or outputs");
+        "NO solver execution or outputs; CPU-only unless observe_capacities=1");
     options.AddDefaultOption("max_load_image_size", &max_load_image_size);
     options.AddDefaultOption(
         "active_owners", &active_owners, "Positive manual count (default 1)");
@@ -91,6 +111,12 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
         "auto_active_owners",
         &auto_active_owners,
         "Select largest memory-admissible count, not throughput optimum");
+    options.AddDefaultOption(
+        "observe_capacities",
+        &observe_capacities,
+        "Opt-in FREE host/cgroup and selected CUDA device snapshot for automatic "
+        "owners; optional capacity caps only lower free; queries CUDA even in "
+        "prepare_only, never solves there");
     options.AddDefaultOption("active_owners_ceiling",
                              &active_owners_ceiling,
                              "Automatic count ceiling; 0 means job count");
@@ -104,13 +130,18 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
     // OptionManager supports strings, but not uint64_t. Parse byte quantities
     // losslessly after its normal required-option handling.
     std::map<std::string, std::pair<std::string, uint64_t*>> byte_options;
-    const auto add_bytes = [&](const std::string& name, uint64_t* target) {
+    const auto add_bytes = [&](const std::string& name,
+                               uint64_t* target,
+                               bool required = true) {
       auto& value = byte_options[name];
       value.second = target;
-      options.AddRequiredOption(name, &value.first);
+      if (required)
+        options.AddRequiredOption(name, &value.first);
+      else
+        options.AddOptionalBytes(name, &value.first, &supplied_caps);
     };
-    add_bytes("host_capacity_bytes", &capacity.host);
-    add_bytes("device_capacity_bytes", &capacity.device);
+    add_bytes("host_capacity_bytes", &capacity.host, false);
+    add_bytes("device_capacity_bytes", &capacity.device, false);
     add_bytes("loader_scratch_host_bytes", &loader_scratch_host);
     add_bytes("process_host_bytes", &declarations.process.host);
     add_bytes("process_device_bytes", &declarations.process.device);
@@ -122,7 +153,19 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
     add_bytes("reserve_device_bytes", &declarations.headroom_reserve.device);
     options.AddPatchMatchStereoOptions();
     if (!options.Parse(argc, argv)) return EXIT_FAILURE;
+    const auto cap_present = [&](const char* name) {
+      return supplied_caps.count(name) != 0;
+    };
+    const bool host_cap = cap_present("host_capacity_bytes");
+    const bool device_cap = cap_present("device_capacity_bytes");
+    Require(observe_capacities || (host_cap && device_cap),
+            "manual mode requires host_capacity_bytes and device_capacity_bytes");
+    Require(!observe_capacities || auto_active_owners,
+            "observe_capacities requires auto_active_owners");
     for (const auto& [name, value] : byte_options) {
+      if ((name == "host_capacity_bytes" || name == "device_capacity_bytes") &&
+          !cap_present(name.c_str()))
+        continue;
       const auto* begin = value.first.data();
       const auto* end = begin + value.first.size();
       const auto parsed = std::from_chars(begin, end, *value.second);
@@ -212,6 +255,31 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
     model = mvs::Model();  // Release the extra sparse model before decoding.
     auto budget =
         owned::BuildFixedCohortLogicalInventory(shapes, jobs, declarations);
+    if (observe_capacities) {
+      check_deadline();
+      // A blocking CUDA initialization/query shares the original deadline;
+      // never reset its budget or wait forever inside the driver.
+      mvs::NativeRunDeadlineGuard observation_guard(deadline);
+      const auto observed = owned::ObserveFixedCohortCapacities(
+          owned::FixedCohortDevice(photo_options));
+      capacity = owned::LimitFixedCohortAvailable(
+          observed.available,
+          host_cap ? std::optional<uint64_t>(capacity.host) : std::nullopt,
+          device_cap ? std::optional<uint64_t>(capacity.device) : std::nullopt);
+      check_deadline();
+      std::cout << "observed_device=" << observed.device
+                << "; device_name=" << observed.device_name
+                << "; device_uuid=" << observed.device_uuid << '\n'
+                << "observed_free_host_bytes=" << observed.available.host
+                << "; observed_free_device_bytes=" << observed.available.device
+                << "; observed_total_device_bytes=" << observed.device_total
+                << "; effective_host_capacity_bytes=" << capacity.host
+                << "; effective_device_capacity_bytes=" << capacity.device << '\n'
+                << "unqualified logical FREE snapshot, racy and not reserved; "
+                   "already-live process/context excluded from free; declared "
+                   "process/unknown remain additional conservative charges, "
+                   "no inferred live credit; may reject feasible work\n";
+    }
     std::string count_reason = "manual";
     if (auto_active_owners) {
       const auto selection = owned::SelectFixedCohortActiveOwners(
@@ -249,8 +317,12 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
               << admitted.host << " device=" << admitted.device
               << " bytes (single 3% margin); no physical-fit guarantee\n";
     if (prepare_only) {
-      std::cout << "PREPARE ONLY: NO GPU execution, reconstruction, results or "
-                   "output files\n";
+      if (observe_capacities)
+        std::cout << "PREPARE ONLY: CUDA capacity query only; NO solver execution, "
+                     "reconstruction, results or output files\n";
+      else
+        std::cout << "PREPARE ONLY: NO GPU execution, reconstruction, results or "
+                     "output files\n";
       return EXIT_SUCCESS;
     }
 #if !defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)

@@ -11,6 +11,16 @@
 using namespace colmap::mvs::owned;
 
 int main() {
+  // Observation is incremental FREE, never enlarged by caps or declarations.
+  const auto free_caps = LimitFixedCohortAvailable({100, 200}, 90, 300);
+  assert(free_caps.host == 90 && free_caps.device == 200);
+  const auto uncapped = LimitFixedCohortAvailable({100, 200});
+  assert(uncapped.host == 100 && uncapped.device == 200);
+  const auto zero = LimitFixedCohortAvailable({100, 200}, 0, 0);
+  assert(zero.host == 0 && zero.device == 0);
+  const auto maximum = std::numeric_limits<uint64_t>::max();
+  const auto large = LimitFixedCohortAvailable({maximum, maximum}, maximum, 1);
+  assert(large.host == maximum && large.device == 1);
   // Loaded union uses invocation image ordinals, preserving multiplicity in
   // each owner's private state. Global padding is NOT always a saving.
   const std::vector<FixedCohortImageShape> shapes = {{5, 4}, {3, 3}, {2, 7}};
@@ -111,6 +121,39 @@ int main() {
     cap_refused = true;
   }
   assert(cap_refused);
+  // FREE ceilings keep all declared process/unknown charges and one margin.
+  // Even a cap claiming total memory cannot turn 588 free host bytes into 589.
+  bool no_credit = false;
+  try {
+    (void)AdmitFixedCohortBudget(
+        budget, LimitFixedCohortAvailable({588, 518}, maximum, maximum));
+  } catch (const std::invalid_argument&) {
+    no_credit = true;
+  }
+  assert(no_credit);
+  assert(AdmitFixedCohortBudget(
+             budget, LimitFixedCohortAvailable({589, 518})).host == 589);
+  for (const auto available : {ByteCharge{0, 518}, ByteCharge{589, 0}}) {
+    bool singleton_refused = false;
+    try {
+      (void)SelectFixedCohortActiveOwners(
+          budget, LimitFixedCohortAvailable(available));
+    } catch (const std::invalid_argument& error) {
+      singleton_refused = std::string(error.what()).find("no singleton fits") !=
+                          std::string::npos;
+    }
+    assert(singleton_refused);
+  }
+  auto observed_reserve = budget;
+  observed_reserve.headroom_reserve = {1, 1};
+  bool observed_reserve_refused = false;
+  try {
+    (void)AdmitFixedCohortBudget(
+        observed_reserve, LimitFixedCohortAvailable({589, 518}));
+  } catch (const std::invalid_argument&) {
+    observed_reserve_refused = true;
+  }
+  assert(observed_reserve_refused);
   // Remaining-free checks subtract only actual already-live payload, not
   // reserved bounds; a full declared snapshot charge is NOT deducted twice.
   CheckFixedCohortHeadroom({500, 600}, {350, 450}, {200, 200}, {50, 50});

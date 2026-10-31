@@ -15,8 +15,10 @@ Only loaded grayscale shape metadata is evaluated: no file-map identities,
 pixel allocations, GPU queries, source sorting or execution. Source content is
 bound with the existing resident allocation closure/algorithm, not a new digest
 scheme. The pin includes the optional final-GEO-only disposition and existing
-workspace adapter/shared validation, pending independent review, NOT inherited
-current-phase-v1/optimized-PHOTO qualification. This producer covers native
+workspace adapter/shared validation and native observed-FREE admission entry,
+pending independent review, NOT inherited current-phase-v1/optimized-PHOTO
+qualification. Capacity observation/selection remains native-only; this producer
+still emits the same raw inventory without any free-memory or context credit. This producer covers native
 execution only; workspace decode/resize scratch and
 cache overlap require the adapter's separate explicit lifecycle admission.
 """
@@ -29,7 +31,7 @@ import subprocess
 
 from .model import _add, _mul, current_owned_shape_minimum, exact_int
 
-_FIXED_COHORT_FINGERPRINT = 'feae03cd2eddf85ced50a46a946f4a6832b8fa147dfc5e1113b2aece9ac96a57'
+_FIXED_COHORT_FINGERPRINT = 'b3c975af62332e81e9054b2f3237d0c3990804816cb5c2815160523619d795c6'
 _PROFILE = 'fresh-fixed-cohort/current-owned-shape-lower-bound-v1/unqualified'
 _ROOT = Path(__file__).resolve().parents[2]
 

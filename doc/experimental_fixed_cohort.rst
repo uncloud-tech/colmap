@@ -80,7 +80,9 @@ components; the output root must not exist. Then run the installed executable::
       --loader_scratch_host_bytes "$LOADER_SCRATCH_BYTES"
 
 Add ``--prepare_only 1`` for CPU decoding, shape/options/closure and resource
-checks only: **NO GPU execution, reconstruction, results or output creation**.
+checks only: **NO solver execution, reconstruction, results or output creation**.
+Manual preparation remains GPU-free; the explicit observation mode below queries
+CUDA even during preparation.
 The output path argument is unused in that mode, including existing paths.
 Preparation success does not certify CUDA capability or physical memory fit.
 
@@ -93,6 +95,59 @@ binary map layouts, in original reference/source order. Input workspace files
 are never overwritten. The new output root is exclusively created, never
 reused. Failures leave owned partial outputs for inspection and return nonzero;
 there is no automatic deletion or claim of transactional publication.
+
+Opt-in observed FREE capacities
+-------------------------------
+
+Add ``--observe_capacities 1 --auto_active_owners 1`` to derive the existing
+selector's host/device ceilings from a real available-memory snapshot. The mode
+requires automatic owner selection; it does not change the manual defaults.
+Omit either or both ``--host_capacity_bytes`` / ``--device_capacity_bytes`` in
+this mode, or supply explicit unsigned-byte caps: effective capacity is
+``min(observed_free, supplied_cap)`` independently per resource. Zero caps are
+real zero ceilings, not "auto"; malformed/negative/overflowing caps refuse.
+Without observation both manual capacities remain required, even with automatic
+owners. The optional ``--active_owners_ceiling`` retains its existing meaning.
+
+The command reuses Linux ``MemAvailable`` constrained by remaining cgroup-v2
+``memory.max - memory.current`` at the leaf **and every visible ancestor**.
+It selects the single canonical ``PatchMatchStereo.gpu_index`` (a process-visible
+CUDA ordinal), initializes that device/context as needed, and reads
+``cudaMemGetInfo`` **free**, not total, memory. The sparse metadata model has
+been released, and no workspace pixels, frozen copy, device banks, snapshots or
+solvers have been allocated at this point. GPU ordinal, name, raw hexadecimal
+CUDA UUID, observed host/device free bytes, device total bytes (evidence only),
+effective capacity bytes and selected owner count are printed. Query errors or
+unsupported builds/devices refuse explicitly, never as a memory shortage or a
+silent manual/stock fallback. Linux native CUDA is required for observation;
+CPU/HIP builds still support GPU-free manual preparation.
+
+These are conservative **incremental FREE-envelope ceilings**, not total-memory
+budgets. Already-live process/context usage is excluded from free; the existing
+raw process and unknown allowances remain **additional conservative charges**.
+They are not inferred live credits, not enlarged free memory, and not calibrated
+context allowances. This can reject work that would physically fit. No extra
+percentage margin is introduced: the existing logical demand retains exactly
+one aggregate 3% margin, all unknown/provenance requirements, loader peak and
+unallocated reserves. Later real loader/native phase headroom checks remain.
+The snapshot is racy, not atomic across host/device, and not a reservation or
+physical-fit guarantee; other allocations can invalidate it immediately.
+The blocking device query is covered by the existing absolute deadline guard
+using the original command deadline, not a fresh budget. External
+process/resource limits remain necessary. There is no promise of 8 GiB
+support or optimal throughput, no quality change, and no automatic eviction.
+
+``--prepare_only 1 --observe_capacities 1 --auto_active_owners 1`` explicitly
+permits that device/context query, then performs the existing CPU preparation.
+It never constructs a solver/device bank, solves, writes maps or creates the
+output root. Successful observation/preparation is not GPU numerical
+qualification. To exercise actual installed CLI tests on a GPU runner, set
+``COLMAP_TEST_EXECUTABLE`` and ``COLMAP_TEST_OBSERVED_CUDA=1``; optionally set
+``COLMAP_TEST_CUDA_DEVICE`` to the selected process-visible ordinal. Run
+``python -m unittest discover -s python/colmap_reconstruction -p fixed_cohort_cli_test.py``.
+A CPU-only runner can instead set ``COLMAP_TEST_NO_CUDA=1`` to test the explicit
+unsupported observation refusal. These opt-ins do not turn skipped GPU tests
+into qualification.
 
 Resource and qualification limits
 ---------------------------------
@@ -158,8 +213,8 @@ Do not combine automatic selection with a nondefault manual ``--active_owners``.
 A ceiling without automatic selection, negative ceiling or nonpositive manual
 count refuses. The existing default/manual 1/2 behavior is unchanged.
 
-Selection uses the caller's explicit host/device capacities and the same raw
-canonical inventory, resourcewise top-N private charges, one aggregate 3% margin
+Selection uses the caller's explicit host/device capacities (or the opt-in
+observed FREE ceilings described above) and the same raw canonical inventory, resourcewise top-N private charges, one aggregate 3% margin
 and separate reserve as manual admission. Host and device bottlenecks can belong
 to different jobs. It precedes pixel decoding, candidate-dependent payload
 allocation and solver construction; there are no OOM trials. The normal command
@@ -169,7 +224,7 @@ even one owner fits, it reports ``no singleton fits`` and the limiting resource.
 Invalid bounds and arithmetic overflow refuse rather than selecting a lower N.
 
 This is **not a measured throughput optimum**, physical-fit certification or
-whole-machine budget discovery. The full caller/frozen input and snapshot/output
+whole-machine capacity discovery. The full caller/frozen input and snapshot/output
 floor stays retained. Decode scratch, actual free headroom and physical-copy
 checks can still refuse independently; automatic selection never reduces quality,
 resolution or sources to fit. No eviction, spill or phase mixing is introduced.

@@ -179,6 +179,9 @@ CLOSURE = (
     "src/colmap/mvs/optimized_photo_runner.h",
     "src/colmap/mvs/owned_pair_image.h",
     "src/colmap/exe/mvs.cc",
+    # Fixed-cohort observation/cap selection is an allocation admission root.
+    "src/colmap/exe/fixed_cohort.h",
+    "src/colmap/exe/fixed_cohort.cc",
     "src/colmap/exe/optimized_dense_plan.h",
     "src/colmap/exe/optimized_dense_plan.cc",
     "src/colmap/exe/optimized_dense_plan_io.h",

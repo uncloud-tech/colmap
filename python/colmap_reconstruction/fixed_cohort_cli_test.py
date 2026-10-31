@@ -221,6 +221,126 @@ class FixedCohortCommandTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(self.output.exists())
 
+    def test_observation_requires_automatic_selection(self):
+        result = self.invoke(self.args + ['--observe_capacities', '1'])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('observe_capacities requires auto_active_owners',
+                      result.stdout + result.stderr)
+        self.assertFalse(self.output.exists())
+
+    def test_manual_capacities_remain_required(self):
+        for name in ('host', 'device'):
+            args = self.args.copy()
+            index = args.index(f'--{name}_capacity_bytes')
+            del args[index:index + 2]
+            result = self.invoke(args)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('manual mode requires host_capacity_bytes and device_capacity_bytes',
+                          result.stdout + result.stderr)
+            self.assertFalse(self.output.exists())
+
+    def test_observation_invalid_device_and_caps_refuse_before_query(self):
+        for device in ('-1', '0,1', '01', '2147483648'):
+            args = self.args + ['--observe_capacities', '1', '--auto_active_owners', '1']
+            args[args.index('--PatchMatchStereo.gpu_index') + 1] = device
+            result = self.invoke(args)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn('CUDA capacity query failed', result.stdout + result.stderr)
+            self.assertNotIn('observed_device=', result.stdout)
+            self.assertFalse(self.output.exists())
+        for value in ('', '-1', '18446744073709551616', 'unspecified'):
+            args = self.args + ['--observe_capacities', '1', '--auto_active_owners', '1']
+            args[args.index('--host_capacity_bytes') + 1] = value
+            result = self.invoke(args)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('invalid unsigned byte quantity', result.stdout + result.stderr)
+            self.assertFalse(self.output.exists())
+
+    @unittest.skipUnless(os.environ.get('COLMAP_TEST_NO_CUDA'),
+                         'explicit CPU-only build check required')
+    def test_observation_cpu_build_is_unsupported_not_shortage(self):
+        result = self.invoke(self.args + ['--observe_capacities', '1', '--auto_active_owners', '1'])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('capacity observation requires native CUDA', result.stdout + result.stderr)
+        self.assertNotIn('no singleton fits', result.stdout + result.stderr)
+        self.assertFalse(self.output.exists())
+
+    @unittest.skipUnless(os.environ.get('COLMAP_TEST_OBSERVED_CUDA'),
+                         'explicit real CUDA observation opt-in required')
+    def test_observed_prepare_caps_device_and_query_failure(self):
+        args = self.args + ['--observe_capacities', '1', '--auto_active_owners', '1']
+        device = os.environ.get('COLMAP_TEST_CUDA_DEVICE', '0')
+        args[args.index('--PatchMatchStereo.gpu_index') + 1] = device
+        result = self.invoke(args)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f'observed_device={device};', result.stdout)
+        self.assertIn('device_uuid=', result.stdout)
+        match = re.search(r'observed_free_host_bytes=(\d+); observed_free_device_bytes=(\d+); observed_total_device_bytes=(\d+); effective_host_capacity_bytes=(\d+); effective_device_capacity_bytes=(\d+)', result.stdout)
+        self.assertIsNotNone(match, result.stdout)
+        host, free, total, effective_host, effective_device = map(int, match.groups())
+        self.assertLessEqual(free, total)
+        self.assertEqual(effective_host, min(host, 1 << 30))
+        self.assertEqual(effective_device, min(free, 1 << 30))
+        self.assertIn('NO solver execution', result.stdout)
+        self.assertFalse(self.output.exists())
+        # Absent caps use observations, zero caps refuse; never credit declared
+        # process/context bytes or silently fall back to manual mode.
+        uncapped = args.copy()
+        for resource in ('host', 'device'):
+            index = uncapped.index(f'--{resource}_capacity_bytes')
+            del uncapped[index:index + 2]
+        result = self.invoke(uncapped)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for resource in ('host', 'device'):
+            bounded = args.copy()
+            bounded[bounded.index(f'--{resource}_capacity_bytes') + 1] = '0'
+            refused = self.invoke(bounded)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn(f'no singleton fits: {resource} capacity', refused.stdout + refused.stderr)
+        args[args.index('--PatchMatchStereo.gpu_index') + 1] = '2147483647'
+        failed = self.invoke(args)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn('CUDA capacity query failed', failed.stdout + failed.stderr)
+        self.assertNotIn('no singleton fits', failed.stdout + failed.stderr)
+        self.assertFalse(self.output.exists())
+
+    @unittest.skipUnless(os.environ.get('COLMAP_TEST_OBSERVED_CUDA'),
+                         'explicit real CUDA execution opt-in required')
+    def test_observed_execution_preserves_manual_maps_and_budget_counts(self):
+        args = self.args.copy()
+        args[args.index('--prepare_only') + 1] = '0'
+        args[args.index('--PatchMatchStereo.gpu_index') + 1] = os.environ.get('COLMAP_TEST_CUDA_DEVICE', '0')
+        args += ['--output_policy', 'photo_and_geo', '--PatchMatchStereo.num_iterations', '1']
+        control = self.invoke(args)
+        self.assertEqual(control.returncode, 0, control.stdout + control.stderr)
+        expected = {path.relative_to(self.output): path.read_bytes()
+                    for path in self.output.rglob('*.bin')}
+        self.assertEqual(len(expected), 12)  # 3 references x 2 phases x 2 kinds.
+        for storage in ('private', 'shared'):
+            for count in (1, 2, 3):
+                for graphs in (0, 1):
+                    with self.subTest(storage=storage, count=count, graphs=graphs):
+                        prepared = self.invoke(self.args + ['--active_owners', str(count),
+                                                          '--photo_source_storage', storage])
+                        self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+                        match = re.search(r'admitted host=(\d+) device=(\d+)', prepared.stdout)
+                        self.assertIsNotNone(match, prepared.stdout)
+                        # One canonical margin already in admitted; only the
+                        # existing unallocated reserve is added, no second margin.
+                        device_cap = int(match.group(2)) + (1 << 20)
+                        observed = args + ['--observe_capacities', '1', '--auto_active_owners', '1',
+                                           '--active_owners_ceiling', '3', '--photo_source_storage', storage,
+                                           '--PatchMatchStereo.owned_cuda_graphs', str(graphs)]
+                        observed[observed.index('--device_capacity_bytes') + 1] = str(device_cap)
+                        output = self.root / f'observed-{storage}-{count}-{graphs}'
+                        observed[observed.index('--output_path') + 1] = str(output)
+                        result = self.invoke(observed)
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        self.assertIn(f'active_owners={count}; selection=automatic', result.stdout)
+                        actual = {path.relative_to(output): path.read_bytes()
+                                  for path in output.rglob('*.bin')}
+                        self.assertEqual(actual, expected)
+
     def test_cap_refusal(self):
         self.args[self.args.index('--host_capacity_bytes') + 1] = '1'
         self.refuse('exceeds capacity')
