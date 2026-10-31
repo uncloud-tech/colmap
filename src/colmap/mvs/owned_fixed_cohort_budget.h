@@ -13,6 +13,8 @@
 namespace colmap::mvs::owned {
 
 enum class FixedCohortOutputPolicy { kPhotoAndGeo, kFinalGeoOnly };
+// Explicit opt-in: global padding may cost more than private packing.
+enum class FixedCohortPhotoSourceStorage { kPrivate, kShared };
 
 // Experimental native caller contract, NOT a forecast producer or a physical
 // allocation estimator. All fields are RAW (unmargined) bounds supplied by the
@@ -28,6 +30,12 @@ struct FixedCohortBudget {
   // Sole execution AND logical host-output inventory binding. Device PHOTO
   // snapshots remain retained through final GEO drain under either policy.
   FixedCohortOutputPolicy output_policy = FixedCohortOutputPolicy::kPhotoAndGeo;
+  FixedCohortPhotoSourceStorage photo_source_storage =
+      FixedCohortPhotoSourceStorage::kPrivate;
+  // PHOTO-only padded host union (also validates loaded bindings) and device
+  // array. Upload reads that same host payload, with no second staging copy.
+  // Destroyed after PHOTO owners drain/join, BEFORE the GEO observation.
+  ByteCharge photo_shared;
   ByteCharge caller_inputs;
   ByteCharge frozen_inputs;
   ByteCharge host_outputs;
@@ -64,6 +72,13 @@ inline void ValidateFixedCohortJobShape(const FixedCohortBudget& budget) {
   if (budget.output_policy != FixedCohortOutputPolicy::kPhotoAndGeo &&
       budget.output_policy != FixedCohortOutputPolicy::kFinalGeoOnly)
     throw std::invalid_argument("invalid fixed-cohort output policy");
+  if ((budget.photo_source_storage != FixedCohortPhotoSourceStorage::kPrivate &&
+       budget.photo_source_storage != FixedCohortPhotoSourceStorage::kShared) ||
+      (budget.photo_source_storage == FixedCohortPhotoSourceStorage::kPrivate &&
+       (budget.photo_shared.host || budget.photo_shared.device)) ||
+      (budget.photo_source_storage == FixedCohortPhotoSourceStorage::kShared &&
+       (!budget.photo_shared.host || !budget.photo_shared.device)))
+    throw std::invalid_argument("invalid fixed-cohort PHOTO source storage");
   if (!budget.max_active_owners || budget.max_active_owners > 2 ||
       budget.photo_private.empty() ||
       budget.geo_private.size() != budget.photo_private.size() ||
@@ -103,7 +118,7 @@ inline FixedCohortBudgetPeaks FixedCohortPeaks(
   retained = add(retained, budget.process);
   retained = add(retained, budget.unknown);
   const auto photo = add(
-      retained,
+      add(retained, budget.photo_shared),
       FixedCohortActivePeak(budget.photo_private, budget.max_active_owners));
   const auto geo =
       add(retained,

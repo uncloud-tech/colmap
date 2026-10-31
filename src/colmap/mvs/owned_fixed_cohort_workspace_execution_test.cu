@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #include "colmap/mvs/generated/resident_allocation_fingerprint.h"
+#include "colmap/mvs/owned_fixed_cohort_inventory.h"
 #include "colmap/mvs/owned_fixed_cohort_workspace.h"
 #include "colmap/mvs/patch_match_cuda_owned.h"
 #include "colmap/mvs/workspace.h"
@@ -225,7 +226,8 @@ void ExerciseWorkspace(WorkspaceFixture fixture, bool external) {
           ASSERT_EQ(image.GetWidth(), shape.width);
           ASSERT_EQ(image.GetHeight(), shape.height);
         }
-        // Mutating the original caller budget cannot change the prepared policy.
+        // Mutating the original caller budget cannot change the prepared
+        // policy.
         const auto policy = budget.output_policy;
         auto& caller_budget = fixture.budgets[policy_index][active - 1];
         caller_budget.output_policy = static_cast<FixedCohortOutputPolicy>(99);
@@ -256,6 +258,45 @@ void ExerciseWorkspace(WorkspaceFixture fixture, bool external) {
           }
           ExpectMeaningful(actual.geo[i]);
           ExpectMapBits(control->geo[i], actual.geo[i]);
+        }
+        // Same loaded invocation, now with an actually allocated shared union
+        // and canonical raw inventory. Independent control generated its own
+        // PHOTO outputs above, never candidate-seeded GEO. No timing claim.
+        std::vector<FixedCohortImageShape> shapes;
+        std::vector<FixedCohortJobShape> jobs;
+        for (const auto& image : prepared.Images())
+          shapes.push_back({image.GetWidth(), image.GetHeight()});
+        for (const auto& ref : prepared.References())
+          jobs.push_back(
+              {ref.reference_image_idx, ref.photo_sources, ref.geo_sources});
+        auto declarations = budget;
+        declarations.photo_source_storage =
+            FixedCohortPhotoSourceStorage::kShared;
+        const auto shared_budget =
+            BuildFixedCohortLogicalInventory(shapes, jobs, declarations);
+        const auto shared = RunFixedCohortPhotoGeo(
+            prepared.Images(),
+            prepared.References(),
+            shared_budget,
+            fixture.capacity,
+            deadline,
+            active == 1 ? PairDispatch::kSerial : PairDispatch::kPair);
+        EXPECT_EQ(shared.actual_photo_shared.host,
+                  shared_budget.photo_shared.host);
+        EXPECT_EQ(shared.actual_photo_shared.device,
+                  shared_budget.photo_shared.device);
+        ASSERT_EQ(shared.photo.size(), retain ? 4 : 0);
+        ASSERT_EQ(shared.geo.size(), 4);
+        EXPECT_EQ(shared.actual_snapshot_bytes, actual.actual_snapshot_bytes);
+        EXPECT_EQ(shared.actual_geo_staging_bytes,
+                  actual.actual_geo_staging_bytes);
+        for (size_t i = 0; i < 4; ++i) {
+          if (retain) {
+            ExpectMeaningful(shared.photo[i]);
+            ExpectMapBits(control->photo[i], shared.photo[i]);
+          }
+          ExpectMeaningful(shared.geo[i]);
+          ExpectMapBits(control->geo[i], shared.geo[i]);
         }
         guard.Check();
       }

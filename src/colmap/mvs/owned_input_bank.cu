@@ -29,6 +29,8 @@ struct ResidentGrayscaleBank::Impl {
     BankFileIdentity identity;
     size_t width;
     size_t height;
+    // Only loaded-pixel mode retains host padding for exact binding checks.
+    std::shared_ptr<const GrayscaleLayer> loaded;
   };
   std::vector<Layer> layers;
   std::vector<std::vector<int>> jobs;
@@ -50,7 +52,10 @@ struct ResidentGrayscaleBank::Impl {
       for (size_t i = 0; i < host.Layers().size(); ++i) {
         const auto& layer = *host.Layers()[i];
         grayscale->CopyLayerFromHost(i, layer.pixels.data(), stream->Get());
-        layers.push_back({layer.identity, layer.width, layer.height});
+        layers.push_back({layer.identity,
+                          layer.width,
+                          layer.height,
+                          layer.loaded_pixels ? host.Layers()[i] : nullptr});
       }
       for (size_t job = 0; job < host.NumJobs(); ++job) {
         jobs.push_back(host.SourceLayers(job));
@@ -88,8 +93,28 @@ void ResidentGrayscaleBank::ValidateSources(const std::vector<int>& layers,
     const auto& layer = impl_->layers.at(layers[i]);
     THROW_CHECK_EQ(layer.width, sources[i].GetWidth());
     THROW_CHECK_EQ(layer.height, sources[i].GetHeight());
-    THROW_CHECK(SameIdentity(layer.identity,
-                             CaptureFileIdentity(sources[i].GetPath())));
+    if (layer.loaded) {
+      THROW_CHECK_EQ(layer.identity.path, sources[i].GetPath());
+      const auto& bitmap = sources[i].GetBitmap();
+      // Metadata-only wrappers intentionally omit borrowed source pixels.
+      // The explicit binding is then their pixel authority. When actual
+      // pixels are supplied (native runner), validate bytes, not file labels.
+      if (bitmap.IsEmpty()) continue;
+      THROW_CHECK(bitmap.IsGrey());
+      THROW_CHECK_EQ(bitmap.Width(), layer.width);
+      THROW_CHECK_EQ(bitmap.Height(), layer.height);
+      THROW_CHECK_EQ(bitmap.NumBytes(), layer.width * layer.height);
+      for (size_t row = 0; row < layer.height; ++row) {
+        const auto* begin = bitmap.RowMajorData().data() + row * layer.width;
+        THROW_CHECK(
+            std::equal(begin,
+                       begin + layer.width,
+                       layer.loaded->pixels.data() + row * impl_->width));
+      }
+    } else {
+      THROW_CHECK(SameIdentity(layer.identity,
+                               CaptureFileIdentity(sources[i].GetPath())));
+    }
   }
 }
 

@@ -524,6 +524,69 @@ HostGrayscaleBank::HostGrayscaleBank(
   for (const auto& input : inputs) CheckSnapshotIdentity(input.identity);
   check_cancelled();
 }
+HostGrayscaleBank::HostGrayscaleBank(const std::vector<Image>& images,
+                                     const std::vector<std::vector<int>>& jobs,
+                                     const std::atomic<bool>* cancelled) {
+  const auto check = [&] {
+    if (cancelled && cancelled->load(std::memory_order_relaxed))
+      throw std::runtime_error("Grayscale bank construction cancelled");
+  };
+  check();
+  if (jobs.empty()) throw std::invalid_argument("Empty grayscale bank");
+  std::vector<int> indices;
+  for (const auto& job : jobs) {
+    if (job.empty()) throw std::invalid_argument("Empty grayscale source job");
+    std::vector<int> sources;
+    for (int index : job) {
+      check();
+      const auto& image = images.at(index);
+      if (!image.GetWidth() || !image.GetHeight() ||
+          !image.GetBitmap().IsGrey() ||
+          static_cast<size_t>(image.GetBitmap().Width()) != image.GetWidth() ||
+          static_cast<size_t>(image.GetBitmap().Height()) !=
+              image.GetHeight() ||
+          image.GetBitmap().NumBytes() !=
+              Mul(image.GetWidth(), image.GetHeight()))
+        throw std::invalid_argument("Invalid loaded grayscale input");
+      auto it = std::find(indices.begin(), indices.end(), index);
+      if (it == indices.end()) {
+        if (indices.size() >=
+            static_cast<size_t>(std::numeric_limits<int>::max()))
+          throw std::overflow_error("Too many grayscale layers");
+        indices.push_back(index);
+        sources.push_back(static_cast<int>(indices.size() - 1));
+        width_ = std::max(width_, image.GetWidth());
+        height_ = std::max(height_, image.GetHeight());
+      } else {
+        sources.push_back(static_cast<int>(std::distance(indices.begin(), it)));
+      }
+    }
+    sources_.push_back(std::move(sources));
+  }
+  const auto bytes = Mul(width_, height_);
+  Mul(bytes, indices.size());
+  if (bytes > std::vector<uint8_t>().max_size())
+    throw std::overflow_error("Grayscale layer exceeds host vector range");
+  for (int index : indices) {
+    check();
+    const auto& image = images.at(index);
+    auto layer = std::make_shared<GrayscaleLayer>();
+    layer->loaded_pixels = true;
+    layer->identity.path =
+        image.GetPath();  // label only, never a file identity
+    layer->width = image.GetWidth();
+    layer->height = image.GetHeight();
+    layer->row_stride = width_;
+    layer->pixels.resize(bytes, 0);
+    for (size_t row = 0; row < layer->height; ++row)
+      std::copy_n(image.GetBitmap().RowMajorData().data() + row * layer->width,
+                  layer->width,
+                  layer->pixels.data() + row * width_);
+    layers_.push_back(std::move(layer));
+  }
+  check();
+}
+
 size_t HostGrayscaleBank::NumJobs() const { return sources_.size(); }
 size_t HostGrayscaleBank::Width() const { return width_; }
 size_t HostGrayscaleBank::Height() const { return height_; }

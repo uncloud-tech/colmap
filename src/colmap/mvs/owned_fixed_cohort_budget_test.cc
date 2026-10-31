@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
-#include "colmap/mvs/owned_fixed_cohort_budget.h"
+#include "colmap/mvs/owned_fixed_cohort_inventory.h"
 
 #include <cassert>
 #include <limits>
@@ -8,6 +8,78 @@
 using namespace colmap::mvs::owned;
 
 int main() {
+  // Loaded union uses invocation image ordinals, preserving multiplicity in
+  // each owner's private state. Global padding is NOT always a saving.
+  const std::vector<FixedCohortImageShape> shapes = {{5, 4}, {3, 3}, {2, 7}};
+  const std::vector<FixedCohortJobShape> jobs = {{1, {0, 2, 0}, {0, 0}},
+                                                 {0, {2, 1}, {1}}};
+  FixedCohortBudget shared_config;
+  shared_config.photo_source_storage = FixedCohortPhotoSourceStorage::kShared;
+  shared_config.unknown = {50, 60};
+  shared_config.unknown_provenance = "explicit fixture allowance";
+  const auto shared =
+      BuildFixedCohortLogicalInventory(shapes, jobs, shared_config);
+  auto private_config = shared_config;
+  private_config.photo_source_storage = FixedCohortPhotoSourceStorage::kPrivate;
+  const auto private_inventory =
+      BuildFixedCohortLogicalInventory(shapes, jobs, private_config);
+  // Three distinct layers, global extent 5x7, not five source ordinals.
+  assert(shared.photo_shared.host == 105 && shared.photo_shared.device == 105);
+  assert(shared.photo_private[0].host ==
+         private_inventory.photo_private[0].host);
+  assert(shared.photo_private[0].device + 105 ==
+         private_inventory.photo_private[0].device);
+  assert(shared.photo_private[1].device + 42 ==
+         private_inventory.photo_private[1].device);
+  assert(shared.geo_private[0].device ==
+         private_inventory.geo_private[0].device);
+  const auto shared_peaks = FixedCohortPeaks(shared);
+  const auto private_peaks = FixedCohortPeaks(private_inventory);
+  assert(shared_peaks.photo.device + 42 == private_peaks.photo.device);
+  assert(shared_peaks.geo.device == private_peaks.geo.device);
+  assert(shared_peaks.photo.host == private_peaks.photo.host + 105);
+  auto permuted = jobs;
+  permuted[0].photo_sources = {2, 0, 0};
+  assert(BuildFixedCohortLogicalInventory(shapes, permuted, shared_config)
+             .photo_shared.device == 105);
+  // Zero overlap with opposed aspect ratios: explicit sharing costs MORE.
+  const auto padded = BuildFixedCohortLogicalInventory(
+      {{10, 1}, {1, 10}}, {{0, {1}, {1}}, {1, {0}, {0}}}, shared_config);
+  assert(padded.photo_shared.device == 200);
+  const auto admitted_shared = AdmitFixedCohortBudget(shared, {100000, 100000});
+  (void)AdmitFixedCohortBudget(shared, admitted_shared);
+  bool shared_cap_refused = false;
+  try {
+    (void)AdmitFixedCohortBudget(
+        shared, {admitted_shared.host - 1, admitted_shared.device});
+  } catch (const std::invalid_argument&) {
+    shared_cap_refused = true;
+  }
+  assert(shared_cap_refused);
+  const auto slack =
+      MarginBytes(shared_peaks.geo.device) - shared_peaks.geo.device;
+  auto staging_within = shared.geo_staging_device;
+  staging_within[0] += slack;
+  CheckFixedCohortPhysicalCopies(
+      shared, shared.snapshots.device, staging_within);
+  ++staging_within[0];
+  bool shared_margin_refused = false;
+  try {
+    CheckFixedCohortPhysicalCopies(
+        shared, shared.snapshots.device, staging_within);
+  } catch (const std::invalid_argument&) {
+    shared_margin_refused = true;
+  }
+  assert(shared_margin_refused);
+  auto invalid_shared = shared;
+  invalid_shared.photo_shared = {};
+  bool missing_union_refused = false;
+  try {
+    (void)AdmitFixedCohortBudget(invalid_shared, {100000, 100000});
+  } catch (const std::invalid_argument&) {
+    missing_union_refused = true;
+  }
+  assert(missing_union_refused);
   FixedCohortBudget budget;
   budget.caller_inputs = {100, 0};
   budget.frozen_inputs = {100, 0};

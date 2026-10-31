@@ -5,7 +5,9 @@ All caller pixels and frozen copies, policy-selected returned host maps and
 all PHOTO device snapshots stay charged throughout. OutputPolicy is the sole
 native execution/inventory binding: default retains both host phases; final-only
 returns GEO only (16 rather than 32 bytes per reference pixel). Private source
-padding preserves ordinal multiplicity. Explicit unknown pitch/array/context/allocator bytes are NOT
+padding preserves ordinal multiplicity. Opt-in shared PHOTO charges a padded
+host/device union once in PHOTO only; host validation-copy transients remain
+per owner. Global padding can increase memory; default stays private. Explicit unknown pitch/array/context/allocator bytes are NOT
 calibrated coefficients or physical-fit proof. Native admission applies the ONE
 aggregate 3% margin; this producer does not apply any item margins.
 
@@ -27,9 +29,14 @@ import subprocess
 
 from .model import _add, _mul, current_owned_shape_minimum, exact_int
 
-_FIXED_COHORT_FINGERPRINT = 'ea6272a3c49ae17f10e85e8eb0e2f7a5e1163d37edcb8ce6edd4785f5210e428'
+_FIXED_COHORT_FINGERPRINT = '8a4afba07bdf4f73fc3ca228b79e047aca275d8043b384235120275e7668f99a'
 _PROFILE = 'fresh-fixed-cohort/current-owned-shape-lower-bound-v1/unqualified'
 _ROOT = Path(__file__).resolve().parents[2]
+
+
+class PhotoSourceStorage(Enum):
+    PRIVATE = 'private'
+    SHARED = 'shared'
 
 
 class OutputPolicy(Enum):
@@ -215,6 +222,8 @@ class FixedCohortBudget:
     jobs: tuple[Job, ...]
     already_live_process: tuple[ByteCharge, ByteCharge]
     already_live_process_provenance: tuple[str, str]
+    photo_shared: ByteCharge = ByteCharge()
+    photo_source_storage: PhotoSourceStorage = PhotoSourceStorage.PRIVATE
     output_policy: OutputPolicy = OutputPolicy.PHOTO_AND_GEO
     profile: str = _PROFILE
     physical_fit_certified: bool = False
@@ -227,7 +236,7 @@ class FixedCohortBudget:
 
     @property
     def photo_peak(self):
-        return self.retained + active_peak(self.photo_private, self.max_active_owners)
+        return self.retained + self.photo_shared + active_peak(self.photo_private, self.max_active_owners)
 
     @property
     def geo_peak(self):
@@ -245,6 +254,8 @@ class FixedCohortBudget:
         Compiled in CPU fixture tests against the real native public headers.
         Metadata remains on this typed Python record; no execution authority.
         """
+        if not isinstance(self.photo_source_storage, PhotoSourceStorage):
+            raise ValueError('expected typed PhotoSourceStorage')
         if not isinstance(self.output_policy, OutputPolicy):
             raise ValueError('expected typed OutputPolicy')
         # Fixed-width octal UTF-8 escapes preserve arbitrary provenance bytes
@@ -257,7 +268,9 @@ class FixedCohortBudget:
         policy = ('kPhotoAndGeo' if self.output_policy == OutputPolicy.PHOTO_AND_GEO
                   else 'kFinalGeoOnly')
         lines.append(f'b.output_policy = colmap::mvs::owned::FixedCohortOutputPolicy::{policy};')
-        for name in ('caller_inputs', 'frozen_inputs', 'host_outputs', 'snapshots',
+        storage = 'kShared' if self.photo_source_storage == PhotoSourceStorage.SHARED else 'kPrivate'
+        lines.append(f'b.photo_source_storage = colmap::mvs::owned::FixedCohortPhotoSourceStorage::{storage};')
+        for name in ('photo_shared', 'caller_inputs', 'frozen_inputs', 'host_outputs', 'snapshots',
                      'process', 'unknown', 'headroom_reserve'):
             lines.append(f'b.{name} = {charge(getattr(self, name))};')
         lines.append(f'b.unknown_provenance = {text(self.unknown_provenance)};')
@@ -275,7 +288,8 @@ def forecast_fixed_cohort(images, jobs, *, max_active_owners, source_root,
                           process, unknown, unknown_provenance, headroom_reserve,
                           already_live_process=(ByteCharge(), ByteCharge()),
                           already_live_process_provenance=('', ''),
-                          output_policy=OutputPolicy.PHOTO_AND_GEO):
+                          output_policy=OutputPolicy.PHOTO_AND_GEO,
+                          photo_source_storage=PhotoSourceStorage.PRIVATE):
     """Evaluate metadata only; capacities and the aggregate margin belong native.
 
     Process is caller-classified raw storage (not a new coefficient). Live
@@ -284,6 +298,8 @@ def forecast_fixed_cohort(images, jobs, *, max_active_owners, source_root,
     free memory. Source/device/options/order binding does not hash caller pixels
     or calibration: native still validates actual inputs and frozen invocation.
     """
+    if not isinstance(photo_source_storage, PhotoSourceStorage):
+        raise ValueError('expected typed PhotoSourceStorage')
     if not isinstance(output_policy, OutputPolicy):
         raise ValueError('expected typed OutputPolicy')
     exact_int(max_active_owners, 1, 2)
@@ -317,6 +333,8 @@ def forecast_fixed_cohort(images, jobs, *, max_active_owners, source_root,
         raise ValueError('duplicate producer')
     device = jobs[0].photo_options.gpu_index
     photo, geo, staging = [], [], []
+    shared = photo_source_storage == PhotoSourceStorage.SHARED
+    union = set()
     for job in jobs:
         ref = images[job.reference_image_idx]
         for geometry, sources, options in (
@@ -332,11 +350,18 @@ def forecast_fixed_cohort(images, jobs, *, max_active_owners, source_root,
             padded = _mul(_mul(max(images[i].width for i in sources),
                                max(images[i].height for i in sources)), len(sources))
             host, gpu = current_owned_shape_minimum(ref.width, ref.height, len(sources))
+            if not geometry:
+                union.update(sources)
+            # Host ordered Image-copy validation transient remains per owner.
             bound = ByteCharge(_add(host, padded),
-                               _add(_add(gpu, padded), _mul(8, padded) if geometry else 0))
+                               _add(_add(gpu, 0 if shared and not geometry else padded),
+                                    _mul(8, padded) if geometry else 0))
             (geo if geometry else photo).append(bound)
             if geometry:
                 staging.append(_mul(4, padded))
+    union_bytes = (_mul(_mul(max(images[i].width for i in union),
+                             max(images[i].height for i in union)), len(union))
+                   if shared else 0)
     inputs = sum_checked(image.num_bytes for image in images)
     maps = _mul(sum_checked(images[i].num_bytes for i in producers), 16)
     host_phases = 2 if output_policy == OutputPolicy.PHOTO_AND_GEO else 1
@@ -344,4 +369,5 @@ def forecast_fixed_cohort(images, jobs, *, max_active_owners, source_root,
         ByteCharge(inputs), ByteCharge(inputs), ByteCharge(_mul(host_phases, maps)),
         ByteCharge(0, maps), process, unknown, unknown_provenance, headroom_reserve,
         max_active_owners, tuple(photo), tuple(geo), tuple(staging),
-        _bind_source(source_root), images, jobs, live, provenance, output_policy)
+        _bind_source(source_root), images, jobs, live, provenance,
+        ByteCharge(union_bytes, union_bytes), photo_source_storage, output_policy)

@@ -105,6 +105,37 @@ Linux/cgroup host and native GPU headroom observations do not impose hard caps;
 apply appropriate external process/resource limits. Pitch/context/allocator
 and codec behavior are not physically calibrated by this inventory.
 
+Typed native shared PHOTO mode
+-----------------------------
+
+``FixedCohortBudget::photo_source_storage =
+FixedCohortPhotoSourceStorage::kShared`` is an explicit native API opt-in;
+there is no CLI/default promotion. Pass this declaration through the existing
+``BuildFixedCohortLogicalInventory`` (or Python ``forecast_fixed_cohort`` with
+``PhotoSourceStorage.SHARED``) before admission. The runner actually constructs
+the existing host/device grayscale bank from its frozen, loaded pixels; it does
+not reread paths or alter cameras, PRNG, source order or duplicate ordinals.
+Layers deduplicate only by invocation image ordinal, not by filename.
+
+``photo_shared`` charges one globally padded uint8 host union and one device
+array. Upload reads that same host union without a second payload staging copy.
+Host padding remains live for binding validation; when supplied, loaded source
+pixels are checked byte-for-byte. Explicit metadata-only borrowers use the bank
+binding as their pixel authority (paths are labels, not file identities).
+Per-owner PHOTO device source-array charges are removed, but all private solver,
+layer mapping and reference storage remain. The per-owner host source-packing
+allowance remains to cover ordered Image-copy validation transients, including
+duplicates. Both unions survive all PHOTO borrowers/graphs and their failure
+drains/joins, then are released before the GEO headroom observation. GEO storage,
+all snapshots, returned maps and caller/frozen pixels retain their prior charges.
+
+Global padding can outweigh deduplication, especially with zero overlap or
+opposed aspect ratios. Shared mode therefore makes no savings/physical-fit
+promise and never silently selects a cheaper forecast while allocating private
+arrays. The private default is unchanged. Unknown allowances, reserve and the
+single aggregate 3% margin are unchanged; CUDA array overhead is not certified
+by these logical payload counts. No owner-count/scheduler expansion is implied.
+
 One original deadline covers preparation, execution and output. Checks occur
 between output writes, not as an interrupt guarantee inside blocking output
 I/O. Native setup/drain uses the existing fail-closed deadline semantics.

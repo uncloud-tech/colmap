@@ -39,6 +39,9 @@ struct FixedCohortResult {
       "experimental_caller_declared_envelope/unqualified";
   ByteCharge before_copy_available;
   ByteCharge before_geo_available;
+  // Logical padded payload actually constructed/uploaded, not CUDA physical
+  // allocation bytes. Zero in default private mode. Released at PHOTO barrier.
+  ByteCharge actual_photo_shared;
   uint64_t actual_snapshot_bytes = 0;
   std::vector<uint64_t> actual_geo_staging_bytes;
 };
@@ -55,8 +58,12 @@ struct FixedCohortResult {
 // All PHOTO producers run successfully, publish independent COPY-backed device
 // snapshots, drain and join before any GEO consumer starts. GEO copies snapshot
 // maps into private solver buffers/source texture; all snapshots remain
-// retained until final GEO drain/join. No zero-copy, rolling generation, shared
-// admission credit, disk output, fusion or full-scene qualification is claimed.
+// retained until final GEO drain/join. Opt-in budget.photo_source_storage
+// shares only PHOTO source grayscale: one padded loaded-pixel union, retained
+// host binding-validation payload and device array until PHOTO drain/join.
+// Global padding may increase charges; default remains private. No GEO sharing,
+// rolling generation, disk output, fusion or full-scene qualification is
+// claimed.
 //
 // dispatch selects 1 (serial) or 2 (pair) active owners and must match
 // budget.max_active_owners. Every per-job budget vector matches references.

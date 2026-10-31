@@ -170,111 +170,126 @@ TEST(FixedCohortPipeline, FourJobsPreserveIdentityAcrossRollingOwners) {
             ids[(i + 1) % 4], ids[(i + 2) % 4], ids[(i + 1) % 4]};
         refs[i].geo_sources = refs[i].photo_sources;
       }
-      auto budget = Budget();
-      budget.max_active_owners = active;
-      budget.photo_private.resize(4, budget.photo_private.front());
-      budget.geo_private.resize(4, budget.geo_private.front());
-      budget.geo_staging_device.resize(4, budget.geo_staging_device.front());
-      const auto dispatch =
-          active == 1 ? PairDispatch::kSerial : PairDispatch::kPair;
-      const auto result = RunFixedCohortPhotoGeo(
-          images,
-          refs,
-          budget,
-          {128ull << 20, 128ull << 20},
-          NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
-          dispatch);
-      ASSERT_EQ(result.photo.size(), 4);
-      ASSERT_EQ(result.geo.size(), 4);
-      ASSERT_EQ(result.actual_geo_staging_bytes.size(), 4);
-      const auto key = std::string(graphs ? "graph" : "stream") + "_active" +
-                       std::to_string(active);
-      RecordProperty(key + "_before_copy_available_host",
-                     std::to_string(result.before_copy_available.host));
-      RecordProperty(key + "_before_copy_available_device",
-                     std::to_string(result.before_copy_available.device));
-      RecordProperty(key + "_before_geo_available_host",
-                     std::to_string(result.before_geo_available.host));
-      RecordProperty(key + "_before_geo_available_device",
-                     std::to_string(result.before_geo_available.device));
-      RecordProperty(key + "_snapshot_bytes",
-                     std::to_string(result.actual_snapshot_bytes));
-      RecordProperty(key + "_declared_snapshot_bytes",
-                     std::to_string(budget.snapshots.device));
-      const auto peak = FixedCohortPeaks(budget).peak;
-      RecordProperty(key + "_declared_raw_host_peak",
-                     std::to_string(peak.host));
-      RecordProperty(key + "_declared_raw_device_peak",
-                     std::to_string(peak.device));
-      std::vector<DepthMap> depths(4);
-      std::vector<NormalMap> normals(4);
-      for (size_t i = 0; i < refs.size(); ++i) {
-        RecordProperty(key + "_staging_bytes_job" + std::to_string(i),
-                       std::to_string(result.actual_geo_staging_bytes[i]));
-        RecordProperty(key + "_declared_staging_bytes_job" + std::to_string(i),
-                       std::to_string(budget.geo_staging_device[i]));
-        PatchMatch::Problem problem;
-        problem.images = &images;
-        problem.ref_image_idx = ids[i];
-        problem.src_image_idxs = refs[i].photo_sources;
-        PatchMatchCuda control(refs[i].photo_options, problem);
-        control.Run();
-        ExpectBits(control.GetDepthMap().GetData(),
-                   result.photo[i].depth.GetData());
-        ExpectBits(control.GetNormalMap().GetData(),
-                   result.photo[i].normal.GetData());
-        depths[ids[i]] = result.photo[i].depth;
-        normals[ids[i]] = result.photo[i].normal;
-      }
-      for (size_t i = 0; i < refs.size(); ++i) {
-        PatchMatch::Problem problem;
-        problem.images = &images;
-        problem.ref_image_idx = ids[i];
-        problem.src_image_idxs = refs[i].geo_sources;
-        problem.depth_maps = &depths;
-        problem.normal_maps = &normals;
-        PatchMatchCuda control(refs[i].geo_options, problem);
-        control.Run();
-        ExpectBits(control.GetDepthMap().GetData(),
-                   result.geo[i].depth.GetData());
-        ExpectBits(control.GetNormalMap().GetData(),
-                   result.geo[i].normal.GetData());
-        if (oracle) {
-          ExpectBits(oracle->photo[i].depth.GetData(),
+      for (const auto storage : {FixedCohortPhotoSourceStorage::kPrivate,
+                                 FixedCohortPhotoSourceStorage::kShared}) {
+        auto budget = Budget();
+        budget.photo_source_storage = storage;
+        if (storage == FixedCohortPhotoSourceStorage::kShared)
+          budget.photo_shared = {80, 80};  // four distinct global 5x4 layers
+        budget.max_active_owners = active;
+        budget.photo_private.resize(4, budget.photo_private.front());
+        budget.geo_private.resize(4, budget.geo_private.front());
+        budget.geo_staging_device.resize(4, budget.geo_staging_device.front());
+        const auto dispatch =
+            active == 1 ? PairDispatch::kSerial : PairDispatch::kPair;
+        const auto result = RunFixedCohortPhotoGeo(
+            images,
+            refs,
+            budget,
+            {128ull << 20, 128ull << 20},
+            NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
+            dispatch);
+        EXPECT_EQ(result.actual_photo_shared.host,
+                  storage == FixedCohortPhotoSourceStorage::kShared ? 80 : 0);
+        EXPECT_EQ(result.actual_photo_shared.device,
+                  result.actual_photo_shared.host);
+        ASSERT_EQ(result.photo.size(), 4);
+        ASSERT_EQ(result.geo.size(), 4);
+        ASSERT_EQ(result.actual_geo_staging_bytes.size(), 4);
+        const auto key =
+            std::string(graphs ? "graph" : "stream") + "_active" +
+            std::to_string(active) +
+            (storage == FixedCohortPhotoSourceStorage::kShared ? "_shared"
+                                                               : "_private");
+        RecordProperty(key + "_before_copy_available_host",
+                       std::to_string(result.before_copy_available.host));
+        RecordProperty(key + "_before_copy_available_device",
+                       std::to_string(result.before_copy_available.device));
+        RecordProperty(key + "_before_geo_available_host",
+                       std::to_string(result.before_geo_available.host));
+        RecordProperty(key + "_before_geo_available_device",
+                       std::to_string(result.before_geo_available.device));
+        RecordProperty(key + "_snapshot_bytes",
+                       std::to_string(result.actual_snapshot_bytes));
+        RecordProperty(key + "_declared_snapshot_bytes",
+                       std::to_string(budget.snapshots.device));
+        const auto peak = FixedCohortPeaks(budget).peak;
+        RecordProperty(key + "_declared_raw_host_peak",
+                       std::to_string(peak.host));
+        RecordProperty(key + "_declared_raw_device_peak",
+                       std::to_string(peak.device));
+        std::vector<DepthMap> depths(4);
+        std::vector<NormalMap> normals(4);
+        for (size_t i = 0; i < refs.size(); ++i) {
+          RecordProperty(key + "_staging_bytes_job" + std::to_string(i),
+                         std::to_string(result.actual_geo_staging_bytes[i]));
+          RecordProperty(
+              key + "_declared_staging_bytes_job" + std::to_string(i),
+              std::to_string(budget.geo_staging_device[i]));
+          PatchMatch::Problem problem;
+          problem.images = &images;
+          problem.ref_image_idx = ids[i];
+          problem.src_image_idxs = refs[i].photo_sources;
+          PatchMatchCuda control(refs[i].photo_options, problem);
+          control.Run();
+          ExpectBits(control.GetDepthMap().GetData(),
                      result.photo[i].depth.GetData());
-          ExpectBits(oracle->photo[i].normal.GetData(),
+          ExpectBits(control.GetNormalMap().GetData(),
                      result.photo[i].normal.GetData());
-          ExpectBits(oracle->geo[i].depth.GetData(),
-                     result.geo[i].depth.GetData());
-          ExpectBits(oracle->geo[i].normal.GetData(),
-                     result.geo[i].normal.GetData());
+          depths[ids[i]] = result.photo[i].depth;
+          normals[ids[i]] = result.photo[i].normal;
         }
+        for (size_t i = 0; i < refs.size(); ++i) {
+          PatchMatch::Problem problem;
+          problem.images = &images;
+          problem.ref_image_idx = ids[i];
+          problem.src_image_idxs = refs[i].geo_sources;
+          problem.depth_maps = &depths;
+          problem.normal_maps = &normals;
+          PatchMatchCuda control(refs[i].geo_options, problem);
+          control.Run();
+          ExpectBits(control.GetDepthMap().GetData(),
+                     result.geo[i].depth.GetData());
+          ExpectBits(control.GetNormalMap().GetData(),
+                     result.geo[i].normal.GetData());
+          if (oracle) {
+            ExpectBits(oracle->photo[i].depth.GetData(),
+                       result.photo[i].depth.GetData());
+            ExpectBits(oracle->photo[i].normal.GetData(),
+                       result.photo[i].normal.GetData());
+            ExpectBits(oracle->geo[i].depth.GetData(),
+                       result.geo[i].depth.GetData());
+            ExpectBits(oracle->geo[i].normal.GetData(),
+                       result.geo[i].normal.GetData());
+          }
+        }
+        if (!oracle) oracle = result;
+        std::atomic<int> geo_sweeps{0};
+        std::atomic<bool> late_photo{false};
+        std::atomic<bool> tail_photo_started{false};
+        EXPECT_THROW(
+            RunFixedCohortPhotoGeo(
+                images,
+                refs,
+                budget,
+                {128ull << 20, 128ull << 20},
+                NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
+                dispatch,
+                32,
+                nullptr,
+                [&](bool geo, size_t job, int, int) {
+                  if (geo) ++geo_sweeps;
+                  if (!geo && job == 3) tail_photo_started = true;
+                  if (!geo && job == 2) {
+                    late_photo = true;
+                    throw std::runtime_error("late PHOTO failure");
+                  }
+                }),
+            std::runtime_error);
+        EXPECT_TRUE(late_photo.load());
+        if (active == 1) EXPECT_FALSE(tail_photo_started.load());
+        EXPECT_EQ(geo_sweeps.load(), 0);
       }
-      if (!oracle) oracle = result;
-      std::atomic<int> geo_sweeps{0};
-      std::atomic<bool> late_photo{false};
-      std::atomic<bool> tail_photo_started{false};
-      EXPECT_THROW(RunFixedCohortPhotoGeo(
-                       images,
-                       refs,
-                       budget,
-                       {128ull << 20, 128ull << 20},
-                       NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
-                       dispatch,
-                       32,
-                       nullptr,
-                       [&](bool geo, size_t job, int, int) {
-                         if (geo) ++geo_sweeps;
-                         if (!geo && job == 3) tail_photo_started = true;
-                         if (!geo && job == 2) {
-                           late_photo = true;
-                           throw std::runtime_error("late PHOTO failure");
-                         }
-                       }),
-                   std::runtime_error);
-      EXPECT_TRUE(late_photo.load());
-      if (active == 1) EXPECT_FALSE(tail_photo_started.load());
-      EXPECT_EQ(geo_sweeps.load(), 0);
     }
   }
 }
@@ -326,6 +341,12 @@ TEST(FixedCohortPipeline, PublicEntryRefusesInvalidInputsBeforeDeviceWork) {
   };
   const ByteCharge cap{128ull << 20, 128ull << 20};
   EXPECT_THROW(run(refs, Budget(), {1, 1}), std::invalid_argument);
+  auto shared = Budget();
+  shared.photo_source_storage = FixedCohortPhotoSourceStorage::kShared;
+  shared.photo_shared = {39, 39};  // needs two global 5x4 layers, before CUDA
+  EXPECT_THROW(run(refs, shared, cap), std::invalid_argument);
+  shared.photo_source_storage = FixedCohortPhotoSourceStorage::kPrivate;
+  EXPECT_THROW(run(refs, shared, cap), std::invalid_argument);
   auto wrong = refs;
   wrong[1].reference_image_idx = wrong[0].reference_image_idx;
   EXPECT_THROW(run(wrong, Budget(), cap), std::invalid_argument);

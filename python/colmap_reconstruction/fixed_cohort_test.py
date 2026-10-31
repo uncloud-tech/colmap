@@ -114,6 +114,25 @@ class RefusalAndLifetimeTest(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 self.forecast(output_policy=invalid)
 
+    def test_shared_photo_is_phase_local_and_padding_is_not_a_discount(self):
+        from colmap_reconstruction.fixed_cohort import ByteCharge, PhotoSourceStorage
+        private = self.forecast()
+        shared = self.forecast(photo_source_storage=PhotoSourceStorage.SHARED)
+        # Union of all three distinct images, padded to 5x7, even with active1.
+        self.assertEqual(shared.photo_shared, ByteCharge(105, 105))
+        self.assertEqual(shared.photo_private[0].host, private.photo_private[0].host)
+        self.assertEqual(shared.photo_private[0].device + 105,
+                         private.photo_private[0].device)
+        self.assertEqual(shared.photo_private[1].device + 9,
+                         private.photo_private[1].device)
+        self.assertEqual(shared.geo_peak, private.geo_peak)
+        self.assertEqual(shared.retained, private.retained)
+        self.assertEqual(shared.photo_peak.host, private.photo_peak.host + 105)
+        self.assertEqual(shared.jobs, self.jobs)
+        for invalid in (True, 'shared', None):
+            with self.assertRaises(ValueError):
+                self.forecast(photo_source_storage=invalid)
+
     def test_resourcewise_top_active_and_checked_overflow(self):
         from colmap_reconstruction.fixed_cohort import ByteCharge, active_peak
         from colmap_reconstruction.model import _add, _mul
@@ -202,7 +221,7 @@ class NativeBindingTest(unittest.TestCase):
         import tempfile
         from pathlib import Path
         from colmap_reconstruction.fixed_cohort import (
-            ByteCharge, ImageShape, Job, OutputPolicy, PhaseOptions, forecast_fixed_cohort,
+            ByteCharge, ImageShape, Job, OutputPolicy, PhotoSourceStorage, PhaseOptions, forecast_fixed_cohort,
         )
         root = Path(__file__).resolve().parents[2]
         images = (ImageShape(5, 4, 1, 20), ImageShape(3, 3, 1, 9)) * 2
@@ -213,9 +232,9 @@ class NativeBindingTest(unittest.TestCase):
                          PhaseOptions(True, True, '0', 1, 5, 5))
                      for i, ref in enumerate(ids))
         from itertools import product
-        for active, policy in product((1, 2), OutputPolicy):
+        for active, policy, storage in product((1, 2), OutputPolicy, PhotoSourceStorage):
             budget = forecast_fixed_cohort(
-                images, jobs, max_active_owners=active, source_root=root, output_policy=policy,
+                images, jobs, max_active_owners=active, source_root=root, output_policy=policy, photo_source_storage=storage,
                 process=ByteCharge(100, 200), unknown=ByteCharge(300, 400),
                 unknown_provenance='explicit test-only allowance ' + chr(0x1f9ea),
                 headroom_reserve=ByteCharge(10, 20),
@@ -229,7 +248,7 @@ class NativeBindingTest(unittest.TestCase):
                     padded = max(images[k].width for k in sources) * max(images[k].height for k in sources) * len(sources)
                     checks.append(f'''{{ auto m = ResidentPrivateLogicalMinimum({ref.width},{ref.height},{len(sources)},false);
                         assert(m.host + {padded} == {bound.host});
-                        assert(m.device + {padded} + {8*padded if geometry else 0} == {bound.device}); }}''')
+                        assert(m.device + {0 if storage == PhotoSourceStorage.SHARED and not geometry else padded} + {8*padded if geometry else 0} == {bound.device}); }}''')
             # Degenerate + rotated dimensions compare canonical shape helper to native.
             for w, h, s in ((1, 1, 1), (1, 9, 2), (11, 1, 4), (7, 19, 5), (19, 7, 5)):
                 host, device = current_owned_shape_minimum(w, h, s)
@@ -238,6 +257,8 @@ class NativeBindingTest(unittest.TestCase):
     {{5,4},{3,3},{5,4},{3,3}},
     {{3,{0,2,0},{0,2,0}}, {0,{2,1,2},{2,1,2}},
      {2,{1,3,1},{1,3,1}}, {1,{3,0,3},{3,0,3}}}, b);
+    assert(raw.photo_shared.host == b.photo_shared.host);
+    assert(raw.photo_shared.device == b.photo_shared.device);
     assert(raw.caller_inputs.host == b.caller_inputs.host);
     assert(raw.host_outputs.host == b.host_outputs.host);
     assert(raw.snapshots.device == b.snapshots.device);
@@ -314,7 +335,8 @@ std::cout << admitted.host << " " << admitted.device;
                              (2, OutputPolicy.PHOTO_AND_GEO): '3522 13093',
                              (1, OutputPolicy.FINAL_GEO_ONLY): '2044 7487',
                              (2, OutputPolicy.FINAL_GEO_ONLY): '2566 13093' }
-                self.assertEqual(result.stdout, expected[active, policy])
+                if storage == PhotoSourceStorage.PRIVATE:
+                    self.assertEqual(result.stdout, expected[active, policy])
 
 
 class WorkspaceFixtureBindingTest(unittest.TestCase):
@@ -335,7 +357,7 @@ class WorkspaceFixtureBindingTest(unittest.TestCase):
         self.assertIn('MakeWorkspaceFixture', header)
         self.assertIn('b.max_active_owners = 1', header)
         self.assertIn('b.max_active_owners = 2', header)
-        self.assertIn(tool['cpp']('ea6272a3c49ae17f10e85e8eb0e2f7a5e1163d37edcb8ce6edd4785f5210e428'), header)
+        self.assertIn(tool['cpp']('8a4afba07bdf4f73fc3ca228b79e047aca275d8043b384235120275e7668f99a'), header)
         self.assertIn('b.caller_inputs = {12288ULL,0ULL}', header)
         self.assertIn('b.host_outputs = {393216ULL,0ULL}', header)
         self.assertIn('b.snapshots = {0ULL,196608ULL}', header)

@@ -108,6 +108,24 @@ FixedCohortResult RunFixedCohortPhotoGeo(
                                     result.before_geo_available,
                                     {live_host, result.actual_snapshot_bytes});
     }
+    // This phase-local strong owner outlives every borrower, including graph
+    // launches and failure drain/join. It dies before the GEO free observation.
+    std::shared_ptr<const ResidentGrayscaleBank> photo_bank;
+    if (!geo &&
+        budget.photo_source_storage == FixedCohortPhotoSourceStorage::kShared) {
+      std::vector<std::vector<int>> sources;
+      for (const auto& ref : refs) sources.push_back(ref.photo_sources);
+      HostGrayscaleBank host(frozen, sources, cancel);
+      check();
+      const auto bytes = CheckedMultiply(
+          CheckedMultiply(host.Width(), host.Height()), host.Layers().size());
+      Require(bytes <= budget.photo_shared.host &&
+                  bytes <= budget.photo_shared.device,
+              "fixed-cohort actual PHOTO union exceeds bound");
+      photo_bank = std::make_shared<ResidentGrayscaleBank>(host, device);
+      result.actual_photo_shared = {bytes, bytes};
+      check();
+    }
     const auto& charges = geo ? budget.geo_private : budget.photo_private;
     // Retain the entire once-margined peak, even in the smaller phase. No
     // per-owner re-margin or snapshot sharing credit is issued.
@@ -136,6 +154,7 @@ FixedCohortResult RunFixedCohortPhotoGeo(
         problem.images = &frozen;
         problem.ref_image_idx = ref.reference_image_idx;
         problem.src_image_idxs = geo ? ref.geo_sources : ref.photo_sources;
+        if (photo_bank) problem.photo_grayscale = photo_bank->BindJob(owner);
         const auto& options = geo ? ref.geo_options : ref.photo_options;
         std::shared_ptr<const GeoPhotoInput> input;
         if (geo) {
@@ -170,7 +189,8 @@ FixedCohortResult RunFixedCohortPhotoGeo(
         check();
         coordinator.SolverDone(owner);
         coordinator.BeginOutput(owner);
-        if (geo || budget.output_policy == FixedCohortOutputPolicy::kPhotoAndGeo) {
+        if (geo ||
+            budget.output_policy == FixedCohortOutputPolicy::kPhotoAndGeo) {
           auto& maps = geo ? result.geo[owner] : result.photo[owner];
           maps.depth = solver.GetDepthMap();
           maps.normal = solver.GetNormalMap();

@@ -155,6 +155,9 @@ struct GrayscaleLayer {
   size_t width = 0;
   size_t height = 0;
   size_t row_stride = 0;
+  // Loaded invocation constructor: no file identity/redecode. Resident bank
+  // retains this layer and validates the exact supplied pixels at binding.
+  bool loaded_pixels = false;
   std::vector<uint8_t> pixels;
 };
 
@@ -167,6 +170,13 @@ class HostGrayscaleBank {
   explicit HostGrayscaleBank(
       const std::vector<std::vector<GrayscaleInput>>& jobs,
       const std::atomic<bool>* cancelled = nullptr);
+
+  // Frozen loaded pixels, deduplicated ONLY by invocation image ordinal.
+  // No filesystem access, resizing, or alias-by-path assumptions. Duplicate
+  // ordinals are preserved. Caller must not mutate inputs during construction.
+  HostGrayscaleBank(const std::vector<Image>& images,
+                    const std::vector<std::vector<int>>& sources,
+                    const std::atomic<bool>* cancelled = nullptr);
 
   size_t Width() const;
   size_t Height() const;
