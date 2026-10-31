@@ -13,6 +13,7 @@ import struct
 import sys
 
 from .process import NativeFailure, NativeProcess
+from .resource_policy import select_policy, validate_overrides
 
 
 def positive_int(text):
@@ -26,6 +27,20 @@ def nonnegative_int(text):
     value = int(text)
     if value < 0:
         raise argparse.ArgumentTypeError('must be nonnegative')
+    return value
+
+
+def byte_count(text):
+    value = nonnegative_int(text)
+    if value > 2**64 - 1:
+        raise argparse.ArgumentTypeError('must fit native uint64 bytes')
+    return value
+
+
+def positive_byte_count(text):
+    value = byte_count(text)
+    if value == 0:
+        raise argparse.ArgumentTypeError('must be positive')
     return value
 
 
@@ -43,13 +58,13 @@ def parse_args(argv):
     parser.add_argument('--backend', choices=('experimental_fixed_cohort',), default='experimental_fixed_cohort', help='current adaptive native PHOTO/GEO then mapped fusion; never stock fallback')
     parser.add_argument('--photos', required=True, type=Path)
     parser.add_argument('--workspace', required=True, type=Path, help='NEW exclusively owned output directory; existing paths refuse')
-    parser.add_argument('--host-budget-bytes', type=positive_int, help='optional upper bound on native observed FREE host capacity')
-    parser.add_argument('--device-budget-bytes', type=positive_int, help='optional upper bound on native observed FREE device capacity')
+    parser.add_argument('--host-budget-bytes', type=positive_byte_count, help='optional upper bound on native observed FREE host capacity')
+    parser.add_argument('--device-budget-bytes', type=positive_byte_count, help='optional upper bound on native observed FREE device capacity')
     for name in ('loader-scratch-host', 'process-host', 'process-device',
                  'unknown-host', 'unknown-device', 'reserve-host', 'reserve-device'):
-        parser.add_argument('--' + name + '-bytes', required=True, type=nonnegative_int,
-                            help='explicit RAW uncalibrated allowance; native applies one aggregate 3%% margin')
-    parser.add_argument('--unknown-provenance', required=True)
+        parser.add_argument('--' + name + '-bytes', type=byte_count,
+                            help='expert RAW allowance override; otherwise versioned conservative policy, not calibration; native applies one aggregate 3%% margin')
+    parser.add_argument('--unknown-provenance', help='required for explicit unknown byte overrides')
     parser.add_argument('--active-owners-ceiling', type=nonnegative_int, default=0,
                         help='0 means job count; admission is not a throughput optimum')
     parser.add_argument('--require-hard-memory-cap', action='store_true', help='unsupported in ordinary local mode: always refuses')
@@ -113,14 +128,20 @@ class Reconstruction:
             self.args.gpu_index, '--deadline_seconds', seconds, capture=True))
         if observation.get('allocation_fingerprint') != self.identity['allocation_fingerprint']:
             raise NativeFailure('native resource observation build changed')
+        effective = {}
         for side in ('host', 'device'):
             available = int(observation['available_' + side + '_bytes'])
             cap = getattr(self.args, side + '_budget_bytes')
             if cap is not None:
                 available = min(available, cap)
-            if available <= getattr(self.args, 'reserve_' + side + '_bytes'):
-                raise NativeFailure(side + ' reserve unavailable before native stage')
+            effective[side] = available
+        observation['effective_capacity_bytes'] = effective
+        observation['capacity_classification'] = 'measured-free-limited-by-user-cap'
         write_json(self.assets / ('resources-%03d.json' % self.process.sequence), observation)
+        for side in ('host', 'device'):
+            if effective[side] <= getattr(self.args, 'reserve_' + side + '_bytes'):
+                raise NativeFailure(side + ' reserve unavailable before native stage; '
+                                    'lower workload or free capacity (budgets cannot raise FREE)')
 
     def dense_arguments(self):
         a = self.args
@@ -155,6 +176,9 @@ class Reconstruction:
         if not re.fullmatch(r'[0-9a-f]{64}', identity.get('allocation_fingerprint', '')):
             raise ValueError('missing native allocation fingerprint')
         self.identity = identity
+        self.resource_policy = select_policy(self.args, identity)
+        write_json(self.assets / 'resource-policy.json', self.resource_policy)
+        print('Resource policy: ' + json.dumps(self.resource_policy, sort_keys=True), file=sys.stderr)
         write_json(self.assets / 'build.json', dict(identity=identity, executable=self.executable,
                    executable_sha256=self.executable_sha))
         self.resources()
@@ -178,7 +202,7 @@ class Reconstruction:
         write_json(self.workspace / 'result.json', dict(status='completed', vertices=count,
             registered_images=self.registered_images, photo_references=len(self.graph['phases']['photo']['jobs']),
             geo_references=len(self.graph['phases']['geo']['jobs']), backend='experimental_fixed_cohort',
-            dense_report=self.report,
+            dense_report=self.report, resource_policy=self.resource_policy,
             performance_qualified=False, hard_memory_cap=False))
 
     def prepare(self):
@@ -368,8 +392,7 @@ def main(argv=None):
             raise ValueError('hard RSS/VRAM caps unsupported; use an external cgroup/service, not this mode')
         if sys.platform != 'linux' or os.geteuid() == 0:
             raise ValueError('experimental local execution requires non-root Linux; privileged lane is unchanged')
-        if not (args.unknown_host_bytes or args.unknown_device_bytes) or not args.unknown_provenance.strip():
-            raise ValueError('positive explicit unknown allowance and provenance required')
+        validate_overrides(args)
         if args.random_seed < -1 or args.max_image_size == 0 or args.max_image_size < -1:
             raise ValueError('invalid seed or max-image-size')
         args.photos = args.photos.resolve(strict=True)
