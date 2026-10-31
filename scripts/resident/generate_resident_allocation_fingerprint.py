@@ -88,6 +88,14 @@ from pathlib import Path, PurePosixPath
 #     sequence strictly before any payload + strictly sequential
 #     per-cohort loop over the concrete banks/pipeline/coordinator with
 #     original identities and the wire ledger composition).
+# Fusion allocation/admission audit (2026-10-31): the same binding now
+# certifies mapped CPU fusion as well as stereo. Include the fusion roots,
+# checked input/output ledger, mapped storage and dependency admission.
+# Their payload dependencies (bitmap, mat, workspace/model and fixed-cohort
+# validation) are already above. Also bind PlyPoint layout, aligned vector
+# storage, task scheduling/draining (buffer coexistence), and OIIO thread
+# initialization. Decoder internals and incidental controller/traversal/
+# metadata overhead remain explicit policy allowances, not certified peaks.
 # Deliberately EXCLUDED (documented): the stock CUDA backend
 # (patch_match_cuda.{h,cc}) never constructed on the owned path,
 # consistency_graph (explicitly refused by option admission), test/
@@ -192,6 +200,18 @@ CLOSURE = (
     "src/colmap/mvs/owned_graph_coordinator.h",
     "src/colmap/mvs/owned_async_pool.h",
     "src/colmap/mvs/owned_selection_boundary.h",
+    "src/colmap/mvs/fusion.h",
+    "src/colmap/mvs/fusion.cc",
+    "src/colmap/mvs/fusion_resource.h",
+    "src/colmap/mvs/fusion_mapped_mat.h",
+    "src/colmap/mvs/fusion_mapped_mat.cc",
+    "src/colmap/mvs/fusion_dependencies.h",
+    "src/colmap/util/ply.h",
+    "src/colmap/util/eigen_alignment.h",
+    "src/colmap/util/threading.h",
+    "src/colmap/util/threading.cc",
+    "src/colmap/util/oiio_utils.h",
+    "src/colmap/util/oiio_utils.cc",
     "scripts/resident/generate_resident_allocation_fingerprint.py",
 )
 
