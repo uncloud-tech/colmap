@@ -232,7 +232,7 @@ class NativeBindingTest(unittest.TestCase):
                          PhaseOptions(True, True, '0', 1, 5, 5))
                      for i, ref in enumerate(ids))
         from itertools import product
-        for active, policy, storage in product((1, 2), OutputPolicy, PhotoSourceStorage):
+        for active, policy, storage in product((1, 2, 3, 4), OutputPolicy, PhotoSourceStorage):
             budget = forecast_fixed_cohort(
                 images, jobs, max_active_owners=active, source_root=root, output_policy=policy, photo_source_storage=storage,
                 process=ByteCharge(100, 200), unknown=ByteCharge(300, 400),
@@ -335,7 +335,7 @@ std::cout << admitted.host << " " << admitted.device;
                              (2, OutputPolicy.PHOTO_AND_GEO): '3522 13093',
                              (1, OutputPolicy.FINAL_GEO_ONLY): '2044 7487',
                              (2, OutputPolicy.FINAL_GEO_ONLY): '2566 13093' }
-                if storage == PhotoSourceStorage.PRIVATE:
+                if storage == PhotoSourceStorage.PRIVATE and active <= 2:
                     self.assertEqual(result.stdout, expected[active, policy])
 
 
@@ -357,7 +357,7 @@ class WorkspaceFixtureBindingTest(unittest.TestCase):
         self.assertIn('MakeWorkspaceFixture', header)
         self.assertIn('b.max_active_owners = 1', header)
         self.assertIn('b.max_active_owners = 2', header)
-        self.assertIn(tool['cpp']('8a4afba07bdf4f73fc3ca228b79e047aca275d8043b384235120275e7668f99a'), header)
+        self.assertIn(tool['cpp']('feae03cd2eddf85ced50a46a946f4a6832b8fa147dfc5e1113b2aece9ac96a57'), header)
         self.assertIn('b.caller_inputs = {12288ULL,0ULL}', header)
         self.assertIn('b.host_outputs = {393216ULL,0ULL}', header)
         self.assertIn('b.snapshots = {0ULL,196608ULL}', header)

@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
+#include "colmap/mvs/owned_cohort_lifecycle_test_util.h"
 #include "colmap/mvs/owned_fixed_cohort_inventory.h"
+#include "colmap/mvs/owned_pair_run.h"
 
+#include <atomic>
 #include <cassert>
 #include <limits>
 #include <stdexcept>
@@ -271,6 +274,156 @@ int main() {
     late_staging_refused = true;
   }
   assert(late_staging_refused);
+  // Independent worked top-N example: retained host/device = 611/622.
+  // Active totals: host 80,140,170,180; device 100,170,210,230.
+  four.headroom_reserve = {7, 11};
+  auto selected = SelectFixedCohortActiveOwners(four, {781, 827});
+  assert(selected.count == 2 && selected.reason == "host and device capacity");
+  assert(SelectFixedCohortActiveOwners(four, {10000, 755}).count == 1);
+  assert(SelectFixedCohortActiveOwners(four, {812, 10000}).count == 3);
+  assert(SelectFixedCohortActiveOwners(four, {822, 889}).count == 4);
+  assert(SelectFixedCohortActiveOwners(four, {10000, 10000}, 3).count == 3);
+  assert(SelectFixedCohortActiveOwners(four, {10000, 10000}, 99).count == 4);
+  // Singleton fits and count two exceeds capacity, but count four overflows.
+  // Capacity refusal must not hide malformed in-ceiling arithmetic.
+  auto overflowing = four;
+  overflowing.photo_private.assign(4, {10, 5000000000000000000ull});
+  overflowing.geo_private = overflowing.photo_private;
+  bool later_overflow_refused = false;
+  try {
+    SelectFixedCohortActiveOwners(overflowing,
+                                 {10000, 6000000000000000000ull});
+  } catch (const std::overflow_error&) {
+    later_overflow_refused = true;
+  }
+  assert(later_overflow_refused);
+  // An explicit ceiling excludes arithmetic outside the search envelope.
+  assert(SelectFixedCohortActiveOwners(
+             overflowing, {10000, 6000000000000000000ull}, 2)
+             .count == 1);
+  // Positive private charges make demand strictly increase with count.
+  // Across this capacity interval, count three remains the highest fit.
+  for (uint64_t host_cap : {uint64_t{812}, uint64_t{817}, uint64_t{821}})
+    assert(SelectFixedCohortActiveOwners(four, {host_cap, 10000}).count == 3);
+  assert(SelectFixedCohortActiveOwners(four, {822, 10000}).count == 4);
+  bool singleton_refused = false;
+  try {
+    SelectFixedCohortActiveOwners(four, {718, 10000});
+  } catch (const std::invalid_argument& e) {
+    singleton_refused =
+        std::string(e.what()).find("no singleton fits: host capacity") !=
+        std::string::npos;
+  }
+  assert(singleton_refused);
+  assert(SelectFixedCohortActiveOwners(four, {781, 10000}).reason ==
+         "host capacity");
+  assert(SelectFixedCohortActiveOwners(four, {10000, 827}).reason ==
+         "device capacity");
+  for (size_t active : {size_t{3}, size_t{4}}) {
+    four.max_active_owners = active;
+    const auto peak = FixedCohortPeaks(four).peak;
+    const ByteCharge cap{MarginBytes(peak.host) + 7,
+                         MarginBytes(peak.device) + 11};
+    assert(SelectFixedCohortActiveOwners(four, cap).count == active);
+    assert(
+        SelectFixedCohortActiveOwners(four, {cap.host - 1, cap.device}).count ==
+        active - 1);
+    const auto slack = MarginBytes(peak.device) - peak.device;
+    CheckFixedCohortPhysicalCopies(four, 600 + slack, {1, 1, 1, 1});
+    bool refused = false;
+    try {
+      CheckFixedCohortPhysicalCopies(four, 601 + slack, {1, 1, 1, 1});
+    } catch (const std::invalid_argument&) {
+      refused = true;
+    }
+    assert(refused);
+  }
+  // Execute the real rolling loop at the chosen counts. Cleanup must finish
+  // before retirement/join makes credits reusable, including injected failure.
+  for (size_t active : {size_t{3}, size_t{4}}) {
+    for (bool fail : {false, true}) {
+      CohortLifecycleRendezvous lifecycle(active, std::chrono::seconds(1));
+      std::atomic<size_t> cleaned{0};
+      std::vector<std::atomic<bool>> live(7);
+      for (auto& value : live) value = false;
+      struct Payload {
+        std::atomic<bool>& live;
+        explicit Payload(std::atomic<bool>& value) : live(value) {
+          live = true;
+        }
+        ~Payload() { live = false; }
+      };
+      PairCoordinator coordinator({1 + active * 10, 1 + active * 10},
+                                  {1, 1},
+                                  active,
+                                  std::vector<ByteCharge>(7, {10, 10}),
+                                  std::chrono::seconds(3));
+      bool failed = false;
+      try {
+        RunRollingOwners(
+            coordinator,
+            [&](size_t job) {
+              coordinator.BeginPreparation(job);
+              coordinator.ReadyAndWait(job);
+              Payload payload(live[job]);
+              if (!fail) lifecycle.Observe(0, job);
+              if (fail && job == 2)
+                throw std::runtime_error("injected owner failure");
+              coordinator.SolverDone(job);
+              coordinator.BeginOutput(job);
+              coordinator.EndOutput(job);
+            },
+            [](size_t, const char*) {},
+            PairThreadFactory{},
+            [&](size_t job) {
+              assert(!live[job]);
+              ++cleaned;
+            });
+      } catch (const std::runtime_error& e) {
+        if (std::string(e.what()) != "injected owner failure") throw;
+        failed = true;
+      }
+      assert(failed == fail);
+      if (!fail) assert(lifecycle.Observed(0) == active);
+      for (const auto& value : live) assert(!value);
+      assert(cleaned == coordinator.AdmittedCount());
+      assert(coordinator.ReservedBytes().host == 0);
+      assert(coordinator.ReservedBytes().device == 0);
+    }
+  }
+  // A silent two-owner clamp cannot satisfy the three/four-owner proof.
+  // Timeout must propagate through cancellation, cleanup, retirement and join.
+  for (size_t target : {size_t{3}, size_t{4}}) {
+    CohortLifecycleRendezvous lifecycle(target, std::chrono::milliseconds(50));
+    PairCoordinator coordinator({41, 41},
+                                {1, 1},
+                                2,
+                                std::vector<ByteCharge>(4, {10, 10}),
+                                std::chrono::seconds(3));
+    bool timed_out = false;
+    try {
+      RunRollingOwners(
+          coordinator,
+          [&](size_t job) {
+            coordinator.BeginPreparation(job);
+            coordinator.ReadyAndWait(job);
+            lifecycle.Observe(0, job);
+            coordinator.SolverDone(job);
+            coordinator.BeginOutput(job);
+            coordinator.EndOutput(job);
+          },
+          [](size_t, const char*) {});
+    } catch (const std::runtime_error& e) {
+      timed_out = std::string(e.what()) ==
+                  "owner lifecycle rendezvous timed out";
+    }
+    assert(timed_out);
+    assert(lifecycle.Observed(0) == 2);
+    assert(coordinator.ReservedBytes().host == 0);
+    assert(coordinator.ReservedBytes().device == 0);
+  }
+  four.max_active_owners = 1;
+  four.headroom_reserve = {};
   four.geo_private.pop_back();
   bool shape_refused = false;
   try {
@@ -290,6 +443,14 @@ int main() {
     }
     assert(active_refused);
   }
+  // Preserve legacy manual pair-as-ceiling behavior for a singleton job;
+  // automatic selection still reports only the one logical owner available.
+  auto singleton = budget;
+  singleton.photo_private.resize(1);
+  singleton.geo_private.resize(1);
+  singleton.geo_staging_device.resize(1);
+  AdmitFixedCohortBudget(singleton, {10000, 10000});
+  assert(SelectFixedCohortActiveOwners(singleton, {10000, 10000}).count == 1);
   auto missing_late_bound = budget;
   missing_late_bound.photo_private.resize(4, {30, 40});
   missing_late_bound.geo_private.resize(4, {70, 80});
@@ -306,6 +467,13 @@ int main() {
   bool refused = false;
   try {
     (void)FixedCohortPeaks(bad);
+  } catch (const std::overflow_error&) {
+    refused = true;
+  }
+  assert(refused);
+  refused = false;
+  try {
+    SelectFixedCohortActiveOwners(bad, {1000, 1000});
   } catch (const std::overflow_error&) {
     refused = true;
   }

@@ -29,7 +29,7 @@ import subprocess
 
 from .model import _add, _mul, current_owned_shape_minimum, exact_int
 
-_FIXED_COHORT_FINGERPRINT = '8a4afba07bdf4f73fc3ca228b79e047aca275d8043b384235120275e7668f99a'
+_FIXED_COHORT_FINGERPRINT = 'feae03cd2eddf85ced50a46a946f4a6832b8fa147dfc5e1113b2aece9ac96a57'
 _PROFILE = 'fresh-fixed-cohort/current-owned-shape-lower-bound-v1/unqualified'
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -302,8 +302,8 @@ def forecast_fixed_cohort(images, jobs, *, max_active_owners, source_root,
         raise ValueError('expected typed PhotoSourceStorage')
     if not isinstance(output_policy, OutputPolicy):
         raise ValueError('expected typed OutputPolicy')
-    exact_int(max_active_owners, 1, 2)
     images, jobs = tuple(images), tuple(jobs)
+    exact_int(max_active_owners, 1, max(2, len(jobs)))
     if not images or not jobs:
         raise ValueError('empty fixed cohort')
     for image in images:

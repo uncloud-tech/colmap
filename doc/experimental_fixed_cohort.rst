@@ -42,7 +42,9 @@ substitute for differing per-reference bounds in earlier benchmark fixtures.
 without geometry; GEO is always filtered with geometry. Leave the shared
 ``geom_consistency`` and ``filter`` flags at 1. Unsupported native option
 combinations, missing sources and nonclosed GEO coverage refuse before GPU work.
-``--active_owners 1`` is serial; 2 permits two owners. Graphs are selected with
+``--active_owners 1`` is the unchanged serial default; 2 permits two owners.
+Manual higher counts are supported up to the number of configured jobs, using
+the same canonical resource gates. Graphs are selected with
 ``--PatchMatchStereo.owned_cuda_graphs 1``. There is no performance or quality
 promotion implied by these settings.
 
@@ -143,7 +145,45 @@ opposed aspect ratios. Shared mode therefore makes no savings/physical-fit
 promise and never silently selects a cheaper forecast while allocating private
 arrays. The private default is unchanged. Unknown allowances, reserve and the
 single aggregate 3% margin are unchanged; CUDA array overhead is not certified
-by these logical payload counts. No owner-count/scheduler expansion is implied.
+by these logical payload counts. Source-storage selection is independent of
+active-owner selection below.
+
+Automatic memory-admitted concurrency
+--------------------------------------
+
+Explicitly opt in with ``--auto_active_owners 1``. The command selects the largest
+**memory-admissible** count from 1 through the configured job count, optionally
+bounded by ``--active_owners_ceiling N`` (0, the default, means job count).
+Do not combine automatic selection with a nondefault manual ``--active_owners``.
+A ceiling without automatic selection, negative ceiling or nonpositive manual
+count refuses. The existing default/manual 1/2 behavior is unchanged.
+
+Selection uses the caller's explicit host/device capacities and the same raw
+canonical inventory, resourcewise top-N private charges, one aggregate 3% margin
+and separate reserve as manual admission. Host and device bottlenecks can belong
+to different jobs. It precedes pixel decoding, candidate-dependent payload
+allocation and solver construction; there are no OOM trials. The normal command
+prints ``active_owners``, automatic/manual selection and the limiting host/device
+capacity, job count or user ceiling, including in ``--prepare_only 1``. If not
+even one owner fits, it reports ``no singleton fits`` and the limiting resource.
+Invalid bounds and arithmetic overflow refuse rather than selecting a lower N.
+
+This is **not a measured throughput optimum**, physical-fit certification or
+whole-machine budget discovery. The full caller/frozen input and snapshot/output
+floor stays retained. Decode scratch, actual free headroom and physical-copy
+checks can still refuse independently; automatic selection never reduces quality,
+resolution or sources to fit. No eviction, spill or phase mixing is introduced.
+The existing rolling owner loop retains credits through destruction and parent
+join; all PHOTO owners still drain before any GEO owner begins. Private/shared
+PHOTO storage semantics and optional stream/graph execution remain unchanged.
+
+Typed callers build the canonical inventory first, then call
+``SelectFixedCohortActiveOwners(budget, capacity, ceiling)`` and bind its ``count``
+to ``budget.max_active_owners`` before preparing/executing. Serial dispatch requires
+count 1; concurrent ``PairDispatch::kPair`` supports counts >=2 only in this
+fixed-cohort entry. Unrelated standard pair/triple contracts are unchanged.
+Python ``forecast_fixed_cohort`` accepts the effective count for the same raw
+inventory; capacities, selection and the single margin remain native concerns.
 
 One original deadline covers preparation, execution and output. Checks occur
 between output writes, not as an interrupt guarantee inside blocking output

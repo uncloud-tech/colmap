@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <functional>
+#include <limits>
 #include <vector>
 
 namespace colmap::mvs::owned {
@@ -56,7 +57,7 @@ struct FixedCohortBudget {
   std::vector<uint64_t> geo_staging_device = std::vector<uint64_t>(2);
   // Unallocated headroom in addition to the once-margined peak.
   ByteCharge headroom_reserve;
-  // Serial=1 / pair=2. Logical job count is independent of active owners.
+  // Active private owners; logical job count is independent of this ceiling.
   size_t max_active_owners = 2;
   std::vector<ByteCharge> photo_private = std::vector<ByteCharge>(2);
   std::vector<ByteCharge> geo_private = std::vector<ByteCharge>(2);
@@ -79,7 +80,9 @@ inline void ValidateFixedCohortJobShape(const FixedCohortBudget& budget) {
       (budget.photo_source_storage == FixedCohortPhotoSourceStorage::kShared &&
        (!budget.photo_shared.host || !budget.photo_shared.device)))
     throw std::invalid_argument("invalid fixed-cohort PHOTO source storage");
-  if (!budget.max_active_owners || budget.max_active_owners > 2 ||
+  if (!budget.max_active_owners ||
+      budget.max_active_owners >
+          std::max(size_t{2}, budget.photo_private.size()) ||
       budget.photo_private.empty() ||
       budget.geo_private.size() != budget.photo_private.size() ||
       budget.geo_staging_device.size() != budget.photo_private.size())
@@ -168,6 +171,47 @@ inline ByteCharge AdmitFixedCohortBudget(const FixedCohortBudget& budget,
   if (!PairCoordinator::Fits(with_reserve, capacity))
     throw std::invalid_argument("fixed-cohort retained peak exceeds capacity");
   return admitted;
+}
+
+// Largest MEMORY-admissible count, not a measured throughput optimum. Metadata
+// only: callers select before loading pixels or allocating candidate payloads.
+struct FixedCohortActiveSelection {
+  size_t count;
+  std::string reason;
+};
+
+inline FixedCohortActiveSelection SelectFixedCohortActiveOwners(
+    FixedCohortBudget budget, ByteCharge capacity, size_t ceiling = 0) {
+  // Validate every declaration independently of capacity. Never interpret a
+  // malformed bound or arithmetic overflow as a smaller admissible candidate.
+  const auto limit = ceiling ? std::min(ceiling, budget.photo_private.size())
+                             : budget.photo_private.size();
+  budget.max_active_owners = limit;
+  AdmitFixedCohortBudget(budget,
+                         {std::numeric_limits<uint64_t>::max(),
+                          std::numeric_limits<uint64_t>::max()});
+  size_t chosen = 0;
+  for (size_t count = 1; count <= limit; ++count) {
+    budget.max_active_owners = count;
+    const auto peak = FixedCohortPeaks(budget).peak;
+    const ByteCharge demand{
+        CheckedAdd(MarginBytes(peak.host), budget.headroom_reserve.host),
+        CheckedAdd(MarginBytes(peak.device), budget.headroom_reserve.device)};
+    const bool host = demand.host > capacity.host;
+    const bool device = demand.device > capacity.device;
+    if (host || device) {
+      const std::string reason = host && device ? "host and device capacity"
+                                 : host         ? "host capacity"
+                                                : "device capacity";
+      if (!chosen)
+        throw std::invalid_argument("fixed-cohort no singleton fits: " +
+                                    reason);
+      return {chosen, reason};
+    }
+    chosen = count;
+  }
+  return {chosen,
+          limit == budget.photo_private.size() ? "job count" : "user ceiling"};
 }
 
 // Observed free is observational admission evidence, NOT a runtime hard cap.
