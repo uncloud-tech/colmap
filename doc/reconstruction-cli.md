@@ -101,6 +101,37 @@ observed host capacity (limited by any user cap) to native fusion and the existi
 direct-child RSS monitor. No extra byte flags are required. Native fusion again
 limits that phase cap by its own observed host/cgroup FREE before allocation.
 
+### Undistortion admission
+
+Immediately before undistortion, the frontend also passes an observed, lower-capped
+host budget and the existing host policy/reserve allowances automatically. No new
+user byte declarations are required. Native `image_undistorter` exposes
+`--host_budget_bytes`, `--policy_host_bytes` and `--reserve_host_bytes`; a zero
+budget preserves the unbudgeted path (policy/reserve must then be zero).
+
+Budgeted execution supports COLMAP output with validated UINT8 image headers of
+1–4 channels, matching model dimensions, ordinary perspective camera models
+(including nonzero-distortion SIMPLE_RADIAL) and the supported spherical path.
+ROI, dry-run and non-COLMAP output combinations are unsupported in this mode.
+Header checks precede pixel allocation. The known RGB payload accounts for
+source/output overlap, the full-resolution intermediate warp before substantial
+downscaling, spherical cloning and grayscale-to-RGB conversion. Decoder, filter,
+writer, model and allocator overhead remain policy allowances—not measured bounds.
+
+Native admission freezes its observed host/cgroup capacity, limited by the supplied
+cap. It admits ordered batches within `--num_threads`, reducing concurrent workers
+when needed without changing resolution, warp arithmetic or image order. One
+aggregate 3% margin covers concurrent known payload plus the once-per-phase policy;
+reserve is added separately. A singleton that cannot fit refuses before decode.
+Failures and cancellation drain admitted workers before returning failure; images
+already written may remain, but successful sparse/config completion is not
+published by a failed run. The frontend records failure rather than `result.json`.
+Logical admission and direct-child RSS monitoring do not guarantee physical fit or
+hard process-tree containment. SfM and complete physical stage forecasts remain
+UNKNOWN.
+
+### Fusion admission
+
 This optional native logical budget supports only single-thread, full-resolution
 COLMAP mmap fusion, without cache or external masks. Other budgeted settings
 refuse. Distinct configured inputs contribute retained RGB plus atomic masks
