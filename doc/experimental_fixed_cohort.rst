@@ -240,6 +240,36 @@ fixed-cohort entry. Unrelated standard pair/triple contracts are unchanged.
 Python ``forecast_fixed_cohort`` accepts the effective count for the same raw
 inventory; capacities, selection and the single margin remain native concerns.
 
+Independent phase owner counts (explicit opt-in)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Add ``--auto_phase_active_owners 1 --auto_active_owners 1`` to select PHOTO and
+GEO counts independently under the **same** effective host/device capacities and
+``--active_owners_ceiling``. Both manual capacities and ``--observe_capacities 1``
+work. Defaults, manual counts and uniform automatic selection are unchanged.
+Reports include ``PHOTO active_owners=...; limiting_reason=...`` and the matching
+GEO line; the compatibility ``active_owners`` field is their maximum, not a
+uniform count. Refusal names the phase if its complete singleton cannot fit.
+
+Each search checks arithmetic at its effective ceiling before any capacity
+short-circuit. Actual phase peaks use resourcewise top-N private charges for
+that phase, plus the unchanged full retained inventory (and PHOTO-only shared
+bank). One aggregate 3% margin and the existing reserve apply, never per-owner
+margins. Snapshot, fixed-bank, unknown and process declarations receive no new
+credits. Phase observations still perform the existing conservative headroom
+checks; no new observation, live credit or capacity enlargement is introduced.
+Observed FREE remains incremental, racy and unreserved. The largest logically
+admissible counts are neither a throughput optimum nor a physical-fit guarantee.
+All PHOTO owners complete and retire before GEO starts; no mixed phases,
+eviction, residency changes or quality changes are enabled.
+
+Typed callers use ``SelectFixedCohortPhaseActiveOwners`` and bind the PHOTO/GEO
+counts to ``budget.phase_active_owners``, with their maximum in
+``budget.max_active_owners`` for dispatch compatibility. Both zero phase counts
+retain uniform behavior; partial/zero/out-of-range explicit counts are invalid.
+Python ``forecast_fixed_cohort(..., phase_active_owners=(photo, geo))`` mirrors
+the raw inventory and initializer, not native capacity selection.
+
 One original deadline covers preparation, execution and output. Checks occur
 between output writes, not as an interrupt guarantee inside blocking output
 I/O. Native setup/drain uses the existing fail-closed deadline semantics.

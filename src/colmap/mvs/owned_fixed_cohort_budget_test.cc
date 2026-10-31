@@ -327,6 +327,45 @@ int main() {
   assert(SelectFixedCohortActiveOwners(four, {822, 889}).count == 4);
   assert(SelectFixedCohortActiveOwners(four, {10000, 10000}, 3).count == 3);
   assert(SelectFixedCohortActiveOwners(four, {10000, 10000}, 99).count == 4);
+  // Same envelope, asymmetric phases: GEO need not throttle PHOTO.
+  auto asymmetric = four;
+  asymmetric.photo_private.assign(4, {10, 10});
+  const auto phases =
+      SelectFixedCohortPhaseActiveOwners(asymmetric, {781, 827});
+  assert(phases[0].count == 4 && phases[1].count == 2);
+  assert(phases[0].reason == "job count");
+  asymmetric.phase_active_owners = {4, 2};
+  asymmetric.max_active_owners = 4;
+  assert(FixedCohortPeaks(asymmetric).photo.host == 651);
+  AdmitFixedCohortBudget(asymmetric, {781, 827});
+  // PHOTO observation uses its actual phase peak only in the explicit mode.
+  const auto photo_peak = FixedCohortPeaks(asymmetric).photo;
+  CheckFixedCohortPhaseHeadroom(
+      asymmetric,
+      false,
+      {CheckedAdd(MarginBytes(photo_peak.host),
+                  asymmetric.headroom_reserve.host),
+       CheckedAdd(MarginBytes(photo_peak.device),
+                  asymmetric.headroom_reserve.device)},
+      {});
+  auto uniform = asymmetric;
+  uniform.phase_active_owners = {};
+  bool conservative = false;
+  try {
+    CheckFixedCohortPhaseHeadroom(
+        uniform,
+        false,
+        {MarginBytes(photo_peak.host) + 7, MarginBytes(photo_peak.device) + 11},
+        {});
+  } catch (const std::invalid_argument&) {
+    conservative = true;
+  }
+  assert(conservative);
+  std::swap(asymmetric.photo_private, asymmetric.geo_private);
+  asymmetric.phase_active_owners = {};
+  const auto reversed =
+      SelectFixedCohortPhaseActiveOwners(asymmetric, {781, 827});
+  assert(reversed[0].count == 2 && reversed[1].count == 4);
   // Singleton fits and count two exceeds capacity, but count four overflows.
   // Capacity refusal must not hide malformed in-ceiling arithmetic.
   auto overflowing = four;
@@ -344,6 +383,71 @@ int main() {
   assert(SelectFixedCohortActiveOwners(
              overflowing, {10000, 6000000000000000000ull}, 2)
              .count == 1);
+  for (const bool geo : {false, true}) {
+    auto hidden = four;
+    (geo ? hidden.geo_private : hidden.photo_private)
+        .assign(4, {10, 5000000000000000000ull});
+    bool overflow = false;
+    try {
+      SelectFixedCohortPhaseActiveOwners(hidden,
+                                         {10000, 6000000000000000000ull});
+    } catch (const std::overflow_error&) {
+      overflow = true;
+    }
+    assert(overflow);
+    const auto limited = SelectFixedCohortPhaseActiveOwners(
+        hidden, {10000, 6000000000000000000ull}, 2);
+    assert(limited[geo].count == 1 && limited[!geo].count == 2);
+  }
+  for (const bool geo : {false, true}) {
+    auto unequal = four;
+    (geo ? unequal.photo_private : unequal.geo_private).assign(4, {10, 10});
+    auto choices = SelectFixedCohortPhaseActiveOwners(unequal, {781, 10000});
+    assert(choices[geo].count == 2 && choices[geo].reason == "host capacity");
+    choices = SelectFixedCohortPhaseActiveOwners(unequal, {10000, 827});
+    assert(choices[geo].count == 2 && choices[geo].reason == "device capacity");
+    for (const size_t ceiling : {size_t{1}, size_t{3}, size_t{99}}) {
+      choices =
+          SelectFixedCohortPhaseActiveOwners(unequal, {10000, 10000}, ceiling);
+      assert(choices[0].count == std::min(ceiling, size_t{4}));
+      assert(choices[1].count == choices[0].count);
+    }
+    bool refused = false;
+    try {
+      SelectFixedCohortPhaseActiveOwners(unequal, {700, 10000});
+    } catch (const std::invalid_argument& e) {
+      refused = std::string(e.what()).find(geo ? "GEO no singleton"
+                                               : "PHOTO no singleton") !=
+                std::string::npos;
+    }
+    assert(refused);
+  }
+  for (const auto counts :
+       {std::array<size_t, 2>{0, 1}, {1, 0}, {5, 1}, {1, 1}}) {
+    auto invalid = four;
+    invalid.max_active_owners = 4;
+    invalid.phase_active_owners = counts;
+    bool refused = false;
+    try {
+      AdmitFixedCohortBudget(invalid, {10000, 10000});
+    } catch (const std::invalid_argument&) {
+      refused = true;
+    }
+    assert(refused);
+  }
+  auto independent = four;
+  for (auto& charge : independent.photo_private) charge.device = 10;
+  for (auto& charge : independent.geo_private) charge.host = 10;
+  const auto separate_limits = SelectFixedCohortPhaseActiveOwners(independent, {781, 755});
+  assert(separate_limits[0].count == 2 && separate_limits[0].reason == "host capacity");
+  assert(separate_limits[1].count == 1 && separate_limits[1].reason == "device capacity");
+  independent.max_active_owners = 2;
+  independent.phase_active_owners = {2, 1};
+  const auto exact_phase_peak = FixedCohortPeaks(independent);
+  assert(exact_phase_peak.photo.host == 751 && exact_phase_peak.photo.device == 642);
+  assert(exact_phase_peak.geo.host == 621 && exact_phase_peak.geo.device == 722);
+  const auto once = AdmitFixedCohortBudget(independent, {781, 755});
+  assert(once.host == 774 && once.device == 744);
   // Positive private charges make demand strictly increase with count.
   // Across this capacity interval, count three remains the highest fit.
   for (uint64_t host_cap : {uint64_t{812}, uint64_t{817}, uint64_t{821}})
@@ -505,6 +609,40 @@ int main() {
     late_bound_refused = true;
   }
   assert(late_bound_refused);
+  for (int malformed = 0; malformed < 5; ++malformed) {
+    auto invalid = budget;
+    if (malformed == 0) invalid.unknown = {};
+    if (malformed == 1) invalid.unknown_provenance.clear();
+    if (malformed == 2) invalid.photo_private.back().host = 0;
+    if (malformed == 3) invalid.geo_staging_device.back() = 0;
+    if (malformed == 4) invalid.already_live_process[0].host = maximum;
+    bool rejected = false;
+    try { SelectFixedCohortPhaseActiveOwners(invalid, {}); }
+    catch (const std::invalid_argument& e) {
+      rejected = std::string(e.what()).find("no singleton fits") == std::string::npos;
+    }
+    assert(rejected);
+  }
+  // Exact CLI fixture inventory: each resource cap is derived from the same
+  // canonical singleton, not a hand-tuned admission bypass.
+  for (const bool heavy_photo : {false, true}) {
+    for (const bool shared_photo : {false, true}) {
+      auto config = budget;
+      config.max_active_owners = 1;
+      config.photo_source_storage = shared_photo ? FixedCohortPhotoSourceStorage::kShared
+                                                 : FixedCohortPhotoSourceStorage::kPrivate;
+      std::vector<FixedCohortJobShape> tiny_jobs;
+      for (int i = 0; i < 3; ++i)
+        tiny_jobs.push_back({i, std::vector<int>(heavy_photo ? 20 : 1, (i + 1) % 3),
+                               std::vector<int>(heavy_photo ? 1 : 20, (i + 1) % 3)});
+      auto tiny = BuildFixedCohortLogicalInventory({{20,10},{20,10},{20,10}}, tiny_jobs, config);
+      const auto admitted_tiny = AdmitFixedCohortBudget(tiny, {maximum, maximum});
+      const auto counts = SelectFixedCohortPhaseActiveOwners(
+          tiny, {maximum, CheckedAdd(admitted_tiny.device, tiny.headroom_reserve.device)});
+      assert(counts[heavy_photo ? 0 : 1].count == 1);
+      assert(counts[heavy_photo ? 1 : 0].count == 3);
+    }
+  }
   auto bad = budget;
   bad.process.host = std::numeric_limits<uint64_t>::max();
   bool refused = false;

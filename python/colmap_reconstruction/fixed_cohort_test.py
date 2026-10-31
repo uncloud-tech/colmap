@@ -75,6 +75,18 @@ class RefusalAndLifetimeTest(unittest.TestCase):
                                      self.jobs if jobs is None else jobs,
                                      **(self.kwargs | kwargs))
 
+    def test_phase_counts_use_same_retained_inventory(self):
+        one = self.forecast()
+        two = self.forecast(max_active_owners=2)
+        mixed = self.forecast(max_active_owners=2, phase_active_owners=(2, 1))
+        self.assertEqual(mixed.photo_peak, two.photo_peak)
+        self.assertEqual(mixed.geo_peak, one.geo_peak)
+        self.assertEqual(mixed.retained, one.retained)
+        self.assertIn('b.phase_active_owners = {2,1};', mixed.native_cpp_initializer())
+        for counts in ((0, 1), (1, 0), (3, 1), (1, 1), (-1, 2), (True, 2), (1,)):
+            with self.assertRaises(ValueError):
+                self.forecast(max_active_owners=2, phase_active_owners=counts)
+
     def test_all_images_retained_but_only_producer_maps(self):
         from colmap_reconstruction.fixed_cohort import ByteCharge
         one = self.forecast()
@@ -232,9 +244,10 @@ class NativeBindingTest(unittest.TestCase):
                          PhaseOptions(True, True, '0', 1, 5, 5))
                      for i, ref in enumerate(ids))
         from itertools import product
-        for active, policy, storage in product((1, 2, 3, 4), OutputPolicy, PhotoSourceStorage):
+        for active, policy, storage, phase_counts in product((1, 2, 3, 4), OutputPolicy, PhotoSourceStorage, (False, True)):
             budget = forecast_fixed_cohort(
                 images, jobs, max_active_owners=active, source_root=root, output_policy=policy, photo_source_storage=storage,
+                phase_active_owners=(active, 1) if phase_counts else (0, 0),
                 process=ByteCharge(100, 200), unknown=ByteCharge(300, 400),
                 unknown_provenance='explicit test-only allowance ' + chr(0x1f9ea),
                 headroom_reserve=ByteCharge(10, 20),
@@ -335,8 +348,11 @@ std::cout << admitted.host << " " << admitted.device;
                              (2, OutputPolicy.PHOTO_AND_GEO): '3522 13093',
                              (1, OutputPolicy.FINAL_GEO_ONLY): '2044 7487',
                              (2, OutputPolicy.FINAL_GEO_ONLY): '2566 13093' }
-                if storage == PhotoSourceStorage.PRIVATE and active <= 2:
+                if storage == PhotoSourceStorage.PRIVATE and active <= 2 and not phase_counts:
                     self.assertEqual(result.stdout, expected[active, policy])
+                if storage == PhotoSourceStorage.PRIVATE and active == 2 and phase_counts:
+                    # Two PHOTO owners dominate device demand, GEO stays at one.
+                    self.assertEqual(result.stdout, '3522 12376' if policy == OutputPolicy.PHOTO_AND_GEO else '2566 12376')
 
 
 class WorkspaceFixtureBindingTest(unittest.TestCase):
@@ -357,7 +373,7 @@ class WorkspaceFixtureBindingTest(unittest.TestCase):
         self.assertIn('MakeWorkspaceFixture', header)
         self.assertIn('b.max_active_owners = 1', header)
         self.assertIn('b.max_active_owners = 2', header)
-        self.assertIn(tool['cpp']('b3c975af62332e81e9054b2f3237d0c3990804816cb5c2815160523619d795c6'), header)
+        self.assertIn(tool['cpp']('f74e0a7b322dc8d204a7100b1aec48f0a5686383acc08456a27a2b427481b1be'), header)
         self.assertIn('b.caller_inputs = {12288ULL,0ULL}', header)
         self.assertIn('b.host_outputs = {393216ULL,0ULL}', header)
         self.assertIn('b.snapshots = {0ULL,196608ULL}', header)

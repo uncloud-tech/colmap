@@ -157,15 +157,15 @@ FixedCohortResult RunFixedCohortPhotoGeo(
     const auto& charges = geo ? budget.geo_private : budget.photo_private;
     // Retain the entire once-margined peak, even in the smaller phase. No
     // per-owner re-margin or snapshot sharing credit is issued.
-    const auto active =
-        FixedCohortActivePeak(charges, budget.max_active_owners);
+    const auto phase_count = FixedCohortPhaseActiveOwners(budget, geo);
+    const auto active = FixedCohortActivePeak(charges, phase_count);
     const ByteCharge process{reserved.host - active.host,
                              reserved.device - active.device};
     // Use the once-margined reservation itself as the ledger capacity: spare
     // external cap space cannot admit more than the declared active envelope.
     PairCoordinator coordinator(reserved,
                                 process,
-                                budget.max_active_owners,
+                                phase_count,
                                 charges,
                                 deadline.Remaining(),
                                 {},

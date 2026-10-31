@@ -142,6 +142,42 @@ class FixedCohortCommandTest(unittest.TestCase):
                     self.assertIn(f'no singleton fits: {resource} capacity', refused.stdout + refused.stderr)
         self.assertFalse(self.output.exists())
 
+    def phase_args(self, heavy_photo=False):
+        # Strongly asymmetric, ordered duplicate source lists, same producer set.
+        photo = self.workspace / 'stereo/photo.cfg'
+        geo = self.workspace / 'stereo/geo.cfg'
+        for path, repeats in ((photo, 20 if heavy_photo else 1),
+                              (geo, 1 if heavy_photo else 20)):
+            path.write_text(''.join(name + '\n' + ','.join(
+                [self.names[(i + 1) % 3]] * repeats) + '\n'
+                for i, name in enumerate(self.names)))
+        return self.args + ['--photo_config_path', str(photo),
+                            '--geo_config_path', str(geo)]
+
+    def test_phase_selection_prepare_and_refusal_before_decode(self):
+        invalid = self.invoke(self.args + ['--auto_phase_active_owners', '1'])
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn('auto_phase_active_owners requires auto_active_owners',
+                      invalid.stdout + invalid.stderr)
+        for heavy_photo in (False, True):
+            args = self.phase_args(heavy_photo)
+            manual = self.invoke(args)
+            self.assertEqual(manual.returncode, 0, manual.stdout + manual.stderr)
+            match = re.search(r'admitted host=(\d+) device=(\d+)', manual.stdout)
+            args[args.index('--device_capacity_bytes') + 1] = str(int(match.group(2)) + (1 << 20))
+            result = self.invoke(args + ['--auto_active_owners', '1',
+                                         '--auto_phase_active_owners', '1'])
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            heavy, light = ('PHOTO', 'GEO') if heavy_photo else ('GEO', 'PHOTO')
+            self.assertIn(f'{heavy} active_owners=1; limiting_reason=device capacity', result.stdout)
+            self.assertIn(f'{light} active_owners=3; limiting_reason=job count', result.stdout)
+        (self.workspace / 'images/a.pgm').unlink()
+        args[args.index('--device_capacity_bytes') + 1] = '0'
+        refused = self.invoke(args + ['--auto_active_owners', '1', '--auto_phase_active_owners', '1'])
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn('PHOTO no singleton fits: device capacity', refused.stdout + refused.stderr)
+        self.assertFalse(self.output.exists())
+
     def test_manual_higher_count_and_invalid_count(self):
         result = self.invoke(self.args + ['--active_owners', '3'])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -356,6 +392,45 @@ class FixedCohortCommandTest(unittest.TestCase):
                         actual = {path.relative_to(output): path.read_bytes()
                                   for path in output.rglob('*.bin')}
                         self.assertEqual(actual, expected)
+
+    @unittest.skipUnless(os.environ.get('COLMAP_TEST_OBSERVED_CUDA'),
+                         'explicit real CUDA execution opt-in required')
+    def test_phase_execution_unequal_counts_full_path_identity(self):
+        for heavy_photo in (False, True):
+            args = self.phase_args(heavy_photo)
+            # Same honest execution-only unknown allowance as the PR21 fixture.
+            args[args.index('--unknown_device_bytes') + 1] = str(4 << 20)
+            args[args.index('--unknown_provenance') + 1] = 'tiny 20x10 fixture: explicit 4 MiB unknown device allowance, uncalibrated'
+            args[args.index('--PatchMatchStereo.gpu_index') + 1] = os.environ.get('COLMAP_TEST_CUDA_DEVICE', '0')
+            args += ['--output_policy', 'photo_and_geo', '--PatchMatchStereo.num_iterations', '1']
+            for storage in ('private', 'shared'):
+                prepared = self.invoke(args + ['--photo_source_storage', storage])
+                self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+                match = re.search(r'admitted host=(\d+) device=(\d+)', prepared.stdout)
+                cap = int(match.group(2)) + (1 << 20)
+                args_run = args + ['--photo_source_storage', storage]
+                args_run[args_run.index('--prepare_only') + 1] = '0'
+                control_path = self.root / f'phase-control-{heavy_photo}-{storage}'
+                args_run[args_run.index('--output_path') + 1] = str(control_path)
+                control = self.invoke(args_run)
+                self.assertEqual(control.returncode, 0, control.stdout + control.stderr)
+                expected = {p.relative_to(control_path): p.read_bytes() for p in control_path.rglob('*.bin')}
+                self.assertEqual(len(expected), 12)
+                for observed in (False, True):
+                    for graphs in (0, 1):
+                        output = self.root / f'phase-{heavy_photo}-{storage}-{observed}-{graphs}'
+                        run = args_run + ['--auto_active_owners', '1', '--auto_phase_active_owners', '1',
+                                          '--PatchMatchStereo.owned_cuda_graphs', str(graphs)]
+                        if observed:
+                            run += ['--observe_capacities', '1']
+                        run[run.index('--device_capacity_bytes') + 1] = str(cap)
+                        run[run.index('--output_path') + 1] = str(output)
+                        result = self.invoke(run)
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        heavy, light = ('PHOTO', 'GEO') if heavy_photo else ('GEO', 'PHOTO')
+                        self.assertIn(f'{heavy} active_owners=1;', result.stdout)
+                        self.assertIn(f'{light} active_owners=3;', result.stdout)
+                        self.assertEqual({p.relative_to(output): p.read_bytes() for p in output.rglob('*.bin')}, expected)
 
     def test_cap_refusal(self):
         self.args[self.args.index('--host_capacity_bytes') + 1] = '1'

@@ -70,6 +70,9 @@ struct FixedCohortBudget {
   ByteCharge headroom_reserve;
   // Active private owners; logical job count is independent of this ceiling.
   size_t max_active_owners = 2;
+  // Both zero preserves uniform behavior; otherwise explicit PHOTO/GEO counts.
+  // max_active_owners is their maximum (dispatch compatibility, not a charge).
+  std::array<size_t, 2> phase_active_owners{};
   std::vector<ByteCharge> photo_private = std::vector<ByteCharge>(2);
   std::vector<ByteCharge> geo_private = std::vector<ByteCharge>(2);
 };
@@ -91,6 +94,13 @@ inline void ValidateFixedCohortJobShape(const FixedCohortBudget& budget) {
       (budget.photo_source_storage == FixedCohortPhotoSourceStorage::kShared &&
        (!budget.photo_shared.host || !budget.photo_shared.device)))
     throw std::invalid_argument("invalid fixed-cohort PHOTO source storage");
+  const auto counts = budget.phase_active_owners;
+  if ((counts[0] || counts[1]) &&
+      (!counts[0] || !counts[1] ||
+       std::max(counts[0], counts[1]) != budget.max_active_owners ||
+       counts[0] > budget.photo_private.size() ||
+       counts[1] > budget.geo_private.size()))
+    throw std::invalid_argument("invalid fixed-cohort phase owner counts");
   if (!budget.max_active_owners ||
       budget.max_active_owners >
           std::max(size_t{2}, budget.photo_private.size()) ||
@@ -98,6 +108,12 @@ inline void ValidateFixedCohortJobShape(const FixedCohortBudget& budget) {
       budget.geo_private.size() != budget.photo_private.size() ||
       budget.geo_staging_device.size() != budget.photo_private.size())
     throw std::invalid_argument("invalid fixed-cohort job bounds/cardinality");
+}
+
+inline size_t FixedCohortPhaseActiveOwners(const FixedCohortBudget& budget,
+                                           bool geo) {
+  return budget.phase_active_owners[geo] ? budget.phase_active_owners[geo]
+                                         : budget.max_active_owners;
 }
 
 // Resourcewise top active jobs, not sum(all jobs) or top jobs by one resource.
@@ -131,12 +147,14 @@ inline FixedCohortBudgetPeaks FixedCohortPeaks(
   retained = add(retained, budget.snapshots);
   retained = add(retained, budget.process);
   retained = add(retained, budget.unknown);
-  const auto photo = add(
-      add(retained, budget.photo_shared),
-      FixedCohortActivePeak(budget.photo_private, budget.max_active_owners));
+  const auto photo =
+      add(add(retained, budget.photo_shared),
+          FixedCohortActivePeak(budget.photo_private,
+                                FixedCohortPhaseActiveOwners(budget, false)));
   const auto geo =
       add(retained,
-          FixedCohortActivePeak(budget.geo_private, budget.max_active_owners));
+          FixedCohortActivePeak(budget.geo_private,
+                                FixedCohortPhaseActiveOwners(budget, true)));
   return {photo,
           geo,
           {std::max(photo.host, geo.host), std::max(photo.device, geo.device)}};
@@ -192,11 +210,16 @@ struct FixedCohortActiveSelection {
 };
 
 inline FixedCohortActiveSelection SelectFixedCohortActiveOwners(
-    FixedCohortBudget budget, ByteCharge capacity, size_t ceiling = 0) {
+    FixedCohortBudget budget,
+    ByteCharge capacity,
+    size_t ceiling = 0,
+    std::optional<bool> phase = std::nullopt) {
   // Validate every declaration independently of capacity. Never interpret a
   // malformed bound or arithmetic overflow as a smaller admissible candidate.
   const auto limit = ceiling ? std::min(ceiling, budget.photo_private.size())
                              : budget.photo_private.size();
+  // Search from declarations, not previously selected counts.
+  budget.phase_active_owners = {};
   budget.max_active_owners = limit;
   AdmitFixedCohortBudget(budget,
                          {std::numeric_limits<uint64_t>::max(),
@@ -204,7 +227,8 @@ inline FixedCohortActiveSelection SelectFixedCohortActiveOwners(
   size_t chosen = 0;
   for (size_t count = 1; count <= limit; ++count) {
     budget.max_active_owners = count;
-    const auto peak = FixedCohortPeaks(budget).peak;
+    const auto peaks = FixedCohortPeaks(budget);
+    const auto peak = phase ? (*phase ? peaks.geo : peaks.photo) : peaks.peak;
     const ByteCharge demand{
         CheckedAdd(MarginBytes(peak.host), budget.headroom_reserve.host),
         CheckedAdd(MarginBytes(peak.device), budget.headroom_reserve.device)};
@@ -215,14 +239,25 @@ inline FixedCohortActiveSelection SelectFixedCohortActiveOwners(
                                  : host         ? "host capacity"
                                                 : "device capacity";
       if (!chosen)
-        throw std::invalid_argument("fixed-cohort no singleton fits: " +
-                                    reason);
+        throw std::invalid_argument(
+            "fixed-cohort " +
+            std::string(phase ? (*phase ? "GEO " : "PHOTO ") : "") +
+            "no singleton fits: " + reason);
       return {chosen, reason};
     }
     chosen = count;
   }
   return {chosen,
           limit == budget.photo_private.size() ? "job count" : "user ceiling"};
+}
+
+inline std::array<FixedCohortActiveSelection, 2>
+SelectFixedCohortPhaseActiveOwners(FixedCohortBudget budget,
+                                   ByteCharge capacity,
+                                   size_t ceiling = 0) {
+  // Each search validates the full effective ceiling before capacity refusal.
+  return {SelectFixedCohortActiveOwners(budget, capacity, ceiling, false),
+          SelectFixedCohortActiveOwners(budget, capacity, ceiling, true)};
 }
 
 // Observed free is observational admission evidence, NOT a runtime hard cap.
@@ -274,7 +309,9 @@ inline void CheckFixedCohortPhaseHeadroom(const FixedCohortBudget& budget,
   const ByteCharge already_live{
       CheckedAdd(known_live_payload.host, process.host),
       CheckedAdd(known_live_payload.device, process.device)};
-  const auto demand = geo ? peaks.geo : peaks.peak;
+  const auto demand = geo                             ? peaks.geo
+                      : budget.phase_active_owners[0] ? peaks.photo
+                                                      : peaks.peak;
   CheckFixedCohortHeadroom(
       {MarginBytes(demand.host), MarginBytes(demand.device)},
       observed_free,
