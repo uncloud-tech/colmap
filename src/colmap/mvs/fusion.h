@@ -3,6 +3,7 @@
 #pragma once
 
 #include "colmap/mvs/fusion_mapped_mat.h"
+#include "colmap/mvs/fusion_resource.h"
 #include "colmap/mvs/mat.h"
 #include "colmap/mvs/workspace.h"
 #include "colmap/util/base_controller.h"
@@ -69,6 +70,15 @@ struct StereoFusionOptions {
   // Set by strict optimized dispatch; legacy callers remain permissive.
   bool require_complete_inputs = false;
 
+  // Optional logical host phase cap; zero preserves unbudgeted behavior.
+  // Supported only for single-thread mmap/no-cache/full-size COLMAP without
+  // external masks. Native observed FREE/cgroup capacity can only lower it.
+  // Unknown scratch/decoder/metadata/allocator/traversal are policy, not a
+  // complete physical bound. One aggregate 3% margin; reserve is outside.
+  uint64_t host_budget_bytes = 0;
+  uint64_t policy_host_bytes = 0;
+  uint64_t reserve_host_bytes = 0;
+
   // Cache size in gigabytes for fusion. The fusion keeps the bitmaps, depth
   // maps, normal maps, and consistency graphs of this number of images in
   // memory. A higher value leads to less disk access and faster fusion, while
@@ -109,6 +119,9 @@ class StereoFusion : public BaseController {
   void Fuse(int thread_id, int image_idx, int row, int col);
   bool IsPixelFused(int image_idx, int row, int col) const;
   void VerifyMappedInputs() const;
+
+  std::unique_ptr<FusionOutputLedger> output_ledger_;
+  std::atomic<bool> resource_failed_{false};
 
   const StereoFusionOptions options_;
   const std::filesystem::path workspace_path_;

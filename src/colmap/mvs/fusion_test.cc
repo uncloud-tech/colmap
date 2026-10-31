@@ -41,7 +41,9 @@ constexpr size_t kWidth = 8;
 constexpr size_t kHeight = 280;
 
 std::vector<std::string> CreateFusionWorkspace(
-    const std::filesystem::path& temp_dir, const bool default_quality = false) {
+    const std::filesystem::path& temp_dir,
+    const bool default_quality = false,
+    const bool heterogeneous = false) {
   CreateDirIfNotExists(temp_dir / "sparse");
   CreateDirIfNotExists(temp_dir / "images");
   CreateDirIfNotExists(temp_dir / "stereo");
@@ -51,8 +53,9 @@ std::vector<std::string> CreateFusionWorkspace(
   // Retain the two-view diagnostic; default quality needs five observations.
   SyntheticDatasetOptions synthetic_dataset_options;
   synthetic_dataset_options.num_rigs = 1;
-  synthetic_dataset_options.num_cameras_per_rig = 1;
-  synthetic_dataset_options.num_frames_per_rig = default_quality ? 5 : 2;
+  synthetic_dataset_options.num_cameras_per_rig = heterogeneous ? 2 : 1;
+  synthetic_dataset_options.num_frames_per_rig =
+      heterogeneous ? 1 : default_quality ? 5 : 2;
   synthetic_dataset_options.camera_width = kWidth;
   synthetic_dataset_options.camera_height = kHeight;
   if (default_quality) {
@@ -62,6 +65,10 @@ std::vector<std::string> CreateFusionWorkspace(
   }
   Reconstruction reconstruction;
   SynthesizeDataset(synthetic_dataset_options, &reconstruction);
+  if (heterogeneous) {
+    EXPECT_GE(reconstruction.NumCameras(), 2);
+    reconstruction.Camera(reconstruction.Cameras().begin()->first).Rescale(4, 4);
+  }
   if (default_quality) {
     for (const auto& [image_id, image] : reconstruction.Images()) {
       // A fronto-parallel plane at z=4 shifts by exactly one pixel between
@@ -81,11 +88,14 @@ std::vector<std::string> CreateFusionWorkspace(
   for (const auto& [image_id, image] : reconstruction.Images()) {
     image_names.push_back(image.Name());
 
-    Mat<float> depth_map(kWidth, kHeight, 1);
-    Mat<float> normal_map(kWidth, kHeight, 3);
-    Bitmap bitmap(kWidth, kHeight, true);
-    for (size_t row = 0; row < kHeight; ++row) {
-      for (size_t col = 0; col < kWidth; ++col) {
+    const auto& camera = reconstruction.Camera(image.CameraId());
+    const size_t width = camera.width;
+    const size_t height = camera.height;
+    Mat<float> depth_map(width, height, 1);
+    Mat<float> normal_map(width, height, 3);
+    Bitmap bitmap(width, height, true);
+    for (size_t row = 0; row < height; ++row) {
+      for (size_t col = 0; col < width; ++col) {
         depth_map.Set(row,
                       col,
                       0,
@@ -286,6 +296,176 @@ size_t FusionCacheBytes() {
 
 double FusionCacheGiB() {
   return static_cast<double>(FusionCacheBytes()) / (1024.0 * 1024.0 * 1024.0);
+}
+
+#if defined(__linux__)
+TEST(StereoFusion, BudgetedCliFailureDoesNotPublishOutputOrReceipt) {
+  const char* binary = std::getenv("COLMAP_BINARY");
+  if (binary == nullptr || binary[0] == '\0') GTEST_SKIP();
+  const auto dir = CreateTestDir();
+  CreateFusionWorkspace(dir);
+  const std::array<const char*, 5> caps{"1", "20765", "1073741824", "-1",
+                                       "1073741824"};
+  for (size_t i = 0; i < caps.size(); ++i) {
+    const auto output = dir / (std::to_string(i) + ".ply");
+    const auto receipt = dir / (std::to_string(i) + ".receipt");
+    const pid_t pid = fork();
+    ASSERT_NE(pid, -1);
+    if (pid == 0) {
+      execl(binary, binary, "stereo_fusion", "--workspace_path", dir.c_str(),
+            "--output_path", output.c_str(), "--optimized_only", "true",
+            "--optimized_dispatch_receipt", receipt.c_str(),
+            "--StereoFusion.num_threads", i == 2 ? "2" : "1",
+            "--StereoFusion.min_num_pixels", "1",
+            "--StereoFusion.host_budget_bytes", caps[i],
+            static_cast<char*>(nullptr));
+      _exit(127);
+    }
+    int status = 0;
+    pid_t waited;
+    do {
+      waited = waitpid(pid, &status, 0);
+    } while (waited == -1 && errno == EINTR);
+    ASSERT_EQ(waited, pid);
+    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), i < 2 ? 3 : i < 4 ? 1 : 0);
+    EXPECT_EQ(std::filesystem::exists(output), i == 4);
+    EXPECT_EQ(std::filesystem::exists(output.string() + ".vis"), i == 4);
+    EXPECT_EQ(std::filesystem::exists(receipt), i == 4);
+  }
+}
+
+TEST(StereoFusion, BudgetRefusesBeforeBitmapDecode) {
+  const auto temp_dir = CreateTestDir();
+  const auto names = CreateFusionWorkspace(temp_dir);
+  // Existing but undecodable RGB: a tiny budget must refuse before Read.
+  std::ofstream(temp_dir / "images" / names.front()) << "not a bitmap";
+  StereoFusionOptions options;
+  options.num_threads = 1;
+  options.host_budget_bytes = 1;
+  StereoFusion fusion(options, temp_dir, "COLMAP", "", "geometric");
+  EXPECT_THROW(fusion.Run(), FusionResourceError);
+  EXPECT_TRUE(fusion.GetFusedPoints().empty());
+}
+
+TEST(StereoFusion, BudgetedHeterogeneousFullResolutionInputs) {
+  const auto dir = CreateTestDir();
+  CreateFusionWorkspace(dir, false, true);
+  StereoFusionOptions options;
+  options.num_threads = 1;
+  options.min_num_pixels = options.max_num_pixels;
+  // 2240 + 16 pixels. Regardless of configured order, known peak <=11264,
+  // ceil(11264 * 1.03)=11602. A homogeneous-max-size sum would refuse.
+  options.host_budget_bytes = 11602;
+  StereoFusion fusion(options, dir, "COLMAP", "", "geometric");
+  EXPECT_NO_THROW(fusion.Run());
+  EXPECT_TRUE(fusion.GetFusedPoints().empty());
+}
+
+TEST(StereoFusion, BudgetDeduplicatesAndValidatesMapsBeforeDecode) {
+  const auto dir = CreateTestDir();
+  const auto names = CreateFusionWorkspace(dir);
+  std::ofstream cfg(dir / "stereo" / "fusion.cfg", std::ios::app);
+  cfg << names.front() << "\n" << names.back() << "\n";
+  cfg.close();
+  StereoFusionOptions options;
+  options.num_threads = 1;
+  options.min_num_pixels = options.max_num_pixels;
+  options.host_budget_bytes = 20765;  // Exact 2-image input peak, not 4 entries.
+  StereoFusion fusion(options, dir, "COLMAP", "", "geometric");
+  EXPECT_NO_THROW(fusion.Run());
+  EXPECT_TRUE(fusion.GetFusedPoints().empty());
+  // Complete malformed map plus invalid bitmap: map validation must occur
+  // before RGB decode even when admission has generous space.
+  std::ofstream(dir / "stereo" / "depth_maps" /
+                (names.front() + ".geometric.bin")) << "malformed";
+  std::ofstream(dir / "images" / names.front()) << "bad bitmap";
+  options.host_budget_bytes = uint64_t{1} << 30;
+  StereoFusion malformed(options, dir, "COLMAP", "", "geometric");
+  try {
+    malformed.Run();
+    FAIL() << "malformed map accepted";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find("mapped"), std::string::npos);
+  }
+}
+
+TEST(StereoFusion, BudgetedMergeRefusesWithoutPublishingPartialPoints) {
+  const auto dir = CreateTestDir();
+  CreateFusionWorkspace(dir);
+  StereoFusionOptions options;
+  options.num_threads = 1;
+  options.min_num_pixels = 1;
+  // Locate the exact executable boundary using the public Run interface.
+  // Above the fixed input peak, runtime-growth failures say workers drained;
+  // a later generic resource error comes from the post-join final merge.
+  uint64_t low = 20765;
+  uint64_t high = 1024 * 1024;
+  bool merge_refused = false;
+  while (low < high) {
+    options.host_budget_bytes = low + (high - low) / 2;
+    StereoFusion fusion(options, dir, "COLMAP", "", "geometric");
+    try {
+      fusion.Run();
+      high = options.host_budget_bytes;
+    } catch (const FusionResourceError& error) {
+      if (std::string(error.what()).find("workers drained") == std::string::npos) {
+        merge_refused = true;
+        EXPECT_TRUE(fusion.GetFusedPoints().empty());
+      }
+      low = options.host_budget_bytes + 1;
+    }
+  }
+  EXPECT_TRUE(merge_refused);
+}
+
+TEST(StereoFusion, BudgetedMappedOutputMatchesControlAndDrainsFailure) {
+  const auto temp_dir = CreateTestDir();
+  CreateCardinalityFusionWorkspace(temp_dir);
+  StereoFusionOptions options;
+  options.num_threads = 1;
+  options.min_num_pixels = 1;
+  StereoFusion control(options, temp_dir, "COLMAP", "", "geometric");
+  control.Run();
+  options.host_budget_bytes = uint64_t{1} << 30;
+  StereoFusion budgeted(options, temp_dir, "COLMAP", "", "geometric");
+  budgeted.Run();
+  WriteBinaryPlyPoints(temp_dir / "control.ply", control.GetFusedPoints());
+  WriteBinaryPlyPoints(temp_dir / "budgeted.ply", budgeted.GetFusedPoints());
+  auto read_bytes = [](const std::filesystem::path& path) {
+    std::ifstream stream(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(stream), {});
+  };
+  EXPECT_EQ(read_bytes(temp_dir / "control.ply"),
+            read_bytes(temp_dir / "budgeted.ply"));
+  EXPECT_EQ(control.GetFusedPointsVisibility(),
+            budgeted.GetFusedPointsVisibility());
+  // Input peak is 9 * 2240 = 20160; ceil(20160 * 1.03)=20765.
+  // At this exact input boundary there is insufficient output growth space.
+  const auto failure_dir = CreateTestDir();
+  CreateFusionWorkspace(failure_dir);
+  options.host_budget_bytes = 20765;
+  StereoFusion exhausted(options, failure_dir, "COLMAP", "", "geometric");
+  EXPECT_THROW(exhausted.Run(), FusionResourceError);
+  EXPECT_TRUE(exhausted.GetFusedPoints().empty());
+  // Return only occurs after queued tasks drain; inputs can be removed now.
+  std::filesystem::remove_all(failure_dir / "stereo" / "depth_maps");
+}
+#endif
+
+TEST(StereoFusion, BudgetRejectsUnsupportedModes) {
+  StereoFusionOptions options;
+  options.host_budget_bytes = 1000000;
+  options.num_threads = 1;
+  EXPECT_TRUE(options.Check());
+  options.num_threads = 2;
+  EXPECT_FALSE(options.Check());
+  options.num_threads = 1;
+  options.mask_path = "external-masks";
+  EXPECT_FALSE(options.Check());
+  options.mask_path.clear();
+  options.use_mmap = false;
+  EXPECT_FALSE(options.Check());
 }
 
 TEST(StereoFusion, Integration) {
