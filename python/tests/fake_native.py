@@ -19,7 +19,7 @@ if os.environ.get('FAKE_CALLS'):
         stream.write(json.dumps([command, args]) + '\n')
 models = json.loads(os.environ.get('FAKE_SPARSE_MODELS', '{"0":{"num_registered_images":2,"num_points3D":4}}'))
 identity = dict(schema_version=1, cuda_compiled=True, source_commit='a' * 40,
-                allocation_fingerprint='b' * 64,
+                allocation_fingerprint=os.environ.get('FAKE_ALLOCATION_FP', '779e24575750cdf9c40b19cf8d71084de8ccf813de20f4002a1440ee79edd76d'),
                 available_host_bytes=str(16 * 1024**3),
                 available_device_bytes='0' if os.environ.get('FAKE_BAD_FREE') else str(8 * 1024**3))
 
@@ -70,6 +70,9 @@ elif command == 'image_undistorter':
 elif command == 'optimized_dense_plan':
     write(args['--output_path'], graph(Path(args['--workspace_path'])))
 elif command == 'experimental_fixed_cohort':
+    if os.environ.get('FAKE_NOFIT'):
+        print('no feasible singleton within observed capacity', file=sys.stderr)
+        raise SystemExit(2)
     assert args['--resolve_workspace_plan'] == '1'
     assert args['--auto_active_owners'] == args['--auto_phase_active_owners'] == '1'
     assert args['--observe_capacities'] == '1'
@@ -89,7 +92,7 @@ elif command == 'experimental_fixed_cohort':
     if os.environ.get('FAKE_BAD_ORDER'):
         phases['geo'][1]['sources'] = [0]  # Silent deduplication is NOT parity.
     write(args['--report_path'], dict(status='completed', effective_backend='experimental_fixed_cohort',
-          allocation_fingerprint=('c' if os.environ.get('FAKE_BAD_FP') else 'b') * 64,
+          allocation_fingerprint='c' * 64 if os.environ.get('FAKE_BAD_FP') else identity['allocation_fingerprint'],
           effective_storage='private', photo_active_owners=2, geo_active_owners=2, phases=phases))
 elif command == 'stereo_fusion':
     assert args['--optimized_only'] == 'true'

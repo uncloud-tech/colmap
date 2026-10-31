@@ -6,16 +6,16 @@ runtime libraries available. This is not a standalone static binary. No
 pycolmap, source checkout, external Python package or separate resource calculator
 is needed. The launcher uses isolated Python and prefix-relative modules.
 
-Example (all byte values below are **user-supplied placeholders**, not calibration):
+Supported experimental invocation (no internal byte declarations required):
 
 ```sh
-colmap-reconstruct --experimental-local --photos /data/photos --workspace /data/new-run \
-  --loader-scratch-host-bytes "$DECODE_SCRATCH" \
-  --process-host-bytes "$PROCESS_HOST" --process-device-bytes "$PROCESS_DEVICE" \
-  --unknown-host-bytes "$UNKNOWN_HOST" --unknown-device-bytes "$UNKNOWN_DEVICE" \
-  --unknown-provenance 'my explicit uncalibrated allowance basis' \
-  --reserve-host-bytes "$HOST_RESERVE" --reserve-device-bytes "$DEVICE_RESERVE"
+colmap-reconstruct --experimental-local --photos /data/photos --workspace /data/new-run
 ```
+
+This selects `experimental-stereo-v1` conservative allowances for its supported
+native allocation binding. This is **not** whole-pipeline physical-fit or
+arbitrary-scene qualification. Unsupported/stale bindings explain the refusal;
+install a supported native build, or supply all expert allowances explicitly.
 
 Choose a **fresh** workspace under a directory you own. Existing paths (including
 symlinks) refuse. Originals are not modified. `--timeout-seconds` covers the entire
@@ -54,9 +54,42 @@ capacities, optionally lowered by `--host-budget-bytes` / `--device-budget-bytes
 Automatic independent PHOTO/GEO owner counts and private/shared PHOTO storage use
 the **current canonical native fixed-cohort inventory** and one aggregate 3%
 margin. `--active-owners-ceiling` optionally bounds counts (0 means job count).
-Process, unknown overhead, decoder scratch and reserves remain explicit inputs;
-no free-minus-known filler or invented calibration is used. Counts are
-memory-admissible limits, **not measured overlap or fastest settings**.
+Input dimensions, effective source lists/options and PRNG layout feed the native
+inventory; actual observed capacities feed admission. No second Python allocation
+formula, free-minus-known filler or invented pixel coefficient is used. Counts
+are memory-admissible limits, **not measured overlap or fastest settings**.
+
+### Versioned resource policy and expert overrides
+
+`experimental-stereo-v1` supplies the following RAW **conservative policy**
+allowances, reproducing one bounded successful nine-photo configuration (explicit
+12 GiB host/device caps and 1600-pixel dense resize, not full-resolution or
+arbitrary raw-camera qualification):
+
+| Term | Default |
+| --- | --- |
+| Loader scratch (host) | 512 MiB |
+| Process (host / device) | 512 MiB / 512 MiB |
+| Unknown additional overhead (host / device) | 1 GiB / 1 GiB |
+| Headroom reserve (host / device) | 512 MiB / 512 MiB |
+
+These values were declarations in that execution, **not measured usage or
+calibrated bounds**. A new scene or device is not guaranteed to fit. They do not
+scale from hardware size or pretend to forecast SfM/fusion. Native input-derived
+allocations are predictions; FREE capacity is an observation (racy, not reserved);
+these allowances are policy. Already-live usage is already excluded from FREE
+and is **not subtracted again**. Process/unknown allowances cover additional
+future overhead conservatively; they do not represent current live usage.
+Native admission alone applies the single aggregate 3% margin.
+
+Each `--loader-scratch-host-bytes`, `--process-{host,device}-bytes`,
+`--unknown-{host,device}-bytes`, and `--reserve-{host,device}-bytes` remains an
+optional expert override. Partial overrides preserve defaults for absent terms.
+Explicit unknown overrides require nonblank `--unknown-provenance`; both unknown
+sides cannot be zero. Explicit zero is not treated as absence. Supplying all
+seven allowances preserves the legacy expert path without claiming default-policy
+qualification for another binding. Budgets can only lower observed FREE, never
+raise it; they are not additional reserves or proof of physical fit.
 
 These are unqualified logical dense estimates, **not hard RSS/VRAM caps**.
 SfM/decoding/fusion physical memory models remain unavailable. Before heavy
@@ -71,7 +104,13 @@ always refuses before creating outputs. External OS limits remain the user's
 responsibility where required.
 
 `planning/build.json` records the executable SHA and generated same-build
-fingerprints. `planning/dense-plan.json` records planned inputs/options;
+fingerprints. `planning/intent.json` preserves requested overrides (null means default).
+`planning/resource-policy.json` and `result.json.resource_policy` record the
+selected policy/version/allocation binding, every raw term's default/user origin
+and provenance, and UNKNOWN whole-pipeline physical fit. The selected policy is
+also printed before execution. `planning/resources-*.json` preserves native FREE
+observations and effective lower-only capacities, including reserve refusals.
+`planning/dense-plan.json` records planned inputs/options;
 `planning/cohort.json` reports actual completed native backend, storage, owner
 limits and exact per-reference effective options/source order. The frontend
 compares these, validates complete finite map payloads, publishes without clobber,

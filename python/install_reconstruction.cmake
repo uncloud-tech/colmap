@@ -14,6 +14,7 @@ install(FILES
     "${PROJECT_SOURCE_DIR}/python/colmap_reconstruction/__init__.py"
     "${PROJECT_SOURCE_DIR}/python/colmap_reconstruction/cli.py"
     "${PROJECT_SOURCE_DIR}/python/colmap_reconstruction/process.py"
+    "${PROJECT_SOURCE_DIR}/python/colmap_reconstruction/resource_policy.py"
     DESTINATION "${_reconstruction_python}/colmap_reconstruction")
 install(FILES "${PROJECT_SOURCE_DIR}/python/colmap_reconstruction/NOTICE"
     "${PROJECT_SOURCE_DIR}/LICENSE"
