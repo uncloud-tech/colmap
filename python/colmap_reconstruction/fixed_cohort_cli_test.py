@@ -97,7 +97,7 @@ class FixedCohortCommandTest(unittest.TestCase):
         planned = subprocess.run([
             os.environ['COLMAP_TEST_EXECUTABLE'], 'optimized_dense_plan',
             '--workspace_path', str(self.workspace), '--output_path', str(plan_path),
-            '--source_cap', '3', '--num_samples', '15', '--gpu_index', device,
+            '--source_cap', '8', '--num_samples', '15', '--gpu_index', device,
             '--owned_tex_lookahead', 'false'],
             capture_output=True, text=True, timeout=40)
         self.assertEqual(planned.returncode, 0, planned.stdout + planned.stderr)
