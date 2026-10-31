@@ -83,6 +83,9 @@ TEST(COLMAPUndistorter, BudgetedWorkersPreserveNativeBytes) {
   camera_options.max_image_size = 20;
   COLMAPUndistorter::Options options;
   options.num_threads = 4;
+  CreateDirIfNotExists(dir / "control");
+  CreateDirIfNotExists(dir / "bounded");
+  CreateDirIfNotExists(dir / "serial");
   COLMAPUndistorter control(options, camera_options, reconstruction,
                             dir / "inputs", dir / "control");
   control.Run();
@@ -148,6 +151,8 @@ TEST(COLMAPUndistorter, BudgetedPerspectiveModelsSphericalAndCopyThrough) {
     COLMAPUndistorter::Options options;
     options.num_threads = 2;
     const auto label = std::to_string(static_cast<int>(model));
+    CreateDirIfNotExists(dir / (label + "control"));
+    CreateDirIfNotExists(dir / (label + "bounded"));
     COLMAPUndistorter control(options, camera_options, reconstruction,
                               dir / "inputs", dir / (label + "control"));
     control.Run();
@@ -164,6 +169,7 @@ TEST(COLMAPUndistorter, BudgetedPerspectiveModelsSphericalAndCopyThrough) {
     if (model == CameraModelId::kPinhole || model == CameraModelId::kEquirectangular) {
       camera_options.max_image_size = -1;
       options.host_budget_bytes = 1;  // No native pixel vector on copy-through.
+      CreateDirIfNotExists(dir / (label + "copy"));
       COLMAPUndistorter copied(options, camera_options, reconstruction,
                                dir / "inputs", dir / (label + "copy"));
       copied.Run();
@@ -203,6 +209,7 @@ TEST(COLMAPUndistorter, BudgetedHeterogeneousDimensions) {
   COLMAPUndistorter::Options options;
   options.host_budget_bytes = 150000;
   options.num_threads = 4;
+  CreateDirIfNotExists(dir / "bounded");
   COLMAPUndistorter bounded(options, camera_options, reconstruction,
                             dir / "inputs", dir / "bounded");
   bounded.Run();
@@ -224,6 +231,7 @@ TEST(COLMAPUndistorter, BudgetedWorkerHeaderExceptionDrains) {
   COLMAPUndistorter::Options options;
   options.num_threads = 4;
   options.host_budget_bytes = uint64_t{1} << 30;
+  CreateDirIfNotExists(dir / "output");
   COLMAPUndistorter undistorter(options, camera_options, reconstruction,
                                 dir / "inputs", dir / "output");
   bool replaced = false;
@@ -263,6 +271,7 @@ TEST(COLMAPUndistorter, BudgetedFailureAndCancellationDrainWithoutCompletion) {
   EXPECT_THROW(failed.Run(), std::runtime_error);
   EXPECT_FALSE(ExistsFile(dir / "failed/stereo/fusion.cfg"));
   EXPECT_FALSE(ExistsFile(dir / "failed/sparse/cameras.bin"));
+  CreateDirIfNotExists(dir / "cancelled");
   COLMAPUndistorter cancelled(options, camera_options, reconstruction,
                               dir / "inputs", dir / "cancelled");
   int checks = 0;

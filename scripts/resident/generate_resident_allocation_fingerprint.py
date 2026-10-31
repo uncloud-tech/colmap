@@ -263,6 +263,8 @@ CLOSURE = (
     "src/colmap/util/cancellation.h",
     "src/colmap/util/cancellation.cc",
     "src/colmap/exe/image.cc",
+    # Main owns the signal state used to cancel and drain admitted workers.
+    "src/colmap/exe/colmap.cc",
     "scripts/resident/generate_resident_allocation_fingerprint.py",
 )
 

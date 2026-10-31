@@ -598,7 +598,8 @@ int RunImageUndistorter(int argc, char** argv) {
   }
 
   if (undistorter_options.host_budget_bytes) {
-    ScopedSignalHandler signal_handler;
+    // main owns the process signal handler and translates the received signal
+    // into an exit code after this command has drained its workers.
     undistorter->SetCheckIfStoppedFunc(
         [] { return ScopedSignalHandler::IsInterruptRequested(); });
     try {
@@ -607,7 +608,7 @@ int RunImageUndistorter(int argc, char** argv) {
       LOG(ERROR) << "Budgeted undistortion failed; workers drained: " << error.what();
       return EXIT_FAILURE;
     }
-    return signal_handler.ReceivedSignal() ? signal_handler.GetExitCode() : EXIT_SUCCESS;
+    return EXIT_SUCCESS;
   }
   undistorter->Run();
 

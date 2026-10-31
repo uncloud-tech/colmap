@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -112,6 +113,53 @@ TEST(UndistortCamera, Nominal) {
   EXPECT_EQ(undistorted_camera.height, 60);
   EXPECT_EQ(undistorted_camera.PrincipalPointX(), 40);
   EXPECT_EQ(undistorted_camera.PrincipalPointY(), 30);
+}
+
+TEST(UndistortCamera, SinglePixelRadialPreservesLegacyMinimum) {
+  // Both borders meet the principal point. The scale interpolation contains
+  // 0/0 (and infinity * zero), but the legacy dimension floor yields one pixel.
+  const Camera camera =
+      Camera::CreateFromModelId(1, CameraModelId::kSimpleRadial, 1, 1, 1);
+  for (const double blank_pixels : {0.0, 0.5, 1.0}) {
+    UndistortCameraOptions options;
+    options.blank_pixels = blank_pixels;
+    const Camera undistorted = UndistortCamera(options, camera);
+    EXPECT_EQ(undistorted.ModelName(), "PINHOLE");
+    EXPECT_EQ(undistorted.width, 1);
+    EXPECT_EQ(undistorted.height, 1);
+    EXPECT_EQ(undistorted.FocalLengthX(), 1);
+    EXPECT_EQ(undistorted.FocalLengthY(), 1);
+    EXPECT_EQ(undistorted.PrincipalPointX(), 0.5);
+    EXPECT_EQ(undistorted.PrincipalPointY(), 0.5);
+  }
+}
+
+TEST(UndistortCamera, RejectsNonfiniteCameraParameters) {
+  // Do not mistake malformed input for the valid one-pixel scale degeneracy.
+  for (const auto model :
+       {CameraModelId::kSimplePinhole, CameraModelId::kSimpleRadial}) {
+    const Camera camera = Camera::CreateFromModelId(1, model, 1, 1, 1);
+    for (size_t i = 0; i < camera.params.size(); ++i) {
+      for (const double value : {std::numeric_limits<double>::quiet_NaN(),
+                                 std::numeric_limits<double>::infinity()}) {
+        Camera malformed = camera;
+        malformed.params[i] = value;
+        EXPECT_ANY_THROW(UndistortCamera(UndistortCameraOptions(), malformed))
+            << "parameter " << i << " of " << camera.ModelName();
+      }
+    }
+  }
+}
+
+TEST(UndistortCamera, RejectsUnsafeDimensionCastOperands) {
+  const Camera camera =
+      Camera::CreateFromModelId(1, CameraModelId::kSimpleRadial, 16, 12, 16);
+  for (const double scale : {1e20, std::numeric_limits<double>::infinity()}) {
+    UndistortCameraOptions options;
+    options.min_scale = scale;
+    options.max_scale = scale;
+    EXPECT_ANY_THROW(UndistortCamera(options, camera));
+  }
 }
 
 TEST(UndistortCamera, MaxCamPointNorm) {

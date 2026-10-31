@@ -6,6 +6,7 @@
 #include "colmap/scene/reconstruction.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/sensor/bitmap.h"
+#include "colmap/util/cancellation.h"
 #include "colmap/util/file.h"
 #include "colmap/util/testing.h"
 
@@ -344,6 +345,38 @@ TEST_F(UndistortionPreview, BudgetedCliRefusesMalformedBytesAndUnsupportedModes)
     EXPECT_EQ(ImageTreeSnapshot(root), before);
   }
 }
+
+#if defined(__linux__) && defined(COLMAP_MVS_ENABLED)
+TEST_F(UndistortionPreview, BudgetedExecutionUsesOuterSignalOwner) {
+  reconstruction.CreateImageDirs(photos);
+  Bitmap bitmap(16, 12, true);
+  bitmap.Fill(BitmapColor<uint8_t>(20, 40, 60));
+  for (const auto& [id, image] : reconstruction.Images()) {
+    ASSERT_TRUE(bitmap.Write(photos / image.Name()));
+  }
+  auto args = Args();
+  args[5] = (root / "budgeted").string();
+  args.insert(args.end(),
+              {"--host_budget_bytes",
+               "268435456",
+               "--num_threads",
+               "1",
+               "--max_image_size",
+               "9"});
+  // Match main's ownership. A nested command-local handler must not reset or
+  // replace the owner's state, on either success or cooperative cancellation.
+  ScopedSignalHandler signal_handler;
+  ASSERT_EQ(Undistort(args), EXIT_SUCCESS);
+  EXPECT_TRUE(ExistsFile(root / "budgeted/stereo/fusion.cfg"));
+  args[5] = (root / "cancelled").string();
+  std::raise(SIGINT);
+  EXPECT_EQ(Undistort(args), EXIT_FAILURE);
+  EXPECT_EQ(signal_handler.ReceivedSignal(), SIGINT);
+  EXPECT_EQ(signal_handler.GetExitCode(), 128 + SIGINT);
+  EXPECT_FALSE(ExistsFile(root / "cancelled/stereo/fusion.cfg"));
+  EXPECT_FALSE(ExistsFile(root / "cancelled/sparse/cameras.bin"));
+}
+#endif
 
 TEST(ImageRegistrator, Nominal) {
   const auto test_path = CreateTestDir();

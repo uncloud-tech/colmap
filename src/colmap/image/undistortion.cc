@@ -51,6 +51,9 @@ Camera UndistortCamera(const UndistortCameraOptions& options,
   // pinhole image plane and cannot be undistorted; callers skip them, but guard
   // here too rather than dereferencing the (empty) focal-length parameters.
   THROW_CHECK(camera.IsPerspective());
+  THROW_CHECK(std::all_of(camera.params.begin(),
+                          camera.params.end(),
+                          [](double value) { return std::isfinite(value); }));
 
   Camera undistorted_camera;
   undistorted_camera.model_id = PinholeCameraModel::model_id;
@@ -214,22 +217,24 @@ Camera UndistortCamera(const UndistortCameraOptions& options,
     scale_x = std::clamp(scale_x, options.min_scale, options.max_scale);
     scale_y = std::clamp(scale_y, options.min_scale, options.max_scale);
 
-    // Reject malformed/nonfinite geometry before converting to size_t. This
-    // does not change valid warp/resize arithmetic or the rounding convention.
-    THROW_CHECK(std::isfinite(scale_x));
-    THROW_CHECK(std::isfinite(scale_y));
-    THROW_CHECK_LT(scale_x * undistorted_camera.width,
+    // Reject malformed/nonfinite geometry before converting to size_t, but
+    // check the actual cast operands AFTER the legacy minimum-dimension floor.
+    // Valid one-pixel cameras can produce NaN scales from degenerate borders;
+    // std::max(1.0, NaN) has always kept their dimensions at one pixel.
+    const double width = std::max(1.0, scale_x * undistorted_camera.width);
+    const double height = std::max(1.0, scale_y * undistorted_camera.height);
+    THROW_CHECK(std::isfinite(width));
+    THROW_CHECK(std::isfinite(height));
+    THROW_CHECK_LT(width,
                    static_cast<double>(std::numeric_limits<size_t>::max()));
-    THROW_CHECK_LT(scale_y * undistorted_camera.height,
+    THROW_CHECK_LT(height,
                    static_cast<double>(std::numeric_limits<size_t>::max()));
 
     // Scale undistorted camera dimensions.
     const size_t orig_undistorted_camera_width = undistorted_camera.width;
     const size_t orig_undistorted_camera_height = undistorted_camera.height;
-    undistorted_camera.width =
-        static_cast<size_t>(std::max(1.0, scale_x * undistorted_camera.width));
-    undistorted_camera.height =
-        static_cast<size_t>(std::max(1.0, scale_y * undistorted_camera.height));
+    undistorted_camera.width = static_cast<size_t>(width);
+    undistorted_camera.height = static_cast<size_t>(height);
 
     // Scale the principal point according to the new dimensions of the camera.
     undistorted_camera.SetPrincipalPointX(

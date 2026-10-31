@@ -29,4 +29,11 @@ if(TESTS_ENABLED AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
             "PYTHONPATH=${PROJECT_SOURCE_DIR}/python:${PROJECT_SOURCE_DIR}/python/tests"
             "${Python3_EXECUTABLE}" -m unittest
             colmap_reconstruction.reconstruction_test test_reconstruction)
+    if(MVS_ENABLED)
+        add_test(NAME reconstruction/undistortion_cli_test
+            COMMAND "${CMAKE_COMMAND}" -E env
+                "COLMAP_TEST_EXECUTABLE=$<TARGET_FILE:colmap_main>"
+                "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/python/tests/test_undistortion_cli.py")
+    endif()
 endif()
