@@ -10,6 +10,7 @@
 #include "colmap/mvs/owned_fixed_cohort_workspace.h"
 #include "colmap/mvs/owned_tile.h"
 #include "colmap/mvs/patch_match.h"
+#include "colmap/mvs/workspace.h"
 #include "colmap/util/file.h"
 #include "colmap/util/misc.h"
 #include "colmap/util/string.h"
