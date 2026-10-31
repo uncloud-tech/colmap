@@ -56,7 +56,7 @@ def select_policy(args, identity):
         if not supplied:
             value = default
         terms[name] = dict(bytes=value, origin='user' if supplied else 'default',
-                           classification='conservative-policy',
+                           classification='expert-override' if supplied else 'conservative-policy',
                            provenance=(args.unknown_provenance if supplied and name.startswith('unknown_')
                                        else 'explicit expert override' if supplied else BASIS))
         setattr(args, name, value)

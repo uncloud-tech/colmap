@@ -114,6 +114,9 @@ class ReconstructionTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             policy = json.loads((workspace / 'result.json').read_text())['resource_policy']
             self.assertEqual(policy['terms']['process_host_bytes']['origin'], 'user')
+            self.assertEqual(policy['terms']['process_host_bytes']['classification'], 'expert-override')
+            self.assertEqual(policy['terms']['loader_scratch_host_bytes']['classification'], 'expert-override')
+            self.assertEqual(policy['terms']['process_device_bytes']['classification'], 'conservative-policy')
             self.assertEqual(policy['terms']['process_host_bytes']['bytes'], 123)
             self.assertEqual(policy['terms']['process_device_bytes']['origin'], 'default')
             self.assertEqual(policy['terms']['loader_scratch_host_bytes']['origin'], 'user')
@@ -250,6 +253,8 @@ class ReconstructionTest(unittest.TestCase):
                             self.assertEqual(policy['selection'], 'expert')
                             self.assertEqual(policy['allocation_fingerprint'], 'c' * 64)
                             self.assertTrue(all(t['origin'] == 'user' for t in policy['terms'].values()))
+                            self.assertTrue(all(t['classification'] == 'expert-override'
+                                                for t in policy['terms'].values()))
                         else:
                             self.assertEqual(policy['terms']['unknown_host_bytes']['provenance'], 'my basis')
                             self.assertEqual(policy['terms']['unknown_host_bytes']['bytes'], 123)
