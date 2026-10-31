@@ -251,13 +251,18 @@ class Reconstruction:
         self.registered_images = counts['num_registered_images']
         write_json(self.assets / 'sparse-model.json', dict(name=selected, policy=policy, counts=counts))
         phase_capacity = self.resources()['host']
+        previous_host_budget = self.process.host_budget_bytes
         self.process.host_budget_bytes = phase_capacity
-        self.native('image_undistorter', '--image_path', a.photos, '--input_path', sparse / selected,
-            '--output_path', self.dense, '--max_image_size', a.max_image_size,
-            '--num_patch_match_src_images', a.source_cap, '--num_threads', a.threads,
-            '--host_budget_bytes', phase_capacity,
-            '--policy_host_bytes', a.loader_scratch_host_bytes + a.process_host_bytes + a.unknown_host_bytes,
-            '--reserve_host_bytes', a.reserve_host_bytes)
+        try:
+            self.native('image_undistorter', '--image_path', a.photos, '--input_path', sparse / selected,
+                '--output_path', self.dense, '--max_image_size', a.max_image_size,
+                '--num_patch_match_src_images', a.source_cap, '--num_threads', a.threads,
+                '--host_budget_bytes', phase_capacity,
+                '--policy_host_bytes', a.loader_scratch_host_bytes + a.process_host_bytes + a.unknown_host_bytes,
+                '--reserve_host_bytes', a.reserve_host_bytes)
+        finally:
+            # This FREE snapshot belongs only to the undistortion phase.
+            self.process.host_budget_bytes = previous_host_budget
 
     def plan(self):
         a = self.args

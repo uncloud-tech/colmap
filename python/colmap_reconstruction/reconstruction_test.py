@@ -7,6 +7,62 @@ import unittest
 
 
 class FrontendTest(unittest.TestCase):
+    def test_undistortion_budget_is_scoped_on_success_and_native_failure(self):
+        import json
+        from unittest.mock import patch
+        from colmap_reconstruction.cli import Reconstruction, parse_args
+        from colmap_reconstruction.process import NativeFailure
+
+        for cap in (None, 3000):
+            for fails in (False, True):
+                with self.subTest(cap=cap, fails=fails), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    argv = ['--photos', str(root), '--workspace', str(root)]
+                    if cap is not None:
+                        argv += ['--host-budget-bytes', str(cap)]
+                    for name in ('loader-scratch-host', 'process-host', 'unknown-host',
+                                 'reserve-host', 'reserve-device'):
+                        argv += ['--' + name + '-bytes', '0']
+                    reconstruction = Reconstruction(parse_args(argv), sys.executable)
+                    reconstruction.assets.mkdir()
+                    reconstruction.identity = {'allocation_fingerprint': 'test-only'}
+                    observed_free = 1000
+                    failure = NativeFailure('undistortion failed')
+                    calls = []
+
+                    def native(command, *arguments, capture=False):
+                        reconstruction.process.sequence += 1
+                        calls.append(command)
+                        if command == 'reconstruction_info':
+                            return json.dumps(dict(allocation_fingerprint='test-only',
+                                available_host_bytes=observed_free, available_device_bytes=1000))
+                        if command == 'mapper':
+                            (root / 'sparse/0').mkdir()
+                        if command == 'model_analyzer':
+                            return json.dumps(dict(num_registered_images=2, num_points3D=1))
+                        if command == 'image_undistorter':
+                            self.assertEqual(reconstruction.process.host_budget_bytes, 1000)
+                            self.assertEqual(arguments[arguments.index('--host_budget_bytes') + 1], 1000)
+                            if fails:
+                                raise failure
+                        else:
+                            self.assertEqual(reconstruction.process.host_budget_bytes, cap)
+
+                    with patch.object(reconstruction, 'native', side_effect=native):
+                        if fails:
+                            with self.assertRaises(NativeFailure) as raised:
+                                reconstruction.prepare()
+                            self.assertIs(raised.exception, failure)
+                        else:
+                            reconstruction.prepare()
+                        self.assertIn('image_undistorter', calls)
+                        self.assertEqual(reconstruction.process.host_budget_bytes, cap)
+                        # A later observation/launch must not inherit the earlier
+                        # 1000-byte FREE snapshot as its RSS-monitor ceiling.
+                        observed_free = 2000
+                        self.assertEqual(reconstruction.resources()['host'], 2000)
+                        reconstruction.native('optimized_dense_plan')
+
     def test_dense_launch_uses_canonical_adaptive_backend_and_explicit_allowances(self):
         from colmap_reconstruction.cli import Reconstruction, parse_args
         with tempfile.TemporaryDirectory() as directory:
