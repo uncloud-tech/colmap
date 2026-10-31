@@ -80,6 +80,9 @@ class FixedCohortCommandTest(unittest.TestCase):
         (self.workspace / 'sparse/points3D.txt').write_text(
             '1 0 0 5 128 128 128 0 1 0 2 0 3 0\n'
             '2 0 0 7 128 128 128 0 1 1 2 1 3 1\n')
+        # optimized_dense_plan requires native automatic-source configuration.
+        # Explicit duplicate-source fixtures remain covered by the other cases.
+        self.config.write_text(''.join(name + '\n__auto__, 8\n' for name in self.names))
         args = list(self.args)
         for key in ('depth_min', 'depth_max', 'sigma_spatial'):
             args[args.index('--PatchMatchStereo.' + key) + 1] = '-1'
@@ -91,8 +94,8 @@ class FixedCohortCommandTest(unittest.TestCase):
         self.assertFalse(self.output.exists())
 
         # The native CPU plan is an independent typed oracle, not a fabricated
-        # execution receipt. Its source vectors reflect native deduplication
-        # and hash iteration of the ordered, duplicate-containing input config.
+        # execution receipt. Both consumers resolve the same automatic-source
+        # configuration; compare their effective vectors without sorting.
         plan_path = self.root / 'plan.json'
         planned = subprocess.run([
             os.environ['COLMAP_TEST_EXECUTABLE'], 'optimized_dense_plan',
