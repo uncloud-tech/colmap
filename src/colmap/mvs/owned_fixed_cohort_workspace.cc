@@ -175,6 +175,12 @@ PreparedFixedCohortWorkspace PrepareFixedCohortWorkspace(
 }
 
 #if !defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
+FixedCohortCapacityObservation ObserveFixedCohortCapacities(int) {
+  throw std::runtime_error(
+      "fixed-cohort capacity observation requires native CUDA; unsupported "
+      "build, no manual fallback");
+}
+
 FixedCohortResult PreparedFixedCohortWorkspace::Run(
     const std::atomic<bool>*) const {
   throw std::runtime_error(

@@ -9,9 +9,20 @@
 #include <array>
 #include <functional>
 #include <limits>
+#include <optional>
 #include <vector>
 
 namespace colmap::mvs::owned {
+
+// Incremental free-memory ceiling: caps only lower observations. No margin,
+// total-memory substitution or inferred already-live process/context credit.
+inline ByteCharge LimitFixedCohortAvailable(
+    ByteCharge available,
+    std::optional<uint64_t> host_cap = std::nullopt,
+    std::optional<uint64_t> device_cap = std::nullopt) {
+  return {host_cap ? std::min(available.host, *host_cap) : available.host,
+          device_cap ? std::min(available.device, *device_cap) : available.device};
+}
 
 enum class FixedCohortOutputPolicy { kPhotoAndGeo, kFinalGeoOnly };
 // Explicit opt-in: global padding may cost more than private packing.

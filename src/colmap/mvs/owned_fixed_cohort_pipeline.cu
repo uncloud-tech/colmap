@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <iomanip>
 #include <iterator>
 #include <limits>
 #include <set>
@@ -25,14 +26,41 @@ void Require(bool valid, const char* message) {
 }
 
 ByteCharge ObserveAvailable(int device) {
-  const auto host = ObserveFixedCohortHostAvailable();
-  CUDA_SAFE_CALL(cudaSetDevice(device));
-  size_t free = 0, total = 0;
-  CUDA_SAFE_CALL(cudaMemGetInfo(&free, &total));
-  return {host, free};
+  return ObserveFixedCohortCapacities(device).available;
 }
 
 }  // namespace
+
+FixedCohortCapacityObservation ObserveFixedCohortCapacities(int device) {
+  FixedCohortCapacityObservation result;
+  const auto query = [](cudaError_t status) {
+    if (status != cudaSuccess)
+      throw std::runtime_error(
+          std::string("fixed-cohort CUDA capacity query failed: ") +
+          cudaGetErrorString(status));
+  };
+  query(cudaSetDevice(device));
+  cudaDeviceProp properties{};
+  query(cudaGetDeviceProperties(&properties, device));
+  size_t free = 0, total = 0;
+  query(cudaMemGetInfo(&free, &total));
+  Require(free <= total && total > 0,
+          "fixed-cohort CUDA capacity query returned invalid memory sizes");
+  // Observe host after any CUDA context initialization, so newly-live context
+  // storage is not mistaken for still-free host memory either.
+  result.available.host = ObserveFixedCohortHostAvailable();
+  result.available.device = free;
+  result.device_total = total;
+  result.device = device;
+  result.device_name = properties.name;
+  std::ostringstream uuid;
+  uuid << std::hex << std::setfill('0');
+  for (const auto byte : properties.uuid.bytes)
+    uuid << std::setw(2)
+         << static_cast<unsigned int>(static_cast<unsigned char>(byte));
+  result.device_uuid = uuid.str();
+  return result;
+}
 
 FixedCohortResult PreparedFixedCohortWorkspace::Run(
     const std::atomic<bool>* cancel) const {

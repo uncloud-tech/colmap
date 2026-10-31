@@ -19,10 +19,10 @@ void Require(bool valid, const char* message) {
 }  // namespace
 
 // Shared native Linux/cgroup-v2 observation, not a resource library/hard cap.
-uint64_t ObserveFixedCohortHostAvailable() {
+uint64_t ObserveFixedCohortHostAvailable(const std::filesystem::path& proc_root) {
 #if defined(__linux__)
   uint64_t available = 0;
-  std::ifstream meminfo("/proc/meminfo");
+  std::ifstream meminfo(proc_root / "meminfo");
   std::string line;
   while (std::getline(meminfo, line)) {
     std::istringstream fields(line);
@@ -35,7 +35,7 @@ uint64_t ObserveFixedCohortHostAvailable() {
     }
   }
   Require(available > 0, "fixed-cohort RAM headroom query unavailable");
-  std::ifstream membership("/proc/self/cgroup");
+  std::ifstream membership(proc_root / "self/cgroup");
   std::filesystem::path group;
   while (std::getline(membership, line)) {
     if (line.rfind("0::/", 0) == 0) group = line.substr(3);
@@ -47,7 +47,7 @@ uint64_t ObserveFixedCohortHostAvailable() {
             "fixed-cohort unsupported cgroup namespace path");
   std::filesystem::path root, mount;
   bool hierarchy_root = false;
-  std::ifstream mounts("/proc/self/mountinfo");
+  std::ifstream mounts(proc_root / "self/mountinfo");
   while (std::getline(mounts, line)) {
     if (line.find(" - cgroup2 ") == std::string::npos) continue;
     std::istringstream fields(line);
@@ -92,6 +92,7 @@ uint64_t ObserveFixedCohortHostAvailable() {
   }
   return available;
 #else
+  (void)proc_root;
   throw std::runtime_error("fixed-cohort RAM/cgroup headroom requires Linux");
 #endif
 }

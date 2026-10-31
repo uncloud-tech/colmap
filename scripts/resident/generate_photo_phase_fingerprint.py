@@ -34,6 +34,9 @@ CLOSURE = (
     "src/colmap/mvs/owned_photo_output.h",
     "src/colmap/mvs/owned_geo_photo_input.h",
     "src/colmap/mvs/owned_geo_photo_input.cu",
+    # Observed FREE ceilings and selected-device binding precede allocation.
+    "src/colmap/exe/fixed_cohort.h",
+    "src/colmap/exe/fixed_cohort.cc",
     "src/colmap/mvs/owned_fixed_cohort_budget.h",
     "src/colmap/mvs/owned_fixed_cohort_inventory.h",
     "src/colmap/mvs/owned_fixed_cohort_pipeline.h",

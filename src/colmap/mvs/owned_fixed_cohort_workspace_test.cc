@@ -13,6 +13,68 @@
 
 namespace colmap::mvs::owned {
 namespace {
+#if !defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
+TEST(FixedCohortCapacityObservation, UnsupportedBuildRefuses) {
+  try {
+    (void)ObserveFixedCohortCapacities(0);
+    FAIL() << "unsupported device query succeeded";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find("requires native CUDA"),
+              std::string::npos);
+  }
+}
+#endif
+
+TEST(FixedCohortHostObservation, HierarchyOverridesAndQueryFailures) {
+#if defined(__linux__)
+  const auto root = CreateTestDir();
+  const auto proc = root / "proc";
+  const auto mount = root / "cgroup";
+  std::filesystem::create_directories(proc / "self");
+  std::filesystem::create_directories(mount / "parent/leaf");
+  const auto write = [](const std::filesystem::path& path,
+                        const std::string& text) {
+    std::ofstream(path) << text;
+  };
+  write(proc / "meminfo", "MemAvailable: 10 kB\n");
+  write(proc / "self/cgroup", "0::/parent/leaf\n");
+  write(proc / "self/mountinfo",
+        "1 0 0:1 / " + mount.string() + " rw - cgroup2 cgroup rw\n");
+  write(mount / "parent/memory.max", "8000\n");
+  write(mount / "parent/memory.current", "3000\n");
+  write(mount / "parent/leaf/memory.max", "9000\n");
+  write(mount / "parent/leaf/memory.current", "1000\n");
+  EXPECT_EQ(ObserveFixedCohortHostAvailable(proc), 5000);
+  write(mount / "parent/memory.max", "max\n");
+  EXPECT_EQ(ObserveFixedCohortHostAvailable(proc), 8000);
+  write(mount / "parent/leaf/memory.max", "max\n");
+  EXPECT_EQ(ObserveFixedCohortHostAvailable(proc), 10240);
+  write(mount / "parent/leaf/memory.max", "9000\n");
+  write(mount / "parent/leaf/memory.current", "9001\n");
+  EXPECT_EQ(ObserveFixedCohortHostAvailable(proc), 0);
+  write(mount / "parent/leaf/memory.current", "-1\n");
+  EXPECT_THROW(ObserveFixedCohortHostAvailable(proc), std::invalid_argument);
+  write(mount / "parent/leaf/memory.current", "18446744073709551616\n");
+  EXPECT_THROW(ObserveFixedCohortHostAvailable(proc), std::overflow_error);
+  std::filesystem::remove(mount / "parent/leaf/memory.current");
+  EXPECT_THROW(ObserveFixedCohortHostAvailable(proc), std::invalid_argument);
+  write(proc / "self/cgroup", "0::/../outside\n");
+  EXPECT_THROW(ObserveFixedCohortHostAvailable(proc), std::invalid_argument);
+  std::filesystem::remove(proc / "self/mountinfo");
+  write(proc / "self/cgroup", "0::/parent/leaf\n");
+  EXPECT_THROW(ObserveFixedCohortHostAvailable(proc), std::invalid_argument);
+  std::filesystem::remove(proc / "self/cgroup");
+  EXPECT_THROW(ObserveFixedCohortHostAvailable(proc), std::invalid_argument);
+  write(proc / "meminfo", "MemAvailable: 0 kB\n");
+  EXPECT_THROW(ObserveFixedCohortHostAvailable(proc), std::invalid_argument);
+  std::filesystem::remove(proc / "meminfo");
+  EXPECT_THROW(ObserveFixedCohortHostAvailable(proc), std::invalid_argument);
+  std::filesystem::remove_all(root);
+#else
+  EXPECT_THROW(ObserveFixedCohortHostAvailable(), std::runtime_error);
+#endif
+}
+
 class FixedCohortWorkspaceTest : public ::testing::Test {
  protected:
   void SetUp() override {
