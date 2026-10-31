@@ -46,7 +46,7 @@ def graph(workspace):
 
 
 if command == 'reconstruction_info':
-    print(json.dumps(identity))
+    print(os.environ.get('FAKE_IDENTITY_JSON', json.dumps(identity)))
 elif command in ('feature_extractor', 'exhaustive_matcher'):
     pass
 elif command == 'mapper':

@@ -74,6 +74,35 @@ class ReconstructionTest(unittest.TestCase):
                 self.assertNotEqual(again.returncode, 0)
                 self.assertEqual(calls.read_bytes(), before)
 
+    @unittest.skipUnless(sys.platform == 'linux' and os.geteuid() != 0,
+                         'Experimental local execution requires non-root Linux')
+    def test_wrong_shaped_native_json_records_failure_without_traceback(self) -> None:
+        import shutil
+        root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory(dir=root.parent) as directory:
+            temp = Path(directory)
+            native = temp / 'colmap'
+            shutil.copy(Path(__file__).with_name('fake_native.py'), native)
+            native.chmod(0o755)
+            for index, identity in enumerate(([], None,
+                    dict(schema_version=1, cuda_compiled=True, allocation_fingerprint=[]),
+                    dict(schema_version=1, cuda_compiled=True, allocation_fingerprint=None))):
+                with self.subTest(identity=identity):
+                    workspace = temp / ('output-%d' % index)
+                    env = dict(os.environ, PYTHONPATH=str(root / 'python'),
+                               FAKE_IDENTITY_JSON=json.dumps(identity))
+                    result = subprocess.run([sys.executable, '-m', 'colmap_reconstruction.cli',
+                        '--colmap', str(native), '--experimental-local', '--photos', str(temp),
+                        '--workspace', str(workspace), *allowances()],
+                        cwd=temp, env=env, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    failure = json.loads((workspace / 'failure.json').read_text())
+                    self.assertEqual(failure['status'], 'failed')
+                    self.assertTrue(failure['reason'])
+                    self.assertIn('Reconstruction refused/failed: ' + failure['reason'], result.stderr)
+                    self.assertNotIn('Traceback', result.stderr)
+                    self.assertFalse((workspace / 'result.json').exists())
+
     def test_owned_process_deadline_drains_child_and_preserves_exit_failure(self) -> None:
         from colmap_reconstruction.process import NativeProcess, NativeFailure
         with tempfile.TemporaryDirectory() as directory:

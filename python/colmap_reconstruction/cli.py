@@ -405,7 +405,7 @@ def main(argv=None):
                 signal.signal(sig, handler)
         print(str(args.workspace / 'points.ply'))
         return 0
-    except (OSError, ValueError, KeyError, OverflowError, NativeFailure) as error:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError, NativeFailure) as error:
         if created_workspace:
             try:
                 write_json(args.workspace / 'failure.json', dict(status='failed', reason=str(error)))
