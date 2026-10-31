@@ -4,6 +4,7 @@
 No pycolmap, source imports, CUDA, dataset-specific headers or private tooling.
 """
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -91,6 +92,67 @@ class FixedCohortCommandTest(unittest.TestCase):
         sentinel.write_text('preserve')
         self.assertEqual(self.invoke().returncode, 0)
         self.assertEqual(sentinel.read_text(), 'preserve')
+
+    def test_automatic_count_and_ceiling_before_payload_decode(self):
+        (self.workspace / 'images/d.pgm').write_bytes(
+            b'P5\n20 10\n255\n' + bytes(range(200)))
+        with (self.workspace / 'sparse/images.txt').open('a') as images:
+            images.write('4 1 0 0 0 4 0 0 1 d.pgm\n\n')
+        with self.config.open('a') as config:
+            config.write('d.pgm\na.pgm,c.pgm,a.pgm\n')
+        for storage in ('private', 'shared'):
+            for ceiling, chosen, reason in ((0, 4, 'job count'), (3, 3, 'user ceiling'),
+                                             (2, 2, 'user ceiling'), (1, 1, 'user ceiling'),
+                                             (99, 4, 'job count')):
+                result = self.invoke(self.args + [
+                    '--auto_active_owners', '1', '--active_owners_ceiling', str(ceiling),
+                    '--photo_source_storage', storage])
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f'active_owners={chosen}; selection=automatic; limiting_reason={reason}', result.stdout)
+                self.assertFalse(self.output.exists())
+        # Missing pixels prove singleton refusal happens at metadata inventory,
+        # not after decode, GPU setup, allocation failure or a solver trial.
+        (self.workspace / 'images/a.pgm').unlink()
+        args = self.args + ['--auto_active_owners', '1']
+        args[args.index('--host_capacity_bytes') + 1] = '1'
+        result = self.invoke(args)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('no singleton fits: host capacity', result.stdout + result.stderr)
+        self.assertFalse(self.output.exists())
+
+    def test_automatic_capacity_boundaries_use_same_manual_envelope(self):
+        args = self.args.copy()
+        args[args.index('--loader_scratch_host_bytes') + 1] = '4096'
+        for count in (1, 2, 3):
+            manual = self.invoke(args + ['--active_owners', str(count)])
+            self.assertEqual(manual.returncode, 0, manual.stdout + manual.stderr)
+            match = re.search(r'admitted host=(\d+) device=(\d+)', manual.stdout)
+            self.assertIsNotNone(match, manual.stdout)
+            for resource, admitted in zip(('host', 'device'), map(int, match.groups())):
+                bounded = args + ['--auto_active_owners', '1']
+                bounded[bounded.index(f'--{resource}_capacity_bytes') + 1] = str(admitted + (1 << 20))
+                result = self.invoke(bounded)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                reason = f'{resource} capacity' if count < 3 else 'job count'
+                self.assertIn(f'active_owners={count}; selection=automatic; limiting_reason={reason}', result.stdout)
+                if count == 1:
+                    bounded[bounded.index(f'--{resource}_capacity_bytes') + 1] = str(admitted + (1 << 20) - 1)
+                    refused = self.invoke(bounded)
+                    self.assertNotEqual(refused.returncode, 0)
+                    self.assertIn(f'no singleton fits: {resource} capacity', refused.stdout + refused.stderr)
+        self.assertFalse(self.output.exists())
+
+    def test_manual_higher_count_and_invalid_count(self):
+        result = self.invoke(self.args + ['--active_owners', '3'])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('active_owners=3; selection=manual', result.stdout)
+        for count in ('0', '-1', '4', '18446744073709551616'):
+            self.assertNotEqual(self.invoke(self.args + ['--active_owners', count]).returncode, 0)
+        for extra in (['--active_owners_ceiling', '2'],
+                      ['--auto_active_owners', '1', '--active_owners_ceiling', '-1'],
+                      ['--auto_active_owners', '1', '--active_owners', '2']):
+            self.assertNotEqual(self.invoke(self.args + extra).returncode, 0)
+        self.assertFalse(self.output.exists())
 
     def test_photo_source_storage_default_private_and_shared_inventory(self):
         for storage in (None, 'private', 'shared'):

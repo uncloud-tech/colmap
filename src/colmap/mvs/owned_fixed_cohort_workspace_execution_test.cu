@@ -189,11 +189,15 @@ void ExerciseWorkspace(WorkspaceFixture fixture, bool external) {
   NativeRunDeadlineGuard guard(deadline);
   std::optional<FixedCohortResult> control;
   for (const bool graphs : {false, true}) {
-    for (const size_t active : {size_t{1}, size_t{2}}) {
+    for (const size_t requested :
+         {size_t{1}, size_t{2}, size_t{3}, size_t{4}, size_t{0}, size_t{5}}) {
+      if (external && requested != 1 && requested != 2) continue;
+      const bool automatic = requested == 0 || requested == 5;
+      const size_t target = requested == 5 ? 3 : requested;
       // External minimum: stream active1 and graph active2. No campaign.
-      if (external && graphs != (active == 2)) continue;
+      if (external && graphs != (requested == 2)) continue;
       SCOPED_TRACE(graphs ? "graph" : "stream");
-      SCOPED_TRACE(active);
+      SCOPED_TRACE(requested);
       auto refs = fixture.references;
       for (auto& ref : refs) {
         ref.photo_options.owned_cuda_graphs = graphs;
@@ -202,7 +206,13 @@ void ExerciseWorkspace(WorkspaceFixture fixture, bool external) {
       std::optional<uint64_t> snapshot_bytes;
       std::vector<uint64_t> staging_bytes;
       for (size_t policy_index : {size_t{0}, size_t{1}}) {
-        const auto& budget = fixture.budgets[policy_index][active - 1];
+        auto budget = fixture.budgets[policy_index][requested == 1 ? 0 : 1];
+        const auto active = automatic ? SelectFixedCohortActiveOwners(
+                                            budget, fixture.capacity, target)
+                                            .count
+                                      : requested;
+        ASSERT_EQ(active, requested == 0 ? size_t{4} : target);
+        budget.max_active_owners = active;
         SCOPED_TRACE(policy_index);
         guard.Check();
         auto prepared = PrepareFixedCohortWorkspace(
@@ -229,7 +239,7 @@ void ExerciseWorkspace(WorkspaceFixture fixture, bool external) {
         // Mutating the original caller budget cannot change the prepared
         // policy.
         const auto policy = budget.output_policy;
-        auto& caller_budget = fixture.budgets[policy_index][active - 1];
+        auto& caller_budget = budget;
         caller_budget.output_policy = static_cast<FixedCohortOutputPolicy>(99);
         const auto actual = prepared.Run();
         caller_budget.output_policy = policy;
@@ -272,8 +282,14 @@ void ExerciseWorkspace(WorkspaceFixture fixture, bool external) {
         auto declarations = budget;
         declarations.photo_source_storage =
             FixedCohortPhotoSourceStorage::kShared;
-        const auto shared_budget =
+        auto shared_budget =
             BuildFixedCohortLogicalInventory(shapes, jobs, declarations);
+        if (automatic) {
+          const auto selected = SelectFixedCohortActiveOwners(
+              shared_budget, fixture.capacity, target);
+          ASSERT_EQ(selected.count, active);
+          shared_budget.max_active_owners = selected.count;
+        }
         const auto shared = RunFixedCohortPhotoGeo(
             prepared.Images(),
             prepared.References(),
@@ -286,9 +302,11 @@ void ExerciseWorkspace(WorkspaceFixture fixture, bool external) {
         EXPECT_EQ(shared.actual_photo_shared.device,
                   shared_budget.photo_shared.device);
         const auto key =
-            std::string(graphs ? "graph" : "stream") + "_active" +
-            std::to_string(active) +
+            std::string(graphs ? "graph" : "stream") +
+            (automatic ? "_auto_active" : "_active") + std::to_string(active) +
             (retain ? "_photo_and_geo_shared" : "_final_geo_only_shared");
+        ::testing::Test::RecordProperty(key + "_selected_active_owners",
+                                        std::to_string(active));
         ::testing::Test::RecordProperty(
             key + "_actual_photo_shared_host",
             std::to_string(shared.actual_photo_shared.host));

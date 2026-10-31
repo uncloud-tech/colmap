@@ -159,7 +159,8 @@ TEST(FixedCohortPipeline, FourJobsPreserveIdentityAcrossRollingOwners) {
   CUDA_SAFE_CALL(cudaGetDevice(&device));
   std::optional<FixedCohortResult> oracle;
   for (const bool graphs : {false, true}) {
-    for (const size_t active : {size_t{1}, size_t{2}}) {
+    for (const size_t requested :
+         {size_t{1}, size_t{2}, size_t{3}, size_t{4}, size_t{0}}) {
       auto pair = References(device, graphs);
       std::vector<FixedCohortReference> refs = {
           pair[0], pair[1], pair[0], pair[1]};
@@ -176,10 +177,16 @@ TEST(FixedCohortPipeline, FourJobsPreserveIdentityAcrossRollingOwners) {
         budget.photo_source_storage = storage;
         if (storage == FixedCohortPhotoSourceStorage::kShared)
           budget.photo_shared = {80, 80};  // four distinct global 5x4 layers
-        budget.max_active_owners = active;
+        budget.max_active_owners = requested ? requested : 1;
         budget.photo_private.resize(4, budget.photo_private.front());
         budget.geo_private.resize(4, budget.geo_private.front());
         budget.geo_staging_device.resize(4, budget.geo_staging_device.front());
+        const auto active = requested
+                                ? requested
+                                : SelectFixedCohortActiveOwners(
+                                      budget, {128ull << 20, 128ull << 20})
+                                      .count;
+        budget.max_active_owners = active;
         const auto dispatch =
             active == 1 ? PairDispatch::kSerial : PairDispatch::kPair;
         const auto result = RunFixedCohortPhotoGeo(
@@ -197,10 +204,11 @@ TEST(FixedCohortPipeline, FourJobsPreserveIdentityAcrossRollingOwners) {
         ASSERT_EQ(result.geo.size(), 4);
         ASSERT_EQ(result.actual_geo_staging_bytes.size(), 4);
         const auto key =
-            std::string(graphs ? "graph" : "stream") + "_active" +
-            std::to_string(active) +
+            std::string(graphs ? "graph" : "stream") +
+            (requested ? "_active" : "_auto_active") + std::to_string(active) +
             (storage == FixedCohortPhotoSourceStorage::kShared ? "_shared"
                                                                : "_private");
+        RecordProperty(key + "_selected_active_owners", std::to_string(active));
         RecordProperty(key + "_actual_photo_shared_host",
                        std::to_string(result.actual_photo_shared.host));
         RecordProperty(key + "_actual_photo_shared_device",
@@ -297,6 +305,25 @@ TEST(FixedCohortPipeline, FourJobsPreserveIdentityAcrossRollingOwners) {
         EXPECT_TRUE(late_photo.load());
         if (active == 1) EXPECT_FALSE(tail_photo_started.load());
         EXPECT_EQ(geo_sweeps.load(), 0);
+        if (!requested) {
+          const auto retry = RunFixedCohortPhotoGeo(
+              images,
+              refs,
+              budget,
+              {128ull << 20, 128ull << 20},
+              NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
+              dispatch);
+          for (size_t i = 0; i < refs.size(); ++i) {
+            ExpectBits(result.photo[i].depth.GetData(),
+                       retry.photo[i].depth.GetData());
+            ExpectBits(result.photo[i].normal.GetData(),
+                       retry.photo[i].normal.GetData());
+            ExpectBits(result.geo[i].depth.GetData(),
+                       retry.geo[i].depth.GetData());
+            ExpectBits(result.geo[i].normal.GetData(),
+                       retry.geo[i].normal.GetData());
+          }
+        }
       }
     }
   }

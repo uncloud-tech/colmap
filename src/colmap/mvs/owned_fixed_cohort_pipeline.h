@@ -65,22 +65,22 @@ struct FixedCohortResult {
 // rolling generation, disk output, fusion or full-scene qualification is
 // claimed.
 //
-// dispatch selects 1 (serial) or 2 (pair) active owners and must match
-// budget.max_active_owners. Every per-job budget vector matches references.
-// Returned maps are HOST copies selected by budget.output_policy and charged
-// explicitly. kFinalGeoOnly skips both PHOTO host getters, not device snapshots;
-// final GEO outputs and all device snapshot lifetimes remain unchanged.
-// The caller owns resource-bound provenance and real external resource limits;
-// lower-bound checks and RAM/cgroup/GPU-free observations do not certify fit.
-// budget.already_live_process supplies separately justified classified storage
-// actually resident at EACH observation (before copy / before GEO). It stays
-// included in the full reservation/caps but is not charged twice against free.
-// Exclude pixels/maps/snapshots and unknown overhead; default zero is
-// conservative. Canonical production forecast delivery is not implemented by
-// this experimental entry. One finite original deadline covers setup, both
-// phases, drain and joins (existing fail-closed NativeRunDeadlineGuard
-// semantics). Cancellation throws, never returns partial results; optional
-// sweep-boundary checks may synchronize graph execution.
+// Serial dispatch requires one active owner; concurrent (kPair) dispatch
+// requires at least two, bounded by budget.max_active_owners. Every per-job
+// budget vector matches references. Returned maps are HOST copies selected by
+// budget.output_policy and charged explicitly. kFinalGeoOnly skips both PHOTO
+// host getters, not device snapshots; final GEO outputs and all device snapshot
+// lifetimes remain unchanged. The caller owns resource-bound provenance and
+// real external resource limits; lower-bound checks and RAM/cgroup/GPU-free
+// observations do not certify fit. budget.already_live_process supplies
+// separately justified classified storage actually resident at EACH observation
+// (before copy / before GEO). It stays included in the full reservation/caps
+// but is not charged twice against free. Exclude pixels/maps/snapshots and
+// unknown overhead; default zero is conservative. Canonical production forecast
+// delivery is not implemented by this experimental entry. One finite original
+// deadline covers setup, both phases, drain and joins (existing fail-closed
+// NativeRunDeadlineGuard semantics). Cancellation throws, never returns partial
+// results; optional sweep-boundary checks may synchronize graph execution.
 FixedCohortResult RunFixedCohortPhotoGeo(
     const std::vector<Image>& images,
     const std::vector<FixedCohortReference>& references,

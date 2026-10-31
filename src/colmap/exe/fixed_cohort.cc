@@ -63,7 +63,8 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
   const auto entry = mvs::NativeRunDeadline::Clock::now();
   try {
     fs::path workspace_path, output_path, photo_config_path, geo_config_path;
-    bool prepare_only = false;
+    bool prepare_only = false, auto_active_owners = false;
+    int active_owners_ceiling = 0;
     int max_load_image_size = -1, active_owners = 1, tile_threads = 32;
     int deadline_seconds = 0;
     uint64_t loader_scratch_host = 0;
@@ -85,7 +86,14 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
         "CPU preparation only: NO reconstruction or outputs");
     options.AddDefaultOption("max_load_image_size", &max_load_image_size);
     options.AddDefaultOption(
-        "active_owners", &active_owners, "1 serial or 2 concurrent");
+        "active_owners", &active_owners, "Positive manual count (default 1)");
+    options.AddDefaultOption(
+        "auto_active_owners",
+        &auto_active_owners,
+        "Select largest memory-admissible count, not throughput optimum");
+    options.AddDefaultOption("active_owners_ceiling",
+                             &active_owners_ceiling,
+                             "Automatic count ceiling; 0 means job count");
     options.AddDefaultOption("tile_threads", &tile_threads);
     options.AddDefaultOption(
         "output_policy", &output_policy, "final_geo_only or photo_and_geo");
@@ -122,8 +130,14 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
         throw std::invalid_argument("invalid unsigned byte quantity: " + name);
       }
     }
-    Require(active_owners == 1 || active_owners == 2,
-            "active_owners must be 1 or 2");
+    Require(active_owners > 0, "active_owners must be positive");
+    Require(active_owners_ceiling >= 0 &&
+                (auto_active_owners || active_owners_ceiling == 0),
+            "active_owners_ceiling requires auto_active_owners and must be "
+            "nonnegative");
+    Require(!auto_active_owners || active_owners == 1,
+            "auto_active_owners conflicts with manual active_owners; use "
+            "active_owners_ceiling");
     Require(deadline_seconds > 0, "positive finite deadline_seconds required");
     const auto deadline = mvs::NativeRunDeadline::FromBudget(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -196,10 +210,25 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
           {ref.reference_image_idx, ref.photo_sources, ref.geo_sources});
     }
     model = mvs::Model();  // Release the extra sparse model before decoding.
-    const auto budget =
+    auto budget =
         owned::BuildFixedCohortLogicalInventory(shapes, jobs, declarations);
-    const auto dispatch = active_owners == 1 ? owned::PairDispatch::kSerial
-                                             : owned::PairDispatch::kPair;
+    std::string count_reason = "manual";
+    if (auto_active_owners) {
+      const auto selection = owned::SelectFixedCohortActiveOwners(
+          budget, capacity, active_owners_ceiling);
+      budget.max_active_owners = selection.count;
+      count_reason = selection.reason;
+    }
+    // Selection/refusal precedes workspace decode, frozen pixels, banks and
+    // private solver allocation. Never probe fit by attempting allocations.
+    owned::AdmitFixedCohortBudget(budget, capacity);
+    std::cout << "active_owners=" << budget.max_active_owners
+              << "; selection=" << (auto_active_owners ? "automatic" : "manual")
+              << "; limiting_reason=" << count_reason
+              << "; memory admissibility only, not throughput optimum\n";
+    const auto dispatch = budget.max_active_owners == 1
+                              ? owned::PairDispatch::kSerial
+                              : owned::PairDispatch::kPair;
     // Preparation validates options, closed GEO producers, loader peak and
     // real host/cgroup headroom before native GPU execution can begin.
     auto prepared = owned::PrepareFixedCohortWorkspace(workspace_path,

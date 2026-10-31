@@ -55,9 +55,9 @@ FixedCohortResult RunFixedCohortPhotoGeo(
   ValidateOwnedTileThreads(tile_threads);
   Require(dispatch == PairDispatch::kSerial || dispatch == PairDispatch::kPair,
           "fixed-cohort invalid dispatch");
-  Require(
-      budget.max_active_owners == (dispatch == PairDispatch::kSerial ? 1u : 2u),
-      "fixed-cohort active owners disagree with dispatch");
+  Require((dispatch == PairDispatch::kSerial ? budget.max_active_owners == 1
+                                             : budget.max_active_owners >= 2),
+          "fixed-cohort active owners disagree with dispatch");
   const auto reserved = AdmitFixedCohortBudget(budget, capacity);
   ValidateFixedCohortPixels(images, references, budget);
   Require(
