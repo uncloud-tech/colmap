@@ -1665,6 +1665,21 @@ __global__ void SweepFromTopToBottom(
   }
 }
 
+namespace {
+// One writer per canonical perimeter pixel, including degenerate dimensions.
+__global__ void CompactOwnedPrngBoundary(GpuMatView<curandState> input,
+                                         curandState* output,
+                                         PrngBoundaryLayout layout) {
+  const size_t row = blockIdx.y * blockDim.y + threadIdx.y;
+  const size_t col = blockIdx.x * blockDim.x + threadIdx.x;
+  if (row < input.GetHeight() && col < input.GetWidth() &&
+      (row == 0 || col == 0 || row + 1 == input.GetHeight() ||
+       col + 1 == input.GetWidth())) {
+    output[layout.Index(row, col)] = input.Get(row, col);
+  }
+}
+}  // namespace
+
 #if defined(COLMAP_OWNED_CACHE_TRACE_TEST)
 }  // namespace
 #else
@@ -2424,19 +2439,6 @@ __global__ void InitOwnedPrngFromSeed(GpuMatView<curandState> output,
   }
 }
 
-// One writer per canonical perimeter pixel, including degenerate dimensions.
-__global__ void CompactOwnedPrngBoundary(GpuMatView<curandState> input,
-                                         curandState* output,
-                                         PrngBoundaryLayout layout) {
-  const size_t row = blockIdx.y * blockDim.y + threadIdx.y;
-  const size_t col = blockIdx.x * blockDim.x + threadIdx.x;
-  if (row < input.GetHeight() && col < input.GetWidth() &&
-      (row == 0 || col == 0 || row + 1 == input.GetHeight() ||
-       col + 1 == input.GetWidth())) {
-    output[layout.Index(row, col)] = input.Get(row, col);
-  }
-}
-
 __global__ void CopyResidentDepth(cudaTextureObject_t texture,
                                   int layer,
                                   GpuMatView<float> output) {
@@ -2581,6 +2583,11 @@ void PatchMatchCuda::InitRotationStorage() {
         init_rand_state_map_->View(),
         boundary_rand_states_->GetPtr(),
         boundary);
+    // Release in owner-stream order, not through synchronous cudaFree after
+    // the wait (which can stall on unrelated owners). For legacy allocations,
+    // the following stream synchronization also retires the physical storage
+    // BEFORE swapped-shape staging, preserving the initialization peak model.
+    init_rand_state_map_->ReleaseAfterInitialization(stream_->Get());
     completion.Wait();
   }
   init_rand_state_map_.reset();

@@ -47,6 +47,7 @@ class PhotoFingerprintTest(unittest.TestCase):
             "src/colmap/mvs/owned_graph_coordinator.h",
             "src/colmap/mvs/owned_async_pool.h",
             "src/colmap/mvs/gpu_mat.h",
+            "src/colmap/mvs/gpu_mat_prng.h",
             "src/colmap/mvs/owned_selection_boundary.h",
             "src/colmap/mvs/patch_match.h",
             "src/colmap/mvs/patch_match.cc",
@@ -108,7 +109,7 @@ class PhotoFingerprintTest(unittest.TestCase):
             self.assertIn(
                 hashlib.sha256(encoded).hexdigest(), output.read_text()
             )
-            self.assertEqual(len(generator.CLOSURE), 44)
+            self.assertEqual(len(generator.CLOSURE), 45)
             self.assertIn(
                 f'kPhotoPhaseV1SourceCommit[] = "{lineage}"', output.read_text()
             )
