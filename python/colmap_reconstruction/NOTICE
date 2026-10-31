@@ -56,3 +56,12 @@ CPU-only validation (no install):
   PYTHONPATH=python python -m unittest colmap_reconstruction.fixed_cohort_test
 The native comparison tests compile real headers using g++ and require an
 executable writable temporary directory within the repository.
+
+Installed frontend selective port (2026-10-31): cli.py, process.py and the
+prefix-relative launcher/install rules derive from PR16 at
+701da8fd1f209c98326416af0a39e82847f8aec9 (authored commits 9ae0f642c,
+074ecb001, 705ee7ce2, 701da8fd1; author Bu5hm4nn). Model-selection and process
+regressions retain that provenance. The old PHOTO N1/N2 + GEO N1 dispatch,
+producer/wire/resident modules are NOT ported. Dense execution uses the current
+canonical native fixed-cohort inventory, selection, workspace and pipeline.
+The same-executable reconstruction_info query is selectively ported from PR16.

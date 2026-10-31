@@ -3,6 +3,7 @@
 
 No pycolmap, source imports, CUDA, dataset-specific headers or private tooling.
 """
+import json
 import os
 import re
 from pathlib import Path
@@ -69,6 +70,104 @@ class FixedCohortCommandTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(expected, result.stdout + result.stderr)
         self.assertFalse(self.output.exists())
+
+    def test_native_workspace_plan_resolves_distinct_depths_without_global_envelope(self):
+        # Per-camera translations change the SAME sparse points' depth ranges.
+        images = []
+        for i, name in enumerate(self.names):
+            images.append(f'{i+1} 1 0 0 0 {i} 0 {i} 1 {name}\n10 5 1 11 5 2\n')
+        (self.workspace / 'sparse/images.txt').write_text(''.join(images))
+        (self.workspace / 'sparse/points3D.txt').write_text(
+            '1 0 0 5 128 128 128 0 1 0 2 0 3 0\n'
+            '2 0 0 7 128 128 128 0 1 1 2 1 3 1\n')
+        # optimized_dense_plan requires native automatic-source configuration.
+        # Explicit duplicate-source fixtures remain covered by the other cases.
+        self.config.write_text(''.join(name + '\n__auto__, 8\n' for name in self.names))
+        args = list(self.args)
+        for key in ('depth_min', 'depth_max', 'sigma_spatial'):
+            args[args.index('--PatchMatchStereo.' + key) + 1] = '-1'
+        args += ['--PatchMatchStereo.owned_distinct_source_cache', '1']
+        device = os.environ.get('COLMAP_TEST_CUDA_DEVICE', '0')
+        args[args.index('--PatchMatchStereo.gpu_index') + 1] = device
+        result = self.invoke(args + ['--resolve_workspace_plan', '1'])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.output.exists())
+
+        # The native CPU plan is an independent typed oracle, not a fabricated
+        # execution receipt. Both consumers resolve the same automatic-source
+        # configuration; compare their effective vectors without sorting.
+        plan_path = self.root / 'plan.json'
+        planned = subprocess.run([
+            os.environ['COLMAP_TEST_EXECUTABLE'], 'optimized_dense_plan',
+            '--workspace_path', str(self.workspace), '--output_path', str(plan_path),
+            '--source_cap', '8', '--num_samples', '15', '--gpu_index', device,
+            '--owned_tex_lookahead', 'false'],
+            capture_output=True, text=True, timeout=40)
+        self.assertEqual(planned.returncode, 0, planned.stdout + planned.stderr)
+        plan = json.loads(plan_path.read_text())
+        names = {image['index']: image['name'] for image in plan['images']}
+        expected_depths = {'a.pgm': (3.75, 8.75),
+                           'nested/b.pgm': (4.5, 10.0),
+                           'c.pgm': (5.25, 11.25)}
+        for phase in ('photo', 'geo'):
+            jobs = plan['phases'][phase]['jobs']
+            self.assertEqual(len(jobs), 3)
+            self.assertEqual({names[job['reference']] for job in jobs}, set(self.names))
+            for job in jobs:
+                name = names[job['reference']]
+                self.assertEqual((job['options']['depth_min'], job['options']['depth_max']),
+                                 expected_depths[name])
+                self.assertEqual(job['options']['sigma_spatial'], 5)
+                self.assertEqual(len(job['sources']), 2)
+                self.assertEqual({names[index] for index in job['sources']},
+                                 set(self.names) - {name})
+
+        if os.environ.get('COLMAP_TEST_OBSERVED_CUDA'):
+            # One tiny actual adapter execution, not a new GPU matrix. Only
+            # this branch proves that execution retained the typed plan facts.
+            report_path = self.root / 'execution.json'
+            execution_args = args + ['--resolve_workspace_plan', '1',
+                                     '--report_path', str(report_path)]
+            execution_args[execution_args.index('--prepare_only') + 1] = '0'
+            execution_args[execution_args.index('--unknown_device_bytes') + 1] = str(4 << 20)
+            execution_args[execution_args.index('--unknown_provenance') + 1] = (
+                'tiny 20x10 fixture: explicit 4 MiB unknown device allowance, uncalibrated')
+            executed = self.invoke(execution_args)
+            self.assertEqual(executed.returncode, 0, executed.stdout + executed.stderr)
+            report = json.loads(report_path.read_text())
+            self.assertEqual(report['status'], 'completed')
+            self.assertEqual(report['effective_backend'], 'experimental_fixed_cohort')
+            for phase in ('photo', 'geo'):
+                # Compare lists, never sets/sorted sources: native effective
+                # order and duplicate resolution must survive the adapter.
+                self.assertEqual(report['phases'][phase], [
+                    {key: job[key] for key in ('reference', 'sources', 'options')}
+                    for job in plan['phases'][phase]['jobs']])
+            # Keep the subsequent prepare-only refusal's no-output assertion.
+            self.output = self.root / 'refused-output'
+            args[args.index('--output_path') + 1] = str(self.output)
+        # No implicit PHOTO producer expansion to repair incomplete configs.
+        self.config.write_text('a.pgm\nnested/b.pgm,c.pgm\n')
+        refused = self.invoke(args + ['--resolve_workspace_plan', '1'])
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertFalse(self.output.exists())
+
+    def test_same_executable_build_identity(self):
+        import json
+        result = subprocess.run([os.environ['COLMAP_TEST_EXECUTABLE'], 'reconstruction_info'],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        identity = json.loads(result.stdout)
+        self.assertRegex(identity['source_commit'], r'^[0-9a-f]{40}$')
+        self.assertRegex(identity['allocation_fingerprint'], r'^[0-9a-f]{64}$')
+        if os.environ.get('COLMAP_EXPECT_ALLOCATION_FINGERPRINT'):
+            self.assertEqual(identity['allocation_fingerprint'],
+                             os.environ['COLMAP_EXPECT_ALLOCATION_FINGERPRINT'])
+        for arguments in (['--not_an_option'], ['--gpu_index', '-1', '--deadline_seconds', '1'],
+                          ['--gpu_index', '0', '--deadline_seconds', '0']):
+            refused = subprocess.run([os.environ['COLMAP_TEST_EXECUTABLE'], 'reconstruction_info',
+                                      *arguments], capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(refused.returncode, 0)
 
     def test_help_and_parser(self):
         result = self.invoke(['--help'])

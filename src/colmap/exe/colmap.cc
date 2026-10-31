@@ -87,6 +87,7 @@ int main(int argc, char** argv) {
 
   std::vector<Command> commands;
   commands.emplace_back("gui", &colmap::RunGraphicalUserInterface);
+  commands.emplace_back("reconstruction_info", &colmap::RunReconstructionInfo);
   commands.emplace_back("optimized_dense_plan", &colmap::RunOptimizedDensePlan);
   // The automatic reconstructor installs its handler after parsing the mapper
   // type, since only incremental mapping supports resumable shutdown.
