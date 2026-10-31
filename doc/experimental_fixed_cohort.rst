@@ -64,7 +64,8 @@ components; the output root must not exist. Then run the installed executable::
       --PatchMatchStereo.num_threads 1 --PatchMatchStereo.gpu_index 0 \
       --max_load_image_size 512 --active_owners 1 \
       --PatchMatchStereo.owned_cuda_graphs 0 \
-      --output_policy final_geo_only --deadline_seconds 300 \
+      --output_policy final_geo_only --photo_source_storage private \
+      --deadline_seconds 300 \
       --host_capacity_bytes "$HOST_CAP_BYTES" \
       --device_capacity_bytes "$DEVICE_CAP_BYTES" \
       --reserve_host_bytes "$HOST_RESERVE_BYTES" \
@@ -104,6 +105,45 @@ No free-memory-derived or unmeasured live-process credits are taken.
 Linux/cgroup host and native GPU headroom observations do not impose hard caps;
 apply appropriate external process/resource limits. Pitch/context/allocator
 and codec behavior are not physically calibrated by this inventory.
+
+Explicit shared PHOTO mode
+--------------------------
+
+``--photo_source_storage private`` is the unchanged CLI default. Explicitly use
+``--photo_source_storage shared`` to bind the shared PHOTO grayscale union to
+both canonical inventory/admission and execution. Only ``private`` and ``shared``
+are supported; other values refuse before workspace loading or output/device
+side effects. There is no automatic selection. ``--prepare_only 1`` uses the same
+selection and reports its logical host/device union payload (zero for private),
+without allocating a device bank or claiming physical VRAM measurement.
+
+For typed native API callers, ``FixedCohortBudget::photo_source_storage =
+FixedCohortPhotoSourceStorage::kShared`` is the equivalent opt-in.
+Pass this declaration through the existing
+``BuildFixedCohortLogicalInventory`` (or Python ``forecast_fixed_cohort`` with
+``PhotoSourceStorage.SHARED``) before admission. The runner actually constructs
+the existing host/device grayscale bank from its frozen, loaded pixels; it does
+not reread paths or alter cameras, PRNG, source order or duplicate ordinals.
+Layers deduplicate only by invocation image ordinal, not by filename.
+
+``photo_shared`` charges one globally padded uint8 host union and one device
+array. Upload reads that same host union without a second payload staging copy.
+Host padding remains live for binding validation; when supplied, loaded source
+pixels are checked byte-for-byte. Explicit metadata-only borrowers use the bank
+binding as their pixel authority (paths are labels, not file identities).
+Per-owner PHOTO device source-array charges are removed, but all private solver,
+layer mapping and reference storage remain. The per-owner host source-packing
+allowance remains to cover ordered Image-copy validation transients, including
+duplicates. Both unions survive all PHOTO borrowers/graphs and their failure
+drains/joins, then are released before the GEO headroom observation. GEO storage,
+all snapshots, returned maps and caller/frozen pixels retain their prior charges.
+
+Global padding can outweigh deduplication, especially with zero overlap or
+opposed aspect ratios. Shared mode therefore makes no savings/physical-fit
+promise and never silently selects a cheaper forecast while allocating private
+arrays. The private default is unchanged. Unknown allowances, reserve and the
+single aggregate 3% margin are unchanged; CUDA array overhead is not certified
+by these logical payload counts. No owner-count/scheduler expansion is implied.
 
 One original deadline covers preparation, execution and output. Checks occur
 between output writes, not as an interrupt guarantee inside blocking output

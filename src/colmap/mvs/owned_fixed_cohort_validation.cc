@@ -174,6 +174,9 @@ void ValidateFixedCohortShape(const std::vector<Image>& images,
     }
   }
   const auto minimum = BuildFixedCohortLogicalInventory(shapes, jobs, budget);
+  Require(budget.photo_shared.host >= minimum.photo_shared.host &&
+              budget.photo_shared.device >= minimum.photo_shared.device,
+          "fixed-cohort shared PHOTO bound below logical union");
   Require(budget.caller_inputs.host >= minimum.caller_inputs.host &&
               budget.frozen_inputs.host >= minimum.frozen_inputs.host,
           "fixed-cohort input copy bound insufficient");

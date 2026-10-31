@@ -360,6 +360,7 @@ TEST(ResidentGrayscaleBank, ConcurrentPhotoConsumersOwnBindings) {
   HostGrayscaleBank host({{inputs[2], inputs[0], inputs[1]},
                           {inputs[1], inputs[0]},
                           {inputs[0], inputs[1]}});
+  HostGrayscaleBank loaded_host(images, {{2, 0, 1}, {1, 0}, {0, 1}});
   int device = -1;
   CUDA_SAFE_CALL(cudaGetDevice(&device));
   for (const bool graphs : {false, true}) {
@@ -376,90 +377,103 @@ TEST(ResidentGrayscaleBank, ConcurrentPhotoConsumersOwnBindings) {
     options.owned_cuda_graphs = graphs;
     std::array<std::unique_ptr<PatchMatch>, 2> controls;
     std::array<std::unique_ptr<PatchMatch>, 2> consumers;
-    auto resident = std::make_shared<ResidentGrayscaleBank>(host, device);
-    std::weak_ptr<const ResidentGrayscaleBank> lifetime = resident;
-    for (size_t job = 0; job < consumers.size(); ++job) {
-      // Each constructor snapshots its own reference/solver inputs. The serial
-      // control consumes private bitmaps with identical options/order/seed.
-      auto private_images = images;
-      PatchMatch::Problem problem;
-      problem.images = &private_images;
-      problem.ref_image_idx = 2;
-      problem.src_image_idxs =
-          job == 0 ? std::vector<int>{1, 0} : std::vector<int>{0, 1};
-      controls[job] = std::make_unique<PatchMatch>(
-          options, problem, PatchMatchExecution::kOwnedCuda);
-      controls[job]->Run();
-      problem.photo_grayscale = resident->BindJob(job + 1);
-      for (const int idx : problem.src_image_idxs) {
-        const auto& image = images[idx];
-        private_images[idx] = Image(image.GetPath(),
-                                    image.GetWidth(),
-                                    image.GetHeight(),
-                                    image.GetK(),
-                                    image.GetR(),
-                                    image.GetT());
+    for (const bool loaded : {false, true}) {
+      auto resident = std::make_shared<ResidentGrayscaleBank>(
+          loaded ? loaded_host : host, device);
+      std::weak_ptr<const ResidentGrayscaleBank> lifetime = resident;
+      if (loaded) {
+        auto wrong = images[1];
+        Bitmap replacement = wrong.GetBitmap();
+        replacement.Fill(BitmapColor<uint8_t>(0));
+        wrong.SetBitmap(std::move(replacement));
+        EXPECT_ANY_THROW(resident->ValidateSources({2}, {wrong}, device));
       }
-      consumers[job] = std::make_unique<PatchMatch>(
-          options, problem, PatchMatchExecution::kOwnedCuda);
-      consumers[job]->PrepareOwned();
-    }  // No caller Problem or copied binding survives this scope.
-    resident.reset();
-    ASSERT_FALSE(lifetime.expired());
-
-    std::mutex mutex;
-    std::condition_variable ready;
-    size_t arrived = 0;
-    // Explicit async futures join on destruction, including partial launch
-    // failure. A missing/failed peer times out rather than stranding a worker.
-    // No GPU event waits or spin barriers are used to force kernel overlap.
-    std::array<std::future<void>, 2> workers;
-    for (size_t job = 0; job < workers.size(); ++job) {
-      workers[job] = std::async(std::launch::async, [&, job] {
-        CUDA_SAFE_CALL(cudaSetDevice(device));
-        {
-          std::unique_lock<std::mutex> lock(mutex);
-          ++arrived;
-          ready.notify_all();
-          if (!ready.wait_for(lock, std::chrono::seconds(10), [&] {
-                return arrived == consumers.size();
-              })) {
-            throw std::runtime_error("PHOTO submission rendezvous timed out");
-          }
+      for (size_t job = 0; job < consumers.size(); ++job) {
+        // Each constructor snapshots its own reference/solver inputs. The
+        // serial control consumes private bitmaps with identical
+        // options/order/seed.
+        auto private_images = images;
+        PatchMatch::Problem problem;
+        problem.images = &private_images;
+        problem.ref_image_idx = 2;
+        problem.src_image_idxs =
+            job == 0 ? std::vector<int>{1, 0} : std::vector<int>{0, 1};
+        controls[job] = std::make_unique<PatchMatch>(
+            options, problem, PatchMatchExecution::kOwnedCuda);
+        controls[job]->Run();
+        problem.photo_grayscale = resident->BindJob(job + 1);
+        for (const int idx : problem.src_image_idxs) {
+          const auto& image = images[idx];
+          private_images[idx] = Image(image.GetPath(),
+                                      image.GetWidth(),
+                                      image.GetHeight(),
+                                      image.GetK(),
+                                      image.GetR(),
+                                      image.GetT());
         }
-        consumers[job]->RunPreparedOwned();
-      });
+        consumers[job] = std::make_unique<PatchMatch>(
+            options, problem, PatchMatchExecution::kOwnedCuda);
+        consumers[job]->PrepareOwned();
+      }  // No caller Problem or copied binding survives this scope.
+      resident.reset();
+      ASSERT_FALSE(lifetime.expired());
+
+      std::mutex mutex;
+      std::condition_variable ready;
+      size_t arrived = 0;
+      // Explicit async futures join on destruction, including partial launch
+      // failure. A missing/failed peer times out rather than stranding a
+      // worker. No GPU event waits or spin barriers are used to force kernel
+      // overlap.
+      std::array<std::future<void>, 2> workers;
+      for (size_t job = 0; job < workers.size(); ++job) {
+        workers[job] = std::async(std::launch::async, [&, job] {
+          CUDA_SAFE_CALL(cudaSetDevice(device));
+          {
+            std::unique_lock<std::mutex> lock(mutex);
+            ++arrived;
+            ready.notify_all();
+            if (!ready.wait_for(lock, std::chrono::seconds(10), [&] {
+                  return arrived == consumers.size();
+                })) {
+              throw std::runtime_error("PHOTO submission rendezvous timed out");
+            }
+          }
+          consumers[job]->RunPreparedOwned();
+        });
+      }
+      std::array<bool, 2> completed{};
+      for (size_t job = 0; job < workers.size(); ++job) {
+        // Join BOTH workers even if one throws; do not read or destroy a
+        // running consumer on an assertion/exception path.
+        EXPECT_NO_THROW({
+          workers[job].get();
+          completed[job] = true;
+        });
+      }
+      for (size_t job = 0; job < consumers.size(); ++job) {
+        if (!completed[job]) continue;
+        const auto expected_depth = controls[job]->GetDepthMap();
+        ASSERT_EQ(expected_depth.GetData().size(), 20);
+        EXPECT_TRUE(std::any_of(expected_depth.GetData().begin(),
+                                expected_depth.GetData().end(),
+                                [](float depth) { return depth > 0; }));
+        EXPECT_TRUE(SameFloatBits(expected_depth.GetData(),
+                                  consumers[job]->GetDepthMap().GetData()));
+        EXPECT_TRUE(SameFloatBits(controls[job]->GetNormalMap().GetData(),
+                                  consumers[job]->GetNormalMap().GetData()));
+        EXPECT_TRUE(SameFloatBits(controls[job]->GetSelProbMap().GetData(),
+                                  consumers[job]->GetSelProbMap().GetData()));
+      }
+      // RunPreparedOwned's completion contract fences each stream. Destroy the
+      // first completed consumer while the second production binding still owns
+      // the bank, then verify final release without any extra strong test
+      // owner.
+      consumers[0].reset();
+      EXPECT_FALSE(lifetime.expired());
+      consumers[1].reset();
+      EXPECT_TRUE(lifetime.expired());
     }
-    std::array<bool, 2> completed{};
-    for (size_t job = 0; job < workers.size(); ++job) {
-      // Join BOTH workers even if one throws; do not read or destroy a running
-      // consumer on an assertion/exception path.
-      EXPECT_NO_THROW({
-        workers[job].get();
-        completed[job] = true;
-      });
-    }
-    for (size_t job = 0; job < consumers.size(); ++job) {
-      if (!completed[job]) continue;
-      const auto expected_depth = controls[job]->GetDepthMap();
-      ASSERT_EQ(expected_depth.GetData().size(), 20);
-      EXPECT_TRUE(std::any_of(expected_depth.GetData().begin(),
-                              expected_depth.GetData().end(),
-                              [](float depth) { return depth > 0; }));
-      EXPECT_TRUE(SameFloatBits(expected_depth.GetData(),
-                                consumers[job]->GetDepthMap().GetData()));
-      EXPECT_TRUE(SameFloatBits(controls[job]->GetNormalMap().GetData(),
-                                consumers[job]->GetNormalMap().GetData()));
-      EXPECT_TRUE(SameFloatBits(controls[job]->GetSelProbMap().GetData(),
-                                consumers[job]->GetSelProbMap().GetData()));
-    }
-    // RunPreparedOwned's completion contract fences each stream. Destroy the
-    // first completed consumer while the second production binding still owns
-    // the bank, then verify final release without any extra strong test owner.
-    consumers[0].reset();
-    EXPECT_FALSE(lifetime.expired());
-    consumers[1].reset();
-    EXPECT_TRUE(lifetime.expired());
   }
   std::filesystem::remove_all(root);
 }

@@ -67,6 +67,41 @@ class HostInputBankTest : public ::testing::Test {
   BankJob job_;
 };
 
+TEST_F(HostInputBankTest,
+       LoadedPhotoUnionPreservesDuplicatesPaddingAndLifetime) {
+  auto images = job_.images;
+  Bitmap a(2, 1, false);
+  a.Fill(BitmapColor<uint8_t>(31));
+  images[0].SetBitmap(std::move(a));
+  Bitmap b(1, 3, false);
+  b.Fill(BitmapColor<uint8_t>(73));
+  const float K[9] = {10, 0, 2, 0, 10, 1, 0, 0, 1};
+  const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  const float T[3] = {0, 0, 0};
+  images[1] = Image("no-file-needed", 1, 3, K, R, T);
+  images[1].SetBitmap(std::move(b));
+  std::vector<std::shared_ptr<const GrayscaleLayer>> retained;
+  {
+    HostGrayscaleBank bank(images, {{1, 0, 1}, {0, 1}});
+    EXPECT_EQ(bank.Width(), 2);
+    EXPECT_EQ(bank.Height(), 3);
+    ASSERT_EQ(bank.Layers().size(), 2);
+    EXPECT_EQ(bank.SourceLayers(0), (std::vector<int>{0, 1, 0}));
+    EXPECT_EQ(bank.SourceLayers(1), (std::vector<int>{1, 0}));
+    retained = bank.BindJob(0);
+    EXPECT_EQ(retained[0], retained[2]);
+    EXPECT_EQ(retained[0]->pixels, (std::vector<uint8_t>{73, 0, 73, 0, 73, 0}));
+    EXPECT_EQ(retained[1]->pixels, (std::vector<uint8_t>{31, 31, 0, 0, 0, 0}));
+    EXPECT_EQ(bank.WorkCounts().grayscale_reads, 0);
+  }
+  EXPECT_EQ(retained[0]->pixels[4], 73);
+  std::atomic<bool> cancelled{true};
+  EXPECT_THROW((HostGrayscaleBank(images, {{0}}, &cancelled)),
+               std::runtime_error);
+  EXPECT_THROW((HostGrayscaleBank(images, {{-1}})), std::out_of_range);
+  EXPECT_THROW((HostGrayscaleBank(images, {{2}})), std::invalid_argument);
+}
+
 TEST_F(HostInputBankTest, PhotoGrayscaleSharesPixelsAndPreservesSourceOrder) {
   // PHOTO has no depth/normal files and owns only source images, not reference
   // transforms or solver state. Capture the invocation identities before reads.

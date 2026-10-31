@@ -3,6 +3,7 @@
 
 #include "colmap/mvs/owned_fixed_cohort_budget.h"
 
+
 namespace colmap::mvs::owned {
 
 // Raw logical inventory only, not a calibrated physical-fit estimator. No
@@ -20,7 +21,8 @@ inline ByteCharge FixedCohortPrivateLogicalMinimum(
     int reference,
     const std::vector<int>& sources,
     bool geometry,
-    uint64_t* staging = nullptr) {
+    uint64_t* staging = nullptr,
+    bool shared_photo = false) {
   const auto& ref = images.at(reference);
   const auto minimum = ResidentPrivateLogicalMinimum(
       ref.width, ref.height, sources.size(), false);
@@ -32,8 +34,11 @@ inline ByteCharge FixedCohortPrivateLogicalMinimum(
   const auto padded =
       CheckedMultiply(CheckedMultiply(width, height), sources.size());
   if (staging) *staging = geometry ? CheckedMultiply(4, padded) : 0;
-  auto device = CheckedAdd(minimum.device, padded);
+  auto device = CheckedAdd(minimum.device, shared_photo ? 0 : padded);
   if (geometry) device = CheckedAdd(device, CheckedMultiply(8, padded));
+  // Retain per-owner host packing allowance in shared mode: binding validation
+  // builds ordered Image copies (including duplicate ordinals). Its tight
+  // pixels fit within this per-job padded transient. Not a host sharing credit.
   return {CheckedAdd(minimum.host, padded), device};
 }
 
@@ -46,6 +51,25 @@ inline FixedCohortBudget BuildFixedCohortLogicalInventory(
   uint64_t inputs = 0, maps = 0;
   for (const auto& image : images)
     inputs = CheckedAdd(inputs, CheckedMultiply(image.width, image.height));
+  budget.photo_shared = {};
+  const bool shared =
+      budget.photo_source_storage == FixedCohortPhotoSourceStorage::kShared;
+  if (shared) {
+    std::vector<int> sources;
+    uint64_t width = 0, height = 0;
+    for (const auto& job : jobs) {
+      for (int index : job.photo_sources) {
+        const auto& image = images.at(index);
+        if (std::find(sources.begin(), sources.end(), index) == sources.end())
+          sources.push_back(index);
+        width = std::max(width, image.width);
+        height = std::max(height, image.height);
+      }
+    }
+    const auto bytes =
+        CheckedMultiply(CheckedMultiply(width, height), sources.size());
+    budget.photo_shared = {bytes, bytes};
+  }
   budget.photo_private.clear();
   budget.geo_private.clear();
   budget.geo_staging_device.clear();
@@ -54,7 +78,7 @@ inline FixedCohortBudget BuildFixedCohortLogicalInventory(
     maps = CheckedAdd(
         maps, CheckedMultiply(16, CheckedMultiply(ref.width, ref.height)));
     budget.photo_private.push_back(FixedCohortPrivateLogicalMinimum(
-        images, job.reference, job.photo_sources, false));
+        images, job.reference, job.photo_sources, false, nullptr, shared));
     uint64_t staging = 0;
     budget.geo_private.push_back(FixedCohortPrivateLogicalMinimum(
         images, job.reference, job.geo_sources, true, &staging));

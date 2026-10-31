@@ -73,6 +73,7 @@ class FixedCohortCommandTest(unittest.TestCase):
         result = self.invoke(['--help'])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('prepare_only', result.stdout + result.stderr)
+        self.assertIn('photo_source_storage', result.stdout + result.stderr)
         self.assertNotEqual(self.invoke([]).returncode, 0)
         self.assertNotEqual(self.invoke(['--not_an_option', '1']).returncode, 0)
 
@@ -90,6 +91,37 @@ class FixedCohortCommandTest(unittest.TestCase):
         sentinel.write_text('preserve')
         self.assertEqual(self.invoke().returncode, 0)
         self.assertEqual(sentinel.read_text(), 'preserve')
+
+    def test_photo_source_storage_default_private_and_shared_inventory(self):
+        for storage in (None, 'private', 'shared'):
+            with self.subTest(storage=storage):
+                args = self.args if storage is None else self.args + [
+                    '--photo_source_storage', storage]
+                result = self.invoke(args)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                mode = storage or 'private'
+                # Three distinct 20x10 uint8 layers, despite repeated ordinals.
+                union = 600 if mode == 'shared' else 0
+                self.assertIn(f'photo_source_storage={mode}; logical PHOTO union '
+                              f'host={union} device={union} bytes', result.stdout)
+                self.assertIn('NO GPU execution', result.stdout)
+                self.assertFalse(self.output.exists())
+
+    def test_invalid_photo_source_storage_refuses_before_workspace_or_output(self):
+        # A missing workspace ensures option validation precedes input loading.
+        self.args[self.args.index('--workspace_path') + 1] = str(self.root / 'missing')
+        self.output.mkdir()
+        sentinel = self.output / 'sentinel'
+        sentinel.write_text('preserve')
+        for value in ('auto', 'SHARED', ''):
+            with self.subTest(value=value):
+                result = self.invoke(self.args + ['--photo_source_storage', value])
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('invalid photo_source_storage: expected private or shared',
+                              result.stdout + result.stderr)
+                self.assertEqual(list(self.output.iterdir()), [sentinel])
+                self.assertEqual(sentinel.read_text(), 'preserve')
+                self.assertNotIn('admitted host=', result.stdout)
 
     def test_geo_producer_coverage_before_gpu(self):
         self.config.write_text('a.pgm\nc.pgm,nested/b.pgm\n')
