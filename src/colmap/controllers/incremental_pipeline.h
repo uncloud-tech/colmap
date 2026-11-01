@@ -170,6 +170,10 @@ struct IncrementalPipelineOptions {
   IncrementalMapper::Options mapper;
   IncrementalTriangulator::Options triangulation;
 
+  // Optional logical initial DB/model payload and correspondence graph growth.
+  // Zero preserves legacy behavior; other SfM allocations remain UNKNOWN.
+  uint64_t host_budget_bytes = 0, policy_host_bytes = 0, reserve_host_bytes = 0;
+
   IncrementalMapper::Options Mapper() const;
   IncrementalTriangulator::Options Triangulation() const;
   BundleAdjustmentOptions LocalBundleAdjustment() const;

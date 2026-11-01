@@ -226,8 +226,75 @@ Geometric verification may differ across runs because default thread-local PRNG
 state is consumed by worker scheduling; raw match equality and full geometry
 field/inlier-order comparisons require separate effective-input/RNG binding.
 No seeds or geometry fields are changed/canonicalized to force agreement.
-Matching's full physical model/calibration and mapper growth/admission remain
-future Story29 work; this slice does not qualify whole-pipeline fit or performance.
+Matching's full physical model/calibration and remaining mapper growth remain
+future work; this slice does not qualify whole-pipeline fit or performance.
+
+### Initial CPU mapping payload and correspondence-graph admission
+
+The frontend passes a fresh observed, lower-capped **host** ceiling and existing
+host policy/reserve terms to `mapper`, with phase-scoped RSS monitoring restored
+in `finally` on both success and failure. The default local/global BA backends
+remain CPU Ceres: `Mapper.ba_gpu_index` alone does **not** enable GPU BA. No
+backend, solver options, seed, threading, image selection, registration order,
+color extraction, track coverage or resolution is changed.
+
+Native `Mapper.host_budget_bytes=0` preserves unbudgeted behavior. Nonzero budgets
+support fresh SQLite-backed incremental mapping with CPU Ceres via `mapper` and
+`pose_prior_mapper`, including the existing multiple-model behavior. Nonzero
+budgets are unsupported by `hierarchical_mapper` and `point_triangulator`; both
+commands reject them immediately after option parsing, before loading a database
+or input model. Both incremental commands reject budgeted input-model continuation
+before loading the model (or updating pose-prior covariance). Fresh pose-prior
+mapping retains admission and controlled failure handling, with the existing
+main signal handler owning interruption. Explicit GPU BA, other BA backends,
+input-model continuation and preloaded-cache construction refuse before their
+unsupported materialization; there is no automatic fallback. Budgeted host observation needs
+a supported Linux/cgroup-v2 MVS build. `Mapper.policy_host_bytes` and
+`Mapper.reserve_host_bytes` use the existing strict byte-option parser; the
+frontend supplies policy automatically without new declared-byte requirements.
+
+A read transaction spans metadata inventory and payload loading, including WAL
+snapshots. Inventory validates full-width dimensions, scalar representation,
+BLOB lengths, image references and optional matrix/pose/camera shapes before
+keypoint or two-view payload allocation. Descriptors and raw matches are not
+loaded by this mapper path. The conservative all-DB reservation covers keypoint
+read/converted-coordinate overlap, cache Point2D values, two-view match BLOB and
+converted vectors, the pre-sized geometry array and optional camera overlap.
+Rows later filtered by the existing mapper are still reserved: this may
+**over-refuse**, never truncate images/features/correspondences.
+
+The graph additionally admits actual per-point adjacency vector capacities and
+replacement overlap before growth. Flattening retains original adjacency until
+all flat buffers and offsets are ready, then retires old storage and its credits.
+A flattening refusal leaves original adjacency queryable, not a half-finalized
+successful graph. Shared graph storage is charged once, even while cache,
+mapper, triangulator and observation manager share it. Each initial model's
+Point2D copy and observation counters/visibility pyramids are admitted separately.
+Retained models keep their copy credits until actual owner destruction; credits
+are conservatively **not** returned merely by `TearDown`, deleting vector elements
+or writing a model. Model/graph payloads die before their credit holders.
+
+Admission applies exactly one aggregate `ceil(3%)` to live known + raw host
+policy, with reserve outside. Capacity is `min(observed_FREE, supplied_cap)`;
+already-live usage is excluded from FREE and is not subtracted again. This is
+**initial payload and controlled graph-growth admission, NOT a whole-SfM hard
+cap or physical-fit guarantee**. Point3D/track growth, triangulation temporaries,
+other reconstruction copies, RANSAC/Ceres/linear-solver workspace, full-resolution
+color bitmap/decoder storage, metadata/hash tables, SQLite caches and allocator
+internals remain UNKNOWN, covered only by uncalibrated additional policy and
+external safeguards. Direct-child RSS monitoring is best-effort, not a process-
+tree memory limit. No physical-fit, quality or performance qualification follows
+from passing this partial ledger.
+
+Loader/growth failures unwind owned payloads and return status 1 without the
+success flush/project.ini path. Already-finished submodels or explicitly requested
+snapshots from earlier progress can remain; these are not frontend completion.
+Main remains the sole signal handler and returns 130 for SIGINT after cooperative
+cleanup. Existing interruption behavior may retain a valid partial sparse model;
+the frontend still refuses to publish a completed result after nonzero exit.
+Retained output comparisons require matched DB geometry, effective options,
+thread/RNG history and registration order. Unknown repeatability is not repaired
+by sorting geometry, changing seeds or canonicalizing numerical differences.
 
 ### Undistortion admission
 

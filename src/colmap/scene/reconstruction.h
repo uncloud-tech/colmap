@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "colmap/scene/mapping_resource.h"
+
 #include "colmap/geometry/sim3.h"
 #include "colmap/scene/camera.h"
 #include "colmap/scene/database.h"
@@ -82,6 +84,9 @@ class Reconstruction {
 
   // Load data from given `DatabaseCache`.
   void Load(const DatabaseCache& database_cache);
+  std::shared_ptr<MappingLedger> MappingBudget() const {
+    return mapping_credit_ ? mapping_credit_->ledger : nullptr;
+  }
 
   // Finalize the Reconstruction after the reconstruction has finished.
   // Once a scene has been finalized, it cannot be used for reconstruction.
@@ -259,6 +264,9 @@ class Reconstruction {
   void CreateImageDirs(const std::filesystem::path& path) const;
 
  private:
+  // Initial cache-copy credit outlives all model payload members. Retain it
+  // conservatively through TearDown; model/track growth is NOT accounted here.
+  std::shared_ptr<MappingLedger::Ticket> mapping_credit_;
   std::pair<Eigen::AlignedBox3d, Eigen::Vector3d> ComputeBBBoxAndCentroid(
       double min_percentile, double max_percentile, bool use_images) const;
 

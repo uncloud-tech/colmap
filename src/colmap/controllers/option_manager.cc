@@ -720,6 +720,9 @@ void OptionManager::AddMapperOptions() {
     return;
   }
 
+  AddDefaultByteOption("Mapper.host_budget_bytes", &mapper->host_budget_bytes);
+  AddDefaultByteOption("Mapper.policy_host_bytes", &mapper->policy_host_bytes);
+  AddDefaultByteOption("Mapper.reserve_host_bytes", &mapper->reserve_host_bytes);
   AddDefaultOption("Mapper.min_num_matches", &mapper->min_num_matches);
   AddDefaultOption("Mapper.ignore_watermarks", &mapper->ignore_watermarks);
   AddDefaultOption("Mapper.multiple_models", &mapper->multiple_models);

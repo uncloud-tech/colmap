@@ -401,7 +401,7 @@ class WorkspaceFixtureBindingTest(unittest.TestCase):
         self.assertIn('MakeWorkspaceFixture', header)
         self.assertIn('b.max_active_owners = 1', header)
         self.assertIn('b.max_active_owners = 2', header)
-        self.assertIn(tool['cpp']('6675ece6e3d15f103d08b946b61c5c5436cd8e958808a23ffda3a9f85489a796'), header)
+        self.assertIn(tool['cpp']('d7ed4eb819453f02cd7a709a7f62d1d0252e33c95ab284a1214259a94647c362'), header)
         self.assertIn('b.caller_inputs = {12288ULL,0ULL}', header)
         self.assertIn('b.host_outputs = {393216ULL,0ULL}', header)
         self.assertIn('b.snapshots = {0ULL,196608ULL}', header)

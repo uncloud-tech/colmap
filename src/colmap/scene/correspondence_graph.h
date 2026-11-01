@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "colmap/scene/mapping_resource.h"
+
 #include "colmap/feature/types.h"
 #include "colmap/scene/two_view_geometry.h"
 #include "colmap/util/hash_containers.h"
@@ -129,7 +131,14 @@ class CorrespondenceGraph {
   // observation as its only correspondence.
   bool IsTwoViewObservation(image_t image_id, point2D_t point2D_idx) const;
 
+ public:
+  // Opt-in initial mapping graph accounting; attach only to an empty graph.
+  void SetMappingBudget(std::shared_ptr<MappingLedger> ledger, uint64_t geometry_camera_bytes = 0);
+
  private:
+  // Destroyed after graph payloads, even on loader/growth failure.
+  std::shared_ptr<MappingLedger::Ticket> mapping_credit_;
+
   struct Image {
     // Number of 2D points with at least one correspondence to another image.
     point2D_t num_observations = 0;

@@ -171,6 +171,8 @@ class ObservationManager {
                                          point2D_t point2D_idx);
 
  private:
+  // Retire counters/pyramid credit only after their owned maps are destroyed.
+  std::shared_ptr<MappingLedger::Ticket> mapping_credit_;
   friend std::ostream& operator<<(std::ostream& stream,
                                   const ObservationManager& obs_manager);
 

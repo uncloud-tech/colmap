@@ -27,9 +27,14 @@ std::vector<image_pair_t> CorrespondenceGraph::ImagePairs() const {
   return image_pairs;
 }
 
+void CorrespondenceGraph::SetMappingBudget(std::shared_ptr<MappingLedger> ledger, uint64_t geometry_camera_bytes) {
+  THROW_CHECK(images_.empty() && image_pairs_.empty());
+  mapping_credit_ = ledger->Acquire(geometry_camera_bytes);
+}
+
 void CorrespondenceGraph::Finalize() {
   THROW_CHECK(!finalized_);
-  finalized_ = true;
+  if (!mapping_credit_) finalized_ = true;
 
   // Flatten all correspondences into a compact representation.
   for (auto& [_, image] : images_) {
@@ -46,8 +51,17 @@ void CorrespondenceGraph::Finalize() {
 
     // Reshuffle correspondences into flattened vector.
     const point2D_t num_points2D = image.corrs.size();
-    image.flat_corrs.reserve(num_total_corrs);
-    image.flat_corr_begs.resize(num_points2D + 1);
+    if (mapping_credit_) {
+      // Until every image has flattened successfully, queries keep using the
+      // original adjacency. A refusal leaves a usable unfinalized graph.
+      image.flat_corrs.clear();
+      THROW_CHECK_LE(num_total_corrs, std::numeric_limits<point2D_t>::max());
+      MappingReserve(image.flat_corrs, num_total_corrs, mapping_credit_);
+      MappingReserve(image.flat_corr_begs, MappingAdd(num_points2D, 1), mapping_credit_);
+    } else {
+      image.flat_corrs.reserve(num_total_corrs);
+    }
+    image.flat_corr_begs.resize(static_cast<size_t>(num_points2D) + 1);
     for (point2D_t point2D_idx = 0; point2D_idx < num_points2D; ++point2D_idx) {
       image.flat_corr_begs[point2D_idx] = image.flat_corrs.size();
       std::vector<Correspondence>& corrs = image.corrs[point2D_idx];
@@ -60,14 +74,38 @@ void CorrespondenceGraph::Finalize() {
     THROW_CHECK_EQ(image.flat_corrs.size(), num_total_corrs);
 
     // Deallocate original data.
-    std::vector<std::vector<Correspondence>>().swap(image.corrs);
+    if (!mapping_credit_)
+      std::vector<std::vector<Correspondence>>().swap(image.corrs);
+  }
+  if (mapping_credit_) {
+    // Commit only after all allocations succeeded. Credit follows actual
+    // retirement, not the earlier construction of replacement flat buffers.
+    for (auto& [id, image] : images_) {
+      uint64_t retired = MappingMultiply(image.corrs.capacity(), sizeof(std::vector<Correspondence>));
+      for (const auto& corrs : image.corrs)
+        retired = MappingAdd(retired, MappingMultiply(corrs.capacity(), sizeof(Correspondence)));
+      std::vector<std::vector<Correspondence>>().swap(image.corrs);
+      mapping_credit_->Release(retired);
+    }
+    finalized_ = true;
   }
 }
 
 void CorrespondenceGraph::AddImage(const image_t image_id,
                                    const size_t num_points) {
   THROW_CHECK(!ExistsImage(image_id));
-  images_[image_id].corrs.resize(num_points);
+  if (mapping_credit_) {
+    THROW_CHECK_LE(num_points, std::numeric_limits<point2D_t>::max());
+    // Admission precedes insertion; on refusal no half-created image remains.
+    auto credit = mapping_credit_->ledger->Acquire(0);
+    Image image;
+    MappingReserve(image.corrs, num_points, credit);
+    image.corrs.resize(num_points);
+    images_.emplace(image_id, std::move(image));
+    mapping_credit_->Absorb(credit);
+  } else {
+    images_[image_id].corrs.resize(num_points);
+  }
 }
 
 void CorrespondenceGraph::AddTwoViewGeometry(
@@ -83,6 +121,26 @@ void CorrespondenceGraph::AddTwoViewGeometry(
   // Corresponding images.
   struct Image& image1 = images_.at(image_id1);
   struct Image& image2 = images_.at(image_id2);
+
+  if (mapping_credit_) {
+    THROW_CHECK_LE(MappingAdd(image1.num_correspondences, two_view_geometry.inlier_matches.size()),
+                   std::numeric_limits<point2D_t>::max());
+    THROW_CHECK_LE(MappingAdd(image2.num_correspondences, two_view_geometry.inlier_matches.size()),
+                   std::numeric_limits<point2D_t>::max());
+    // Admit all requested per-point growth before changing pair/counter state.
+    // Repeated/invalid matches are still handled by the unchanged loop below.
+    FlatHashMap<point2D_t, size_t> counts1, counts2;
+    for (const auto& match : two_view_geometry.inlier_matches) {
+      if (match.point2D_idx1 < image1.corrs.size() && match.point2D_idx2 < image2.corrs.size()) {
+        ++counts1[match.point2D_idx1];
+        ++counts2[match.point2D_idx2];
+      }
+    }
+    for (const auto& [idx, count] : counts1)
+      MappingReserve(image1.corrs[idx], MappingAdd(image1.corrs[idx].size(), count), mapping_credit_);
+    for (const auto& [idx, count] : counts2)
+      MappingReserve(image2.corrs[idx], MappingAdd(image2.corrs[idx].size(), count), mapping_credit_);
+  }
 
   // Store number of correspondences for each image to find good initial pair.
   image1.num_correspondences += two_view_geometry.inlier_matches.size();

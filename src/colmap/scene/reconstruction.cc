@@ -267,6 +267,13 @@ bool Reconstruction::IsValid() const {
 }
 
 void Reconstruction::Load(const DatabaseCache& database_cache) {
+  if (const auto ledger = database_cache.MappingBudget(); ledger && !mapping_credit_) {
+    uint64_t points = 0;
+    for (const auto& [id, image] : database_cache.Images())
+      points = MappingAdd(points, image.NumPoints2D());
+    mapping_credit_ = ledger->Acquire(MappingMultiply(points, sizeof(Point2D)));
+  }
+
   // Add cameras.
   cameras_.reserve(database_cache.NumCameras());
   for (const auto& [camera_id, camera] : database_cache.Cameras()) {

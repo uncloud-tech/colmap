@@ -32,6 +32,17 @@ ObservationManager::ObservationManager(
     std::shared_ptr<const CorrespondenceGraph> correspondence_graph)
     : reconstruction_(reconstruction),
       correspondence_graph_(std::move(correspondence_graph)) {
+  if (const auto ledger = reconstruction_.MappingBudget()) {
+    uint64_t points = 0;
+    for (const auto& [id, image] : reconstruction_.Images())
+      points = MappingAdd(points, image.NumPoints2D());
+    uint64_t pyramid = MappingMultiply(kNumPoint3DVisibilityPyramidLevels, sizeof(Eigen::MatrixXi));
+    for (size_t level = 0; level < kNumPoint3DVisibilityPyramidLevels; ++level)
+      pyramid = MappingAdd(pyramid, MappingMultiply(uint64_t{1} << (2 * (level + 1)), sizeof(int)));
+    auto bytes = MappingAdd(MappingMultiply(points, sizeof(point2D_t)),
+        MappingMultiply(reconstruction_.NumImages(), pyramid));
+    mapping_credit_ = ledger->Acquire(bytes);
+  }
   // Add image pairs.
   if (correspondence_graph_) {
     image_pair_stats_.reserve(correspondence_graph_->NumImagePairs());

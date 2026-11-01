@@ -40,7 +40,7 @@ class FrontendTest(unittest.TestCase):
                             (root / 'sparse/0').mkdir()
                         if command == 'model_analyzer':
                             return json.dumps(dict(num_registered_images=2, num_points3D=1))
-                        if command in ('feature_extractor', 'exhaustive_matcher'):
+                        if command in ('feature_extractor', 'exhaustive_matcher', 'mapper'):
                             self.assertEqual(reconstruction.process.host_budget_bytes, 1000)
                         elif command == 'image_undistorter':
                             self.assertEqual(reconstruction.process.host_budget_bytes, 1000)
