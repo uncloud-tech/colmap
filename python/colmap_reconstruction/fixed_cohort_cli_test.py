@@ -163,11 +163,52 @@ class FixedCohortCommandTest(unittest.TestCase):
         if os.environ.get('COLMAP_EXPECT_ALLOCATION_FINGERPRINT'):
             self.assertEqual(identity['allocation_fingerprint'],
                              os.environ['COLMAP_EXPECT_ALLOCATION_FINGERPRINT'])
-        for arguments in (['--not_an_option'], ['--gpu_index', '-1', '--deadline_seconds', '1'],
+        for arguments in (['--not_an_option'], ['--deadline_seconds', '0'],
+                          ['--gpu_index', '-1', '--deadline_seconds', '1'],
                           ['--gpu_index', '0', '--deadline_seconds', '0']):
             refused = subprocess.run([os.environ['COLMAP_TEST_EXECUTABLE'], 'reconstruction_info',
                                       *arguments], capture_output=True, text=True, timeout=10)
             self.assertNotEqual(refused.returncode, 0)
+
+    def test_same_executable_visible_inventory(self):
+        import json
+        identity = subprocess.run([os.environ['COLMAP_TEST_EXECUTABLE'], 'reconstruction_info'],
+                                  capture_output=True, text=True, timeout=10)
+        self.assertEqual(identity.returncode, 0, identity.stderr)
+        cuda = json.loads(identity.stdout)['cuda_compiled']
+        if cuda and not os.environ.get('COLMAP_TEST_OBSERVED_CUDA'):
+            self.skipTest('CUDA runtime inventory requires opt-in COLMAP_TEST_OBSERVED_CUDA')
+        result = subprocess.run([os.environ['COLMAP_TEST_EXECUTABLE'], 'reconstruction_info',
+                                 '--deadline_seconds', '5'], capture_output=True, text=True, timeout=10)
+        if not cuda:
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('requires native CUDA', result.stderr)
+            return
+        self.assertEqual(result.returncode, 0, result.stderr)
+        inventory = json.loads(result.stdout)['device_inventory']
+        self.assertEqual([d['ordinal'] for d in inventory], list(range(len(inventory))))
+        for device in inventory:
+            self.assertIsInstance(device['usable'], bool)
+            if device['usable']:
+                self.assertTrue(device['device_uuid'])
+                self.assertTrue(device['name'])
+                self.assertGreater(device['compute_capability_major'], 0)
+                self.assertGreaterEqual(int(device['total_device_bytes']), int(device['available_device_bytes']))
+                exact = subprocess.run([os.environ['COLMAP_TEST_EXECUTABLE'], 'reconstruction_info',
+                                        '--gpu_index', str(device['ordinal']), '--deadline_seconds', '5'],
+                                       capture_output=True, text=True, timeout=10)
+                self.assertEqual(exact.returncode, 0, exact.stderr)
+                observation = json.loads(exact.stdout)
+                self.assertEqual(observation['device_uuid'], device['device_uuid'])
+                self.assertEqual(observation['device_ordinal'], device['ordinal'])
+            else:
+                self.assertTrue(device['reason'])
+        masked = subprocess.run([os.environ['COLMAP_TEST_EXECUTABLE'], 'reconstruction_info',
+                                 '--deadline_seconds', '5'], capture_output=True, text=True, timeout=10,
+                                env=dict(os.environ, CUDA_VISIBLE_DEVICES=''))
+        self.assertEqual(masked.returncode, 0, masked.stderr)
+        self.assertEqual(json.loads(masked.stdout)['device_inventory'], [])
+        self.assertFalse(self.output.exists())
 
     def test_help_and_parser(self):
         result = self.invoke(['--help'])

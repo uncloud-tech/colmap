@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #include "colmap/mvs/owned_cohort_lifecycle_test_util.h"
 #include "colmap/mvs/owned_fixed_cohort_pipeline.h"
+#include "colmap/mvs/owned_fixed_cohort_validation.h"
 #include "colmap/mvs/patch_match_cuda_owned.h"
 
 #include <cstring>
@@ -10,6 +11,39 @@
 
 namespace colmap::mvs::owned {
 namespace {
+TEST(FixedCohortDeviceInventory, RestoresContextAndReportsVisibleOrdinals) {
+  int count = 0;
+  if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0)
+    GTEST_SKIP() << "visible CUDA runtime device required";
+  int original = -1;
+  ASSERT_EQ(cudaGetDevice(&original), cudaSuccess);
+  struct RestoreDevice {
+    int device;
+    ~RestoreDevice() { cudaSetDevice(device); }
+  } restore{original};
+  // On multi-device hosts, leave a nonzero current ordinal before inventory.
+  ASSERT_EQ(cudaSetDevice(count - 1), cudaSuccess);
+  NativeRunDeadlineGuard guard(NativeRunDeadline::FromBudget(std::chrono::seconds(30)));
+  const auto inventory = ObserveFixedCohortDevices(guard);
+  ASSERT_EQ(inventory.size(), static_cast<size_t>(count));
+  int current = -1;
+  ASSERT_EQ(cudaGetDevice(&current), cudaSuccess);
+  EXPECT_EQ(current, count - 1);
+  for (int device = 0; device < count; ++device) {
+    const auto& observed = inventory[device];
+    EXPECT_EQ(observed.capacity.device, device);
+    if (observed.usable) {
+      EXPECT_FALSE(observed.capacity.device_uuid.empty());
+      EXPECT_FALSE(observed.capacity.device_name.empty());
+      EXPECT_GT(observed.capacity.compute_capability_major, 0);
+      EXPECT_LE(observed.capacity.available.device, observed.capacity.device_total);
+      EXPECT_TRUE(observed.reason.empty());
+    } else {
+      EXPECT_FALSE(observed.reason.empty());
+    }
+  }
+}
+
 std::vector<Image> Images(int count = 2) {
   const float K[9] = {10, 0, 2, 0, 10, 2, 0, 0, 1};
   const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};

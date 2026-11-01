@@ -178,6 +178,12 @@ PreparedFixedCohortWorkspace PrepareFixedCohortWorkspace(
 }
 
 #if !defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
+std::vector<FixedCohortDeviceObservation> ObserveFixedCohortDevices(
+    const NativeRunDeadlineGuard& guard) {
+  guard.Check();
+  throw std::runtime_error("visible device inventory requires native CUDA; no fallback");
+}
+
 FixedCohortCapacityObservation ObserveFixedCohortCapacities(int) {
   throw std::runtime_error(
       "fixed-cohort capacity observation requires native CUDA; unsupported "

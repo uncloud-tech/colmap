@@ -53,8 +53,9 @@ namespace colmap {
 // mandatory.
 int RunOptimizedDensePlan(int argc, char** argv);
 // Same-executable generated build identity; no workspace or CUDA context by
-// default. Optional --gpu_index N --deadline_seconds N observes FREE host/cgroup
-// and selected CUDA device with the canonical native observer (not admission).
+// default. --deadline_seconds N enumerates visible CUDA devices, retaining failed
+// observations. --gpu_index N --deadline_seconds N observes FREE host/cgroup
+// and the exact CUDA device with the canonical native observer (not admission).
 int RunReconstructionInfo(int argc, char** argv);
 
 struct OptimizedDensePlanArguments {

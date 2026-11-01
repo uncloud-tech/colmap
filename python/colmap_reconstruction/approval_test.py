@@ -50,7 +50,8 @@ if command == 'reconstruction_info':
         source_commit='a' * 40, allocation_fingerprint=FINGERPRINT,
         available_host_bytes=32 * 1024**3,
         available_device_bytes=(int(Path(os.environ['TEST_FREE']).read_text()) if Path(os.environ['TEST_FREE']).exists() else 16 * 1024**3),
-        device_uuid=(Path(os.environ['TEST_DEVICE']).read_text() if Path(os.environ['TEST_DEVICE']).exists() else 'GPU-test'))))
+        device_uuid=(Path(os.environ['TEST_DEVICE']).read_text() if Path(os.environ['TEST_DEVICE']).exists() else next((d['device_uuid'] for d in json.loads(os.environ.get('TEST_INVENTORY', '[]')) if '--gpu_index' in sys.argv and d['ordinal'] == int(sys.argv[sys.argv.index('--gpu_index') + 1])), 'GPU-test')),
+        device_inventory=json.loads(os.environ.get('TEST_INVENTORY', '[{"ordinal":0,"usable":true,"available_device_bytes":"17179869184","device_uuid":"GPU-test"},{"ordinal":2,"usable":true,"available_device_bytes":"17179869184","device_uuid":"GPU-test"}]')))))
 elif os.environ.get('TEST_SIDECAR') and command == 'feature_extractor':
     image_list = Path(sys.argv[sys.argv.index('--image_list_path') + 1])
     workspace = Path(sys.argv[sys.argv.index('--database_path') + 1]).parent
@@ -305,7 +306,7 @@ with patch.object(tempfile, '_candidate_tempdir_list', return_value=candidates):
         for key, expected in dict(threads=3, gpu_index=2, max_image_size=1600,
                 source_cap=8, num_samples=7, random_seed=42, tile=32).items():
             self.assertEqual(plan['options'][key], expected)
-        self.assertEqual(len([call for call in calls if call[0] == 'reconstruction_info']), 3)
+        self.assertEqual(len([call for call in calls if call[0] == 'reconstruction_info']), 4)
 
     def test_approved_pipeline_commands_preserve_quality_and_dispatch_options(self):
         self.env['TEST_SFM_PROCEED'] = '1'
@@ -346,6 +347,64 @@ with patch.object(tempfile, '_candidate_tempdir_list', return_value=candidates):
         self.assertIn('photo inputs/inventory changed', result.stderr)
         self.assertNotIn('feature_extractor', [call[0] for call in self.commands()])
 
+    def test_auto_selects_most_free_visible_device_without_output(self):
+        self.env['TEST_INVENTORY'] = json.dumps([
+            dict(ordinal=0, usable=True, available_device_bytes=str(8 * 1024**3), device_uuid='GPU-zero'),
+            dict(ordinal=2, usable=True, available_device_bytes=str(24 * 1024**3), device_uuid='GPU-two')])
+        result = self.invoke('--plan-only')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        plan = json.loads(result.stdout.split('Effective plan (approval required): ')[1])
+        self.assertEqual(plan['effective_dispatch']['extraction']['gpu_index'], 2)
+        self.assertEqual(plan['device_selection']['mode'], 'auto')
+        self.assertEqual(len(plan['device_inventory']), 2)
+        # Inventory FREE selects; a fresh authoritative exact query admits.
+        self.assertEqual(plan['hardware_observation']['available_device_bytes'], 16 * 1024**3)
+        queries = [call for call in self.commands() if call[0] == 'reconstruction_info']
+        self.assertEqual(queries[0][1], '--deadline_seconds')
+        self.assertEqual(queries[1][1:3], ['--gpu_index', '2'])
+        self.assert_preview_only()
+
+    def test_visible_selection_single_ties_unusable_and_exact_override(self):
+        cases = [
+            ([dict(ordinal=3, usable=True, available_device_bytes='9000000000', device_uuid='GPU-three')], [], 3, 'auto'),
+            ([dict(ordinal=2, usable=True, available_device_bytes='9000000000', device_uuid='GPU-two'),
+              dict(ordinal=0, usable=True, available_device_bytes='9000000000', device_uuid='GPU-zero')], [], 0, 'auto'),
+            ([dict(ordinal=0, usable=False, available_device_bytes=None, device_uuid='', reason='context unavailable'),
+              dict(ordinal=2, usable=True, available_device_bytes='9000000000', device_uuid='GPU-two')], [], 2, 'auto'),
+            ([dict(ordinal=0, usable=True, available_device_bytes='19000000000', device_uuid='GPU-zero'),
+              dict(ordinal=2, usable=True, available_device_bytes='9000000000', device_uuid='GPU-two')], ['--gpu-index', '2'], 2, 'explicit')]
+        for inventory, options, expected, mode in cases:
+            with self.subTest(expected=expected, mode=mode, inventory=inventory):
+                self.env['TEST_INVENTORY'] = json.dumps(inventory)
+                result = self.invoke('--plan-only', *options)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                plan = json.loads(result.stdout.split('Effective plan (approval required): ')[1])
+                self.assertEqual(plan['device_selection']['ordinal'], expected)
+                self.assertEqual(plan['device_selection']['mode'], mode)
+                self.assertEqual(plan['device_inventory'], inventory)
+                self.assertIn('not fastest-device', plan['device_selection']['limitations'])
+                self.assertEqual(plan['effective_dispatch']['extraction']['threads'], 1)
+                self.assert_preview_only()
+
+    def test_no_device_unusable_and_invalid_explicit_refuse_without_fallback(self):
+        cases = [([], []),
+                 ([dict(ordinal=0, usable=False, reason='context failed')], []),
+                 ([dict(ordinal=0, usable=True, available_device_bytes='9000000000', device_uuid='GPU-zero')], ['--gpu-index', '7']),
+                 ([dict(ordinal=0, usable=True, available_device_bytes='9000000000', device_uuid='GPU-zero'),
+                   dict(ordinal=2, usable=False, reason='permission denied')], ['--gpu-index', '2'])]
+        for inventory, options in cases:
+            with self.subTest(inventory=inventory, options=options):
+                self.env['TEST_INVENTORY'] = json.dumps(inventory)
+                result = self.invoke('--yes', *options)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn('no usable visible CUDA device', result.stderr)
+                self.assertIn('CUDA_VISIBLE_DEVICES', result.stderr)
+                self.assertIn(json.dumps(inventory), result.stderr)
+                self.assert_preview_only()
+        result = self.invoke('--yes', '--gpu-index', '-1')
+        self.assertEqual(result.returncode, 2)
+        self.assert_preview_only()
+
     def test_changed_device_refuses_instead_of_silently_switching_gpu(self):
         process, terminal, _ = self.interactive()
         self.device_state.write_text('GPU-replacement')
@@ -353,6 +412,7 @@ with patch.object(tempfile, '_candidate_tempdir_list', return_value=candidates):
         tail, _ = process.communicate(timeout=10)
         self.assertEqual(process.returncode, 2, tail.decode())
         self.assertIn(b'device identity changed', tail)
+        self.assertFalse(self.workspace.exists())
         self.assertNotIn('feature_extractor', [call[0] for call in self.commands()])
 
     def test_plan_only_without_cuda_build_is_honestly_unavailable(self):
@@ -413,6 +473,7 @@ with patch.object(tempfile, '_candidate_tempdir_list', return_value=candidates):
         tail, _ = process.communicate(timeout=10)
         self.assertEqual(process.returncode, 2)
         self.assertIn(b'device reserve unavailable', tail)
+        self.assertFalse(self.workspace.exists())
         self.assertNotIn('feature_extractor', [call[0] for call in self.commands()])
 
     def test_approval_wait_respects_invocation_deadline(self):

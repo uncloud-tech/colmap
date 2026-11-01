@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #pragma once
 
+#include "colmap/mvs/native_run_deadline.h"
 #include "colmap/mvs/owned_fixed_cohort_pipeline.h"
 
 #include <filesystem>
@@ -30,7 +31,19 @@ struct FixedCohortCapacityObservation {
   int device = -1;           // Process-visible CUDA ordinal.
   std::string device_name;
   std::string device_uuid;
+  int compute_capability_major = 0;
+  int compute_capability_minor = 0;
 };
+struct FixedCohortDeviceObservation {
+  FixedCohortCapacityObservation capacity;
+  bool usable = false;  // Observation succeeded, NOT kernel/physical-fit proof.
+  std::string reason;
+};
+// Enumerate process-visible ordinals with the authoritative FREE observer.
+// Per-device failures remain visible; the calling CLI owns the absolute deadline.
+// Restores the calling thread's CUDA device context.
+std::vector<FixedCohortDeviceObservation> ObserveFixedCohortDevices(
+    const NativeRunDeadlineGuard& guard);
 // Selects/initializes the requested CUDA device and queries its free memory.
 // No pixels, banks or solvers are allocated. Throws on query failure or a
 // non-native-CUDA build; no fallback. Snapshot only, not a reservation.

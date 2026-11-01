@@ -74,7 +74,8 @@ def parse_args(argv):
     parser.add_argument('--require-hard-memory-cap', action='store_true', help='unsupported in ordinary local mode: always refuses')
     parser.add_argument('--timeout-seconds', type=positive_float, default=3600)
     parser.add_argument('--threads', type=positive_int, default=1, help='SfM/feature/undistortion workers; independent of optimized solver concurrency')
-    parser.add_argument('--gpu-index', type=nonnegative_int, default=0)
+    parser.add_argument('--gpu-index', type=nonnegative_int,
+                        help='exact process-visible CUDA ordinal; omitted: most observed FREE bytes, tie lowest ordinal')
     parser.add_argument('--source-cap', type=int, choices=(8, 20), default=20)
     parser.add_argument('--num-samples', type=int, choices=range(1, 16), default=15)
     parser.add_argument('--random-seed', type=int, default=0)
@@ -202,13 +203,35 @@ class Reconstruction:
         self.assets.mkdir()
         write_json(self.assets / 'intent.json', {key: str(value) if isinstance(value, Path) else value
                    for key, value in vars(self.args).items()})
-        identity = json.loads(self.native('reconstruction_info', capture=True))
+        identity = json.loads(self.native('reconstruction_info', '--deadline_seconds',
+            math.floor(self.process.remaining()), capture=True))
         if identity.get('schema_version') != 1 or identity.get('cuda_compiled') is not True:
             raise ValueError('plan unavailable: native CUDA/MVS build required; CPU fallback unsupported')
         if not re.fullmatch(r'[0-9a-f]{64}', identity.get('allocation_fingerprint', '')):
             raise ValueError('missing native allocation fingerprint')
         self.identity = identity
         self.resource_policy = select_policy(self.args, identity)
+        if not isinstance(identity.get('device_inventory'), list):
+            raise ValueError('native visible CUDA inventory missing; install the matching current executable and rerun')
+        self.device_inventory = identity['device_inventory']
+        requested = self.args.gpu_index
+        candidates = [device for device in self.device_inventory
+                      if device['usable'] is True and
+                      (requested is None or device['ordinal'] == requested)]
+        if not candidates:
+            raise ValueError('no usable visible CUDA device' +
+                ('' if requested is None else ' at explicit ordinal ' + str(requested)) +
+                '; check CUDA_VISIBLE_DEVICES, device access and CUDA runtime; free capacity or '
+                'select another ordinal explicitly and rerun. Inventory: ' + json.dumps(self.device_inventory))
+        selected = min(candidates, key=lambda device: (-int(device['available_device_bytes']), device['ordinal']))
+        self.args.gpu_index = selected['ordinal']
+        self.approved_device_uuid = selected['device_uuid']
+        self.device_selection = dict(mode='auto' if requested is None else 'explicit',
+            ordinal=selected['ordinal'], device_uuid=selected['device_uuid'],
+            rationale='most observed FREE bytes; tie lowest visible ordinal' if requested is None else
+                      'exact requested visible ordinal; no fallback',
+            limitations='memory heuristic, not fastest-device, physical-fit or SM/kernel compatibility guarantee; '
+                        'native capability and resource admission gates remain authoritative')
         write_json(self.assets / 'resource-policy.json', self.resource_policy)
         print('Resource policy: ' + json.dumps(self.resource_policy, sort_keys=True), file=sys.stderr)
         write_json(self.assets / 'build.json', dict(identity=identity, executable=self.executable,
@@ -226,8 +249,9 @@ class Reconstruction:
             options={key: str(value) if isinstance(value, Path) else value
                      for key, value in self.preview_options.items()},
             hardware_observation=self.observation,
+            device_inventory=self.device_inventory, device_selection=self.device_selection,
             cpu_available=len(os.sched_getaffinity(0)),
-            hardware_not_exported_by_native='CPU model, CUDA name/total/SM: UNKNOWN',
+            hardware_not_exported_by_native='CPU model: UNKNOWN',
             resource_policy=self.resource_policy,
             capacity_semantics='FREE snapshot, not reserved; reobserved/admitted at native boundaries',
             effective_dispatch=dict(extraction=dict(backend='CUDA SIFT', threads=self.args.threads,
@@ -282,6 +306,7 @@ class Reconstruction:
             registered_images=self.registered_images, photo_references=len(self.graph['phases']['photo']['jobs']),
             geo_references=len(self.graph['phases']['geo']['jobs']), backend='experimental_fixed_cohort',
             dense_report=self.report, resource_policy=self.resource_policy,
+            device_inventory=self.device_inventory, device_selection=self.device_selection,
             performance_qualified=False, hard_memory_cap=False))
 
     def inspect_photos(self):
@@ -702,6 +727,10 @@ def main(argv=None):
                 return 0
             if not args.yes:
                 approve_plan(reconstruction.process)
+            reconstruction.check_approval_binding()
+            # Consent binds one ordinal/UUID, never a fresh auto-selection.
+            # Recheck authoritative FREE before creating the requested output.
+            reconstruction.resources()
             reconstruction.check_approval_binding()
             args.workspace.mkdir(mode=0o700)
             created_workspace = True

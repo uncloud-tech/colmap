@@ -15,6 +15,8 @@ namespace colmap::mvs::owned {
 namespace {
 #if !defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
 TEST(FixedCohortCapacityObservation, UnsupportedBuildRefuses) {
+  NativeRunDeadlineGuard guard(NativeRunDeadline::FromBudget(std::chrono::seconds(5)));
+  EXPECT_THROW(ObserveFixedCohortDevices(guard), std::runtime_error);
   try {
     (void)ObserveFixedCohortCapacities(0);
     FAIL() << "unsupported device query succeeded";

@@ -13,7 +13,7 @@ colmap-reconstruct --experimental-local --photos /data/photos --workspace /data/
 ```
 
 Before any reconstruction or requested-workspace creation, this inspects inputs,
-queries the selected native GPU/resources and displays the effective pipeline,
+queries the same executable's visible CUDA inventory/resources and displays the effective pipeline,
 resolution semantics, options, output path and conservative policy. On a terminal,
 type **yes** to approve; **no**, Enter or EOF refuses without reconstruction.
 `--experimental-local` consents only to engineering estimates, **not** to running.
@@ -38,17 +38,41 @@ refusals/failures exit **2**; failure text alone never implies a signal exit cod
 
 Approval binds executable SHA256, input bytes/inventory/resolved targets and
 selected options. Changed inputs/executable refuse before workspace creation;
-rerun to review and approve a fresh plan. GPU UUID is checked at existing native
-resource boundaries. Inputs must remain immutable throughout execution: this is
+rerun to review and approve a fresh plan. The selected visible ordinal and GPU UUID
+are bound to approval. Identity and FREE resources are rechecked before requested
+workspace creation and at existing native resource boundaries; no automatic
+reselection occurs after consent. Inputs must remain immutable throughout execution: this is
 not a sandbox or protection against concurrent hostile writes. FREE is a racy
 snapshot, not reserved capacity; it is reobserved at native boundaries without
 asking again for insignificant fluctuations. Insufficient capacity refuses,
 without changing quality or falling back. Runtime and whole-pipeline physical
 fit remain **UNKNOWN**. Actual post-SfM geometry, depths, source graph and remaining
 native dense options resolve later under the displayed contract, not a fabricated
-final dense plan before SfM. Native CPU model/CUDA name/total/SM are not exported
-by this query and are explicitly UNKNOWN; selected threads/GPU are not inferred
-optimal hardware settings.
+final dense plan before SfM. CPU model remains UNKNOWN; threads still default to 1.
+
+With `--gpu-index` omitted, selection uses the usable observed CUDA device with
+**most available memory**, breaking ties by lowest process-visible ordinal.
+`--gpu-index N` selects exactly that nonnegative visible ordinal or refuses,
+never falls back. `CUDA_VISIBLE_DEVICES` remapping is honored: these are CUDA
+runtime ordinals, not management-tool or physical slot indices. Preview and
+reports include each ordinal, UUID, name, compute capability, total/FREE bytes,
+and observation status/reason; a failed device observation does not hide healthy
+candidates. Unknown FREE is null on failed observations. No visible/usable device
+refuses before requested output: check visibility, CUDA runtime/device access,
+free capacity, or choose a different explicit ordinal and rerun.
+
+This is a **memory heuristic**, not a fastest-device, physical-fit or SM/kernel
+compatibility guarantee. Existing actual capability/resource gates still apply;
+there is no CPU/stock/resize fallback and no driver-version pin (drivers >=570
+remain supported targets). Inventory initializes CUDA contexts but allocates no
+image/map/solver payload; snapshots are sequential, not simultaneous reservations.
+The selected device's FREE is freshly queried by the existing authoritative
+capacity observer. Inventory uses the invocation deadline and owned query-child
+cancellation, and restores the calling thread's device context.
+
+Native query interfaces (no workspace/input writes): `colmap reconstruction_info`
+returns build identity only; `--deadline_seconds N` adds visible inventory;
+`--gpu_index N --deadline_seconds N` observes exact-device FREE/UUID/ordinal.
 
 This selects `experimental-stereo-v1` conservative allowances for its supported
 native allocation binding. This is **not** whole-pipeline physical-fit or

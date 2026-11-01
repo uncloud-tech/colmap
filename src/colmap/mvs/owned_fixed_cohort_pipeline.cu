@@ -53,12 +53,69 @@ FixedCohortCapacityObservation ObserveFixedCohortCapacities(int device) {
   result.device_total = total;
   result.device = device;
   result.device_name = properties.name;
+  result.compute_capability_major = properties.major;
+  result.compute_capability_minor = properties.minor;
   std::ostringstream uuid;
   uuid << std::hex << std::setfill('0');
   for (const auto byte : properties.uuid.bytes)
     uuid << std::setw(2)
          << static_cast<unsigned int>(static_cast<unsigned char>(byte));
   result.device_uuid = uuid.str();
+  return result;
+}
+
+std::vector<FixedCohortDeviceObservation> ObserveFixedCohortDevices(
+    const NativeRunDeadlineGuard& guard) {
+  guard.Check();
+  int count = 0;
+  const auto status = cudaGetDeviceCount(&count);
+  if (status == cudaErrorNoDevice) return {};
+  if (status != cudaSuccess)
+    throw std::runtime_error(std::string("CUDA visible inventory failed: ") +
+                             cudaGetErrorString(status));
+  if (count == 0) return {};
+  int previous = 0;
+  const auto current = cudaGetDevice(&previous);
+  if (current != cudaSuccess)
+    throw std::runtime_error(std::string("CUDA current device query failed: ") +
+                             cudaGetErrorString(current));
+  struct RestoreDevice {
+    int device;
+    ~RestoreDevice() { cudaSetDevice(device); }
+  } restore{previous};
+  std::vector<FixedCohortDeviceObservation> result;
+  for (int device = 0; device < count; ++device) {
+    guard.Check();
+    FixedCohortDeviceObservation observed;
+    observed.capacity.device = device;
+    // Retain metadata even when context/free-memory observation fails.
+    cudaDeviceProp properties{};
+    if (cudaGetDeviceProperties(&properties, device) == cudaSuccess) {
+      observed.capacity.device_name = properties.name;
+      observed.capacity.device_total = properties.totalGlobalMem;
+      observed.capacity.compute_capability_major = properties.major;
+      observed.capacity.compute_capability_minor = properties.minor;
+      std::ostringstream uuid;
+      uuid << std::hex << std::setfill('0');
+      for (const auto byte : properties.uuid.bytes)
+        uuid << std::setw(2)
+             << static_cast<unsigned int>(static_cast<unsigned char>(byte));
+      observed.capacity.device_uuid = uuid.str();
+    }
+    try {
+      observed.capacity = ObserveFixedCohortCapacities(device);
+      observed.usable = true;
+    } catch (const std::exception& error) {
+      observed.reason = error.what();
+      (void)cudaGetLastError();
+    }
+    guard.Check();
+    result.push_back(std::move(observed));
+  }
+  const auto restored = cudaSetDevice(previous);
+  if (restored != cudaSuccess)
+    throw std::runtime_error(std::string("CUDA device context restore failed: ") +
+                             cudaGetErrorString(restored));
   return result;
 }
 
