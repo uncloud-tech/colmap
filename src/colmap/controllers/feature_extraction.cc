@@ -254,6 +254,7 @@ class FeatureExtractorThread : public ExtractionWorker {
 
 class FeatureWriterThread : public ExtractionWorker {
  public:
+  std::function<void()> before_write;
   FeatureWriterThread(FeatureExtractorType extractor_type,
                       size_t num_images,
                       Database* database,
@@ -319,6 +320,7 @@ class FeatureWriterThread : public ExtractionWorker {
                          std::numeric_limits<int>::max());
           image_data.credit->Grow(blob_bytes);
         }
+        if (before_write) before_write();
         DatabaseTransaction database_transaction(database_);
 
         if (image_data.image.ImageId() == kInvalidImageId) {
@@ -385,6 +387,8 @@ class FeatureExtractorController : public Thread {
         extraction_options_(extraction_options),
         database_(Database::Open(database_path)),
         image_reader_(reader_options_, database_.get()) {
+    RegisterCallback(kFeatureExtractionAdmissionWait);
+    RegisterCallback(kFeatureExtractionBeforeWrite);
     THROW_CHECK(reader_options_.Check());
     THROW_CHECK(extraction_options_.Check());
 
@@ -546,6 +550,9 @@ class FeatureExtractorController : public Thread {
       for (auto& worker : extractors_)
         static_cast<ExtractionWorker*>(worker.get())->failure = failure;
       static_cast<ExtractionWorker*>(writer_.get())->failure = failure;
+      static_cast<FeatureWriterThread*>(writer_.get())->before_write = [this] {
+        Callback(kFeatureExtractionBeforeWrite);
+      };
     }
   }
 
@@ -584,8 +591,9 @@ class FeatureExtractorController : public Thread {
     resizers_.clear();
     extractors_.clear();
     writer_.reset();
-    LOG(INFO) << "Feature extraction logical credits retired: " << budget_->Used()
-              << ", peak: " << budget_->Peak();
+    result_->live_bytes = budget_->Used();
+    LOG(INFO) << "Feature extraction logical credits retired: "
+              << result_->live_bytes << ", peak: " << budget_->Peak();
     result_->success = !result_->error && !IsStopped();
     if (!result_->success) {
       LOG(ERROR) << "Feature extraction failed/cancelled; workers drained; "
@@ -627,16 +635,23 @@ class FeatureExtractorController : public Thread {
       image_data.bitmap = std::make_unique<Bitmap>();
       Bitmap mask;
       std::function<void(int, int, int)> admit_header;
-      if (budget_) admit_header = [&](int w, int h, int channels) {
-        image_data.credit = budget_->Acquire(
-            ExtractionBitmapPayload(w, h, channels, extraction_options_.EffMaxImageSize(),
-                !extraction_options_.use_gpu || extraction_options_.sift->estimate_affine_shape ||
-                extraction_options_.sift->domain_size_pooling ||
-                extraction_options_.sift->force_covariant_extractor),
-            [this] { return IsStopped(); });
-        LOG(INFO) << "Feature extraction admitted image before decode: "
-                  << w << "x" << h << "; logical live bytes: " << budget_->Used();
-      };
+      if (budget_)
+        admit_header = [&](int w, int h, int channels) {
+          image_data.credit = budget_->Acquire(
+              ExtractionBitmapPayload(
+                  w,
+                  h,
+                  channels,
+                  extraction_options_.EffMaxImageSize(),
+                  !extraction_options_.use_gpu ||
+                      extraction_options_.sift->estimate_affine_shape ||
+                      extraction_options_.sift->domain_size_pooling ||
+                      extraction_options_.sift->force_covariant_extractor),
+              [this] { return IsStopped(); },
+              [this] { Callback(kFeatureExtractionAdmissionWait); });
+          LOG(INFO) << "Feature extraction admitted image before decode: " << w
+                    << "x" << h << "; logical live bytes: " << budget_->Used();
+        };
       image_data.status = image_reader_.Next(&image_data.rig,
                                              &image_data.camera,
                                              &image_data.image,

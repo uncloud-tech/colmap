@@ -73,10 +73,19 @@ class ExtractionCliTest(unittest.TestCase):
         refused = self.root / 'refused.db'
         result = subprocess.run(self.command(refused, 1),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
-        self.assertNotEqual(result.returncode, 0, result.stdout.decode(errors='replace'))
+        self.assertEqual(result.returncode, 1, result.stdout.decode(errors='replace'))
         self.assertIn(b'before decode', result.stdout)
         self.assertIn(b'workers drained', result.stdout)
         self.assertEqual(self.blobs(refused), [])
+
+    def test_real_main_budget_constructor_refuses_without_abort(self):
+        (self.photos / 'a.png').write_bytes(png(128, 128))
+        command = self.command(self.root / 'constructor.db', 1)
+        command += ['--FeatureExtraction.policy_host_bytes', '1']
+        result = subprocess.run(command, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, timeout=60)
+        self.assertEqual(result.returncode, 1, result.stdout.decode(errors='replace'))
+        self.assertIn(b'singleton refused before decode', result.stdout)
 
     def test_real_main_sigint_drains_without_success(self):
         # Send SIGINT on the native predecode admission event, not a sleep.

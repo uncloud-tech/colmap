@@ -6,7 +6,9 @@
 #include "colmap/util/file.h"
 #include "colmap/util/testing.h"
 
+#include <atomic>
 #include <fstream>
+#include <future>
 
 #include <gtest/gtest.h>
 
@@ -25,6 +27,77 @@ Bitmap CreateTestBitmap() {
 }
 
 #if defined(COLMAP_MVS_ENABLED)
+// Exercise actual reader -> extractor -> writer ownership. The first writer
+// cannot retire its ticket until the reader has demonstrably hit backpressure.
+TEST(CreateFeatureExtractorController,
+     BudgetedBackpressureWritesAndWriterFailureDrains) {
+  for (const bool fail_writer : {false, true}) {
+    const auto root = CreateTestDir();
+    const auto photos = root / "photos";
+    CreateDirIfNotExists(photos);
+    constexpr size_t kNumImages = 12;
+    for (size_t i = 0; i < kNumImages; ++i) {
+      ASSERT_TRUE(
+          CreateTestBitmap().Write(photos / (std::to_string(i) + ".png")));
+    }
+    ImageReaderOptions reader;
+    reader.image_path = photos;
+    FeatureExtractionOptions options;
+    options.use_gpu = false;
+    options.num_threads = 2;
+    // One 100x100 grayscale image costs 50,000 bitmap/staging bytes.
+    // Leave room for its real tiny SIFT output, but not a second bitmap.
+    options.host_budget_bytes = 90000;
+    auto result = std::make_shared<FeatureExtractionResult>();
+    auto controller =
+        CreateFeatureExtractorController(root / "db", reader, options, result);
+    std::promise<void> blocked;
+    auto admission_wait = blocked.get_future().share();
+    std::atomic<size_t> waits{0};
+    std::atomic<size_t> writes{0};
+    controller->AddCallback(kFeatureExtractionAdmissionWait, [&] {
+      if (waits.fetch_add(1) == 0) blocked.set_value();
+    });
+    controller->AddCallback(kFeatureExtractionBeforeWrite, [&] {
+      // A bounded event wait, never a scheduler-dependent sleep. If admission
+      // does not block this fails rather than leaving the writer hung.
+      if (admission_wait.wait_for(std::chrono::seconds(10)) !=
+          std::future_status::ready) {
+        throw std::runtime_error("reader did not reach admission wait");
+      }
+      ++writes;
+      if (fail_writer) throw std::runtime_error("injected writer failure");
+    });
+    controller->Start();
+    controller->Wait();
+    EXPECT_GT(waits.load(), 0);
+    EXPECT_GT(writes.load(), 0);
+    EXPECT_EQ(result->success, !fail_writer);
+    EXPECT_EQ(static_cast<bool>(result->error), fail_writer);
+    EXPECT_EQ(result->live_bytes, 0);
+    auto db = Database::Open(root / "db");
+    if (fail_writer) {
+      ASSERT_TRUE(result->error);
+      try {
+        std::rethrow_exception(result->error);
+      } catch (const std::runtime_error& error) {
+        EXPECT_STREQ(error.what(), "injected writer failure");
+      }
+      EXPECT_TRUE(db->ReadAllImages().empty());
+    } else {
+      ASSERT_EQ(db->ReadAllImages().size(), kNumImages);
+      for (const auto& image : db->ReadAllImages()) {
+        const auto keypoints = db->ReadKeypoints(image.ImageId());
+        const auto descriptors = db->ReadDescriptors(image.ImageId());
+        EXPECT_GT(keypoints.size(), 0);
+        EXPECT_EQ(descriptors.data.rows(), keypoints.size());
+        EXPECT_EQ(descriptors.data.cols(), 128);
+        EXPECT_GT(descriptors.data.size(), 0);
+      }
+    }
+  }
+}
+
 TEST(CreateFeatureExtractorController, BudgetedHeterogeneousMatchesLegacy) {
   const auto root = CreateTestDir();
   const auto photos = root / "photos";

@@ -106,7 +106,8 @@ class ExtractionBudget {
     state_->reserve = reserve;
   }
   std::shared_ptr<Ticket> Acquire(uint64_t bytes,
-                                const std::function<bool()>& stopped) {
+                                  const std::function<bool()>& stopped,
+                                  const std::function<void()>& on_wait = {}) {
     auto ticket = std::shared_ptr<Ticket>(new Ticket(state_));
     std::unique_lock<std::mutex> lock(state_->mutex);
     if (!state_->Fits(bytes))
@@ -116,6 +117,8 @@ class ExtractionBudget {
     while (!state_->cancelled &&
            !state_->Fits(ExtractionAdd(state_->used, bytes))) {
       if (stopped()) throw std::runtime_error("extraction admission cancelled");
+      // Observers must not re-enter the ledger while its mutex is held.
+      if (on_wait) on_wait();
       // Signals are owned by real main, which cannot notify this CV.
       state_->changed.wait_for(lock, std::chrono::milliseconds(25));
     }

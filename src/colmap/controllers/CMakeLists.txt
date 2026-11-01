@@ -88,6 +88,10 @@ COLMAP_ADD_TEST(
     SRCS feature_extraction_test.cc
     LINK_LIBS colmap_controllers
 )
+if(TESTS_ENABLED)
+    # Bound deadlock regressions in the reader/admission/writer fixture.
+    set_tests_properties(controllers/feature_extraction_test PROPERTIES TIMEOUT 120)
+endif()
 COLMAP_ADD_TEST(
     NAME feature_matching_test
     SRCS feature_matching_test.cc

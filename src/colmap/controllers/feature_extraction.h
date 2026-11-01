@@ -6,15 +6,25 @@
 #include "colmap/feature/extractor.h"
 #include "colmap/util/threading.h"
 
+#include <cstdint>
 #include <filesystem>
 
 namespace colmap {
+
+// Thread callback events for budgeted pipeline observation/fault injection.
+// Register before Start(); callbacks may run concurrently. Admission observers
+// must not re-enter the resource ledger. Writer callbacks precede its DB lock.
+enum {
+  kFeatureExtractionAdmissionWait = 0,
+  kFeatureExtractionBeforeWrite,
+};
 
 // Read only after the controller has joined. Budgeted failures leave honest
 // partial database state and must not be reported as successful extraction.
 struct FeatureExtractionResult {
   std::exception_ptr error;
   bool success = false;
+  uint64_t live_bytes = 0;
 };
 
 // Reads images from a folder, extracts features, and writes them to database.
