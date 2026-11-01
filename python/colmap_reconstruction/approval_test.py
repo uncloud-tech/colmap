@@ -250,13 +250,15 @@ with patch.object(tempfile, '_candidate_tempdir_list', return_value=candidates):
         self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
 
     def test_signal_during_approval_cleans_without_output(self):
-        process, terminal, _ = self.interactive()
-        process.send_signal(signal.SIGTERM)
-        tail, _ = process.communicate(timeout=10)
-        self.assertEqual(process.returncode, 2, tail.decode())
-        self.assertIn(b'cancelled', tail)
-        self.assert_preview_only()
-        self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
+        for signum, expected in ((signal.SIGINT, 130), (signal.SIGTERM, 143)):
+            with self.subTest(signal=signum):
+                process, terminal, _ = self.interactive()
+                process.send_signal(signum)
+                tail, _ = process.communicate(timeout=10)
+                self.assertEqual(process.returncode, expected, tail.decode())
+                self.assertIn(b'cancelled', tail)
+                self.assert_preview_only()
+                self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
 
     def test_changed_executable_refuses_before_output(self):
         process, terminal, _ = self.interactive()
@@ -374,25 +376,27 @@ with patch.object(tempfile, '_candidate_tempdir_list', return_value=candidates):
         self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
 
     def test_signal_during_native_query_drains_child_and_cleans_preview(self):
-        fifo = self.root / 'query-started'
-        os.mkfifo(fifo)
-        descriptor = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
-        self.addCleanup(os.close, descriptor)
-        self.env['TEST_BLOCK_QUERY'] = str(fifo)
-        with tempfile.TemporaryFile() as output:
-            process = subprocess.Popen(self.argv + ['--plan-only'], stdout=output,
-                                       stderr=output, env=self.env)
-            self.addCleanup(lambda: process.poll() is None and process.kill())
-            ready, _, _ = select.select([descriptor], [], [], 10)
-            self.assertTrue(ready)
-            child_pid = int(os.read(descriptor, 100))
-            process.send_signal(signal.SIGINT)
-            process.wait(timeout=10)
-            self.assertEqual(process.returncode, 2)
-            with self.assertRaises(ProcessLookupError):
-                os.kill(child_pid, 0)
-        self.assert_preview_only()
-        self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
+        for signum, expected in ((signal.SIGINT, 130), (signal.SIGTERM, 143)):
+            with self.subTest(signal=signum):
+                fifo = self.root / ('query-started-%d' % signum)
+                os.mkfifo(fifo)
+                descriptor = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
+                self.addCleanup(os.close, descriptor)
+                self.env['TEST_BLOCK_QUERY'] = str(fifo)
+                with tempfile.TemporaryFile() as output:
+                    process = subprocess.Popen(self.argv + ['--plan-only'], stdout=output,
+                                               stderr=output, env=self.env)
+                    self.addCleanup(lambda: process.poll() is None and process.kill())
+                    ready, _, _ = select.select([descriptor], [], [], 10)
+                    self.assertTrue(ready)
+                    child_pid = int(os.read(descriptor, 100))
+                    process.send_signal(signum)
+                    process.wait(timeout=10)
+                    self.assertEqual(process.returncode, expected)
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(child_pid, 0)
+                self.assert_preview_only()
+                self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
 
     def test_small_free_fluctuation_does_not_request_reapproval(self):
         process, terminal, _ = self.interactive()

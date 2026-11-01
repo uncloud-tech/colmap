@@ -637,6 +637,7 @@ def approve_plan(process):
 
 
 def main(argv=None):
+    received_signal = None
     args = parse_args(argv)
     created_workspace = False
     try:
@@ -676,6 +677,8 @@ def main(argv=None):
         reconstruction.process.workspace = Path(query_directory.name)
         previous = {}
         def cancelled(signum, frame):
+            nonlocal received_signal
+            received_signal = signum
             # Do not raise between Popen and child assignment: remember the
             # request so the owned process loop can always drain its session.
             reconstruction.process.cancelled = True
@@ -721,7 +724,7 @@ def main(argv=None):
             except OSError:
                 pass  # Preserve the original failure, even if storage is full.
         print('Reconstruction refused/failed: ' + str(error), file=sys.stderr)
-        return 2
+        return 128 + received_signal if received_signal is not None else 2
 
 
 if __name__ == '__main__':

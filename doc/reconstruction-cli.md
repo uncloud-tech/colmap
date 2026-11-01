@@ -32,6 +32,10 @@ or probe environment-selected, cached or default temporary locations. A CPU-only
 build or unavailable CUDA device query reports **plan unavailable**, not a runnable
 GPU plan or CPU fallback. Native query diagnostics are printed before temporary logs are removed.
 
+After owned-child draining and temporary cleanup, handled frontend SIGINT exits
+**130** and SIGTERM exits **143**. User rejection, EOF cancellation and ordinary
+refusals/failures exit **2**; failure text alone never implies a signal exit code.
+
 Approval binds executable SHA256, input bytes/inventory/resolved targets and
 selected options. Changed inputs/executable refuse before workspace creation;
 rerun to review and approve a fresh plan. GPU UUID is checked at existing native
