@@ -102,10 +102,14 @@ class Bitmap {
 
   // Read bitmap at given path and convert to grey- or colorscale. Defaults to
   // keeping the original colorspace (potentially non-linear) for image
-  // processing.
+  // processing. Nonzero expected dimensions/channels enable the bounded
+  // uint8 contract: validate the same decoder header before pixel allocation.
   bool Read(const std::filesystem::path& path,
             bool as_rgb = true,
-            bool linearize_colorspace = false);
+            bool linearize_colorspace = false,
+            int expected_width = 0,
+            int expected_height = 0,
+            int expected_file_channels = 0);
 
   // Write bitmap to file at given path. Defaults to converting to sRGB
   // colorspace for file storage.

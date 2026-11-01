@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <charconv>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -27,6 +28,15 @@
 
 namespace colmap {
 namespace {
+
+uint64_t ParseUndistortionBytes(const std::string& text) {
+  uint64_t value = 0;
+  const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+  if (text.empty() || (text.size() > 1 && text.front() == '0') ||
+      parsed.ec != std::errc() || parsed.ptr != text.data() + text.size())
+    throw std::invalid_argument("invalid canonical undistortion byte allowance");
+  return value;
+}
 
 // This predicts UndistortCamera's model geometry only. In particular it does
 // not inspect decoded dimensions, copy-through paths, or existing outputs.
@@ -472,6 +482,7 @@ int RunImageUndistorter(int argc, char** argv) {
   std::filesystem::path image_list_path;
   std::string copy_policy = "copy";
   bool dry_run = false;
+  std::string host_budget = "0", host_policy = "0", host_reserve = "0";
 
   COLMAPUndistorter::Options undistorter_options;
   UndistortCameraOptions undistort_camera_options;
@@ -505,7 +516,23 @@ int RunImageUndistorter(int argc, char** argv) {
                            &undistorter_options.num_patch_match_src_images);
   options.AddDefaultOption("jpeg_quality", &jpeg_quality);
   options.AddDefaultOption("num_threads", &num_threads);
+  options.AddDefaultOption("host_budget_bytes", &host_budget);
+  options.AddDefaultOption("policy_host_bytes", &host_policy);
+  options.AddDefaultOption("reserve_host_bytes", &host_reserve);
   if (!options.Parse(argc, argv)) {
+    return EXIT_FAILURE;
+  }
+
+  try {
+    undistorter_options.host_budget_bytes = ParseUndistortionBytes(host_budget);
+    undistorter_options.policy_host_bytes = ParseUndistortionBytes(host_policy);
+    undistorter_options.reserve_host_bytes = ParseUndistortionBytes(host_reserve);
+    if ((!undistorter_options.host_budget_bytes &&
+         (undistorter_options.policy_host_bytes || undistorter_options.reserve_host_bytes)) ||
+        (undistorter_options.host_budget_bytes && (output_type != "COLMAP" || dry_run)))
+      throw std::invalid_argument("bounded undistortion requires COLMAP execution and a positive host budget");
+  } catch (const std::exception& error) {
+    LOG(ERROR) << error.what();
     return EXIT_FAILURE;
   }
 
@@ -570,6 +597,19 @@ int RunImageUndistorter(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
+  if (undistorter_options.host_budget_bytes) {
+    // main owns the process signal handler and translates the received signal
+    // into an exit code after this command has drained its workers.
+    undistorter->SetCheckIfStoppedFunc(
+        [] { return ScopedSignalHandler::IsInterruptRequested(); });
+    try {
+      undistorter->Run();
+    } catch (const std::exception& error) {
+      LOG(ERROR) << "Budgeted undistortion failed; workers drained: " << error.what();
+      return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
+  }
   undistorter->Run();
 
   return EXIT_SUCCESS;

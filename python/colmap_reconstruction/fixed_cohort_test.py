@@ -217,7 +217,14 @@ class RefusalAndLifetimeTest(unittest.TestCase):
         for changed in ('src/colmap/mvs/owned_fixed_cohort_pipeline.cu',
                         'src/colmap/mvs/owned_fixed_cohort_budget.h',
                         'src/colmap/mvs/owned_fixed_cohort_inventory.h',
-                        'src/colmap/exe/fixed_cohort.cc'):
+                        'src/colmap/exe/fixed_cohort.cc',
+                        'src/colmap/controllers/undistortion_resource.h',
+                        'src/colmap/controllers/undistorters.cc',
+                        'src/colmap/image/undistortion.cc',
+                        'src/colmap/scene/camera.cc',
+                        'src/colmap/sensor/models/pinhole.h',
+                        'src/colmap/sensor/bitmap.cc',
+                        'src/colmap/exe/image.cc'):
             with self.subTest(changed=changed), tempfile.TemporaryDirectory(
                     prefix='cohort-source-', dir=self.root) as directory:
                 root = Path(directory)
@@ -378,7 +385,7 @@ class WorkspaceFixtureBindingTest(unittest.TestCase):
         self.assertIn('MakeWorkspaceFixture', header)
         self.assertIn('b.max_active_owners = 1', header)
         self.assertIn('b.max_active_owners = 2', header)
-        self.assertIn(tool['cpp']('a48178e1be1a810c4383c30b0cb0242919ab59b5e39246fa215651de4f7d115f'), header)
+        self.assertIn(tool['cpp']('90ffab1675dd924a86a947c454bbceb6de066bfa8f91eac5ad61a02fd043b351'), header)
         self.assertIn('b.caller_inputs = {12288ULL,0ULL}', header)
         self.assertIn('b.host_outputs = {393216ULL,0ULL}', header)
         self.assertIn('b.snapshots = {0ULL,196608ULL}', header)

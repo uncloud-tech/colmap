@@ -8,6 +8,7 @@
 #include "colmap/util/oiio_utils.h"
 
 #include <cstring>
+#include <limits>
 
 #include <OpenImageIO/color.h>
 #include <OpenImageIO/imagebufalgo.h>
@@ -371,7 +372,10 @@ std::optional<double> Bitmap::ExifAltitude() const {
 
 bool Bitmap::Read(const std::filesystem::path& path,
                   const bool as_rgb,
-                  const bool linearize_colorspace) {
+                  const bool linearize_colorspace,
+                  const int expected_width,
+                  const int expected_height,
+                  const int expected_file_channels) {
   if (!ExistsFile(path)) {
     VLOG(3) << "Failed to read bitmap, because file does not exist";
     return false;
@@ -392,6 +396,23 @@ bool Bitmap::Read(const std::filesystem::path& path,
   }
 
   const OIIO::ImageSpec& image_spec = input->spec();
+  // Bounded undistortion revalidates the SAME open decoder before its first
+  // pixel allocation, not just a separate header that could become stale.
+  if (expected_width || expected_height) {
+    THROW_CHECK_EQ(image_spec.width, expected_width);
+    THROW_CHECK_EQ(image_spec.height, expected_height);
+    THROW_CHECK_GT(expected_width, 0);
+    THROW_CHECK_GT(expected_height, 0);
+    THROW_CHECK_LE(static_cast<uint64_t>(expected_width) * expected_height * 3,
+                   static_cast<uint64_t>(std::numeric_limits<int>::max()));
+    THROW_CHECK(image_spec.format == OIIO::TypeDesc::UINT8);
+    THROW_CHECK_EQ(image_spec.depth, 1);
+    THROW_CHECK(!image_spec.deep);
+    THROW_CHECK_EQ(image_spec.nchannels, expected_file_channels);
+    THROW_CHECK_GE(image_spec.nchannels, 1);
+    THROW_CHECK_LE(image_spec.nchannels, 4);
+    THROW_CHECK(!linearize_colorspace);
+  }
   width_ = image_spec.width;
   height_ = image_spec.height;
   const int file_channels = image_spec.nchannels;

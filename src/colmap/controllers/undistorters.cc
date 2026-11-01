@@ -2,17 +2,130 @@
 
 #include "colmap/controllers/undistorters.h"
 
+#include "colmap/controllers/undistortion_resource.h"
+#if defined(COLMAP_MVS_ENABLED)
+#include "colmap/mvs/owned_fixed_cohort_validation.h"
+#endif
 #include "colmap/scene/reconstruction_io.h"
 #include "colmap/sensor/models.h"
 #include "colmap/util/hash_containers.h"
 #include "colmap/util/misc.h"
+#include "colmap/util/oiio_utils.h"
 #include "colmap/util/threading.h"
 
+#include <algorithm>
+#include <cmath>
 #include <fstream>
+#include <limits>
+#include <optional>
 #include <thread>
 
 namespace colmap {
 namespace {
+
+// Inventory uses the same camera geometry and branch predicates as execution.
+// Headers are metadata only, never guessed RGB stride/decoder physical floors.
+std::vector<uint64_t> UndistortionPayloads(
+    const Reconstruction& reconstruction, const std::vector<image_t>& ids,
+    const std::filesystem::path& image_path,
+    const UndistortCameraOptions& options, std::vector<int>* channels) {
+  if (options.roi_min_x != 0 || options.roi_min_y != 0 ||
+      options.roi_max_x != 1 || options.roi_max_y != 1)
+    throw std::invalid_argument("budgeted undistortion does not support ROI");
+  if (!std::isfinite(options.blank_pixels) ||
+      !std::isfinite(options.min_scale) || !std::isfinite(options.max_scale) ||
+      !std::isfinite(options.max_cam_point_norm) ||
+      !std::isfinite(options.warp_options.direct_warp_min_scale) ||
+      options.warp_options.direct_warp_min_scale < 0 ||
+      (options.warp_options.interpolation != WarpImageOptions::Interpolation::kBilinear &&
+       options.warp_options.interpolation != WarpImageOptions::Interpolation::kNearestNeighbor) ||
+      options.max_image_size == 0 || options.blank_pixels < 0 ||
+      options.blank_pixels > 1 || options.min_scale <= 0 ||
+      options.max_scale < options.min_scale || options.max_cam_point_norm == 0)
+    throw std::invalid_argument("invalid budgeted undistortion options");
+  EnsureOpenImageIOInitialized();
+  std::vector<uint64_t> payloads;
+  payloads.reserve(ids.size());
+  FlatHashSet<std::string> names;
+  for (const auto id : ids) {
+    const auto& image = reconstruction.Image(id);
+    const auto& camera = *image.CameraPtr();
+    const std::filesystem::path name(image.Name());
+    if (name.empty() || name.is_absolute() ||
+        std::find(name.begin(), name.end(), "..") != name.end() ||
+        !names.insert(name.lexically_normal().string()).second)
+      throw std::invalid_argument("budgeted undistortion requires distinct relative image paths");
+    if (!camera.VerifyParams() ||
+        (!camera.IsPerspective() && !camera.IsSpherical()) ||
+        !std::all_of(camera.params.begin(), camera.params.end(),
+                     [](double v) { return std::isfinite(v); }))
+      throw std::invalid_argument("unsupported/malformed budgeted undistortion camera");
+    if (camera.IsPerspective() &&
+        (!(camera.FocalLengthX() > 0) || !(camera.FocalLengthY() > 0)))
+      throw std::invalid_argument("invalid budgeted undistortion focal length");
+    // Validate int allocation arithmetic BEFORE geometry calculation/Rescale.
+    UndistortionJobPayload(camera.width, camera.height,
+                           camera.width, camera.height, true, false);
+    if (options.max_scale > static_cast<double>(std::numeric_limits<int>::max()) /
+                                std::max(camera.width, camera.height))
+      throw std::invalid_argument("budgeted undistortion scale exceeds int range");
+    const bool copy = (!camera.IsPerspective() || camera.IsUndistorted()) &&
+                      options.max_image_size < 0;
+    Camera target = camera;
+    if (!copy) {
+      if (camera.IsSpherical()) {
+        if (options.max_image_size > 0) {
+          const double scale = std::min(
+              options.max_image_size / static_cast<double>(camera.width),
+              options.max_image_size / static_cast<double>(camera.height));
+          if (scale < 1) target.Rescale(scale);
+        }
+      } else {
+        target = UndistortCamera(options, camera);
+      }
+    }
+    const bool equal = target.width == camera.width &&
+                       target.height == camera.height;
+    const bool direct = equal || (!camera.IsSpherical() &&
+        std::min(static_cast<double>(target.width) / camera.width,
+                 static_cast<double>(target.height) / camera.height) >=
+            options.warp_options.direct_warp_min_scale);
+    auto payload = UndistortionJobPayload(camera.width, camera.height,
+                                          target.width, target.height, direct, copy);
+    OIIO::ImageSpec config;
+    config["oiio:reorient"] = 0;
+    config["oiio:UnassociatedAlpha"] = 1;
+    const auto input = OIIO::ImageInput::open(
+        (image_path / image.Name()).string(), &config);
+    if (!input) {
+      OIIO::geterror();
+      throw std::invalid_argument("budgeted undistortion invalid image header");
+    }
+    const auto& spec = input->spec();
+    const bool valid = spec.width == static_cast<int>(camera.width) &&
+                       spec.height == static_cast<int>(camera.height) &&
+                       spec.format == OIIO::TypeDesc::UINT8 &&
+                       spec.depth == 1 && !spec.deep &&
+                       spec.nchannels >= 1 && spec.nchannels <= 4;
+    const bool grey = spec.nchannels <= 2;
+    channels->push_back(spec.nchannels);
+    input->close();
+    if (!valid)
+      throw std::invalid_argument("budgeted undistortion header/model mismatch or unsupported format (uint8, 1-4 channels required)");
+    // CloneAsRGB holds grey and RGB at once before the warp. Alpha is
+    // discarded by Read without allocating a second native pixel vector.
+    if (!copy && grey) payload = std::max(payload,
+        UndistortionCheckedMultiply(UndistortionCheckedMultiply(
+            camera.width, camera.height), 4));
+    LOG(INFO) << "Undistortion job " << image.Name() << ": source "
+              << camera.width << "x" << camera.height << ", encoded channels "
+              << channels->back() << ", target " << target.width << "x"
+              << target.height << ", branch " << (copy ? "copy" : direct ? "direct/clone" : "full-source+resize")
+              << ", known bitmap payload bytes " << payload;
+    payloads.push_back(payload);
+  }
+  return payloads;
+}
 
 void MaybeSetJpegQuality(const std::filesystem::path& path,
                          Bitmap& bitmap,
@@ -133,6 +246,10 @@ COLMAPUndistorter::COLMAPUndistorter(
   THROW_CHECK_GE(options_.num_patch_match_src_images, 1);
   THROW_CHECK_GE(options_.jpeg_quality, -1);
   THROW_CHECK_LE(options_.jpeg_quality, 100);
+  if (!options_.host_budget_bytes) {
+    THROW_CHECK_EQ(options_.policy_host_bytes, 0);
+    THROW_CHECK_EQ(options_.reserve_host_bytes, 0);
+  }
 }
 
 void COLMAPUndistorter::Run() {
@@ -140,6 +257,41 @@ void COLMAPUndistorter::Run() {
 
   Timer run_timer;
   run_timer.Start();
+
+  const std::vector<image_t> image_ids = options_.image_ids.empty()
+                                             ? reconstruction_.RegImageIds()
+                                             : options_.image_ids;
+  const size_t num_images = image_ids.size();
+  std::optional<UndistortionLogicalBudget> budget;
+  std::vector<uint64_t> payloads;
+  std::vector<int> channels;
+  if (options_.host_budget_bytes) {
+    if (ExistsFile(output_path_ / "stereo/patch-match.cfg") ||
+        ExistsFile(output_path_ / "stereo/fusion.cfg") ||
+        ExistsFile(output_path_ / "sparse/cameras.bin") ||
+        ExistsFile(output_path_ / "sparse/cameras.txt"))
+      throw std::invalid_argument("budgeted undistortion refuses an existing completed workspace");
+#if defined(COLMAP_MVS_ENABLED)
+    const auto capacity = std::min(options_.host_budget_bytes,
+        mvs::owned::ObserveFixedCohortHostAvailable());
+    budget.emplace(capacity, options_.policy_host_bytes,
+                   options_.reserve_host_bytes);
+    payloads = UndistortionPayloads(reconstruction_, image_ids, image_path_,
+                                    camera_options_, &channels);
+    if (!budget->Fits(0))
+      throw std::runtime_error("undistortion logical policy/reserve does not fit");
+    // Preflight all singletons before ANY pixel decode or output creation.
+    for (size_t i = 0; i < payloads.size(); ++i)
+      budget->BatchSize(payloads, i, 1);
+    LOG(INFO) << "Undistortion logical known bitmap payload inventory, jobs: "
+              << payloads.size() << ", unknown-cost policy: "
+              << options_.policy_host_bytes << ", reserve: "
+              << options_.reserve_host_bytes << ", effective host capacity: "
+              << capacity << "; full physical fit UNKNOWN";
+#else
+    throw std::invalid_argument("budgeted undistortion requires MVS host observation support");
+#endif
+  }
 
   CreateDirIfNotExists(output_path_ / "images");
   CreateDirIfNotExists(output_path_ / "sparse");
@@ -153,43 +305,79 @@ void COLMAPUndistorter::Run() {
   reconstruction_.CreateImageDirs(output_path_ / "stereo" /
                                   "consistency_graphs");
 
-  const std::vector<image_t> image_ids = options_.image_ids.empty()
-                                             ? reconstruction_.RegImageIds()
-                                             : options_.image_ids;
-  const size_t num_images = image_ids.size();
-
-  ThreadPool thread_pool(options_.num_threads);
-  std::vector<std::shared_future<bool>> futures;
-  futures.reserve(num_images);
-  for (const image_t image_id : image_ids) {
-    futures.push_back(
-        thread_pool.AddTask(&COLMAPUndistorter::Undistort, this, image_id));
-  }
-
-  // Only use the image names for the successfully undistorted images
-  // when writing the MVS config files
   std::vector<std::string> image_names;
   image_names.reserve(num_images);
-  bool stopped = false;
-  for (size_t i = 0; i < futures.size(); ++i) {
-    if (CheckIfStopped()) {
-      thread_pool.Stop();
-      stopped = true;
-      break;
+  if (budget) {
+    const size_t ceiling = GetEffectiveNumThreads(options_.num_threads);
+    for (size_t begin = 0; begin < num_images;) {
+      if (CheckIfStopped())
+        throw std::runtime_error("undistortion cancelled; workers drained");
+      const size_t count = budget->BatchSize(payloads, begin, ceiling);
+      LOG(INFO) << "Undistortion admitted workers: " << count
+                << " (thread ceiling " << ceiling << ")";
+      ThreadPool pool(static_cast<int>(count));
+      std::vector<std::shared_future<bool>> futures;
+      std::exception_ptr failure;
+      bool cancelled = false;
+      try {
+        for (size_t i = 0; i < count; ++i)
+          futures.push_back(pool.AddTask(&COLMAPUndistorter::Undistort, this,
+                                         image_ids[begin + i], channels[begin + i]));
+        for (auto& future : futures) {
+          if (CheckIfStopped()) cancelled = true;
+          if (!future.get())
+            throw std::runtime_error("budgeted undistortion read/write failed");
+        }
+      } catch (...) {
+        failure = std::current_exception();
+      }
+      // Consume task exceptions before Stop: ThreadPool's destructor otherwise
+      // treats unhandled task failures as fatal. Wait drains ALL owned workers.
+      try {
+        pool.Wait();
+      } catch (...) {
+        if (!failure) failure = std::current_exception();
+      }
+      pool.Stop();
+      if (failure) std::rethrow_exception(failure);
+      if (cancelled || CheckIfStopped())
+        throw std::runtime_error("undistortion cancelled; workers drained");
+      for (size_t i = 0; i < count; ++i)
+        image_names.push_back(reconstruction_.Image(image_ids[begin + i]).Name());
+      begin += count;
+    }
+  } else {
+    ThreadPool thread_pool(options_.num_threads);
+    std::vector<std::shared_future<bool>> futures;
+    futures.reserve(num_images);
+    for (const image_t image_id : image_ids) {
+      futures.push_back(
+          thread_pool.AddTask(&COLMAPUndistorter::Undistort, this, image_id, 0));
     }
 
-    LOG(INFO) << StringPrintf(
-        "Undistorting image [%d/%d]", i + 1, futures.size());
+    // Only use the image names for the successfully undistorted images
+    // when writing the MVS config files
+    bool stopped = false;
+    for (size_t i = 0; i < futures.size(); ++i) {
+      if (CheckIfStopped()) {
+        thread_pool.Stop();
+        stopped = true;
+        break;
+      }
 
-    if (futures[i].get()) {
-      image_names.push_back(reconstruction_.Image(image_ids[i]).Name());
+      LOG(INFO) << StringPrintf(
+          "Undistorting image [%d/%d]", i + 1, futures.size());
+
+      if (futures[i].get()) {
+        image_names.push_back(reconstruction_.Image(image_ids[i]).Name());
+      }
     }
-  }
-  if (stopped) {
-    LOG(WARNING) << "Stopped image undistortion before writing the sparse "
-                    "model and stereo configuration files.";
-    run_timer.PrintMinutes();
-    return;
+    if (stopped) {
+      LOG(WARNING) << "Stopped image undistortion before writing the sparse "
+                      "model and stereo configuration files.";
+      run_timer.PrintMinutes();
+      return;
+    }
   }
 
   LOG(INFO) << "Writing reconstruction...";
@@ -208,7 +396,8 @@ void COLMAPUndistorter::Run() {
   run_timer.PrintMinutes();
 }
 
-bool COLMAPUndistorter::Undistort(const image_t image_id) const {
+bool COLMAPUndistorter::Undistort(
+    const image_t image_id, const int expected_file_channels) const {
   const Image& image = reconstruction_.Image(image_id);
   const Camera& camera = *image.CameraPtr();
 
@@ -241,7 +430,10 @@ bool COLMAPUndistorter::Undistort(const image_t image_id) const {
   }
 
   Bitmap distorted_bitmap;
-  if (!distorted_bitmap.Read(input_image_path)) {
+  if (!distorted_bitmap.Read(input_image_path, true, false,
+          options_.host_budget_bytes ? static_cast<int>(camera.width) : 0,
+          options_.host_budget_bytes ? static_cast<int>(camera.height) : 0,
+          expected_file_channels)) {
     LOG(ERROR) << "Cannot read image at path: " << input_image_path;
     return false;
   }

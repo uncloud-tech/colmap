@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""Canonical build binding must change with fusion allocation behavior."""
+"""Canonical build binding must change with phase allocation behavior."""
 
 import importlib.util
 import subprocess
@@ -32,15 +32,29 @@ FUSION_ALLOCATION_SOURCES = (
 )
 
 
+UNDISTORTION_ALLOCATION_SOURCES = (
+    "src/colmap/controllers/undistorters.h",
+    "src/colmap/controllers/undistorters.cc",
+    "src/colmap/controllers/undistortion_resource.h",
+    "src/colmap/image/undistortion.h",
+    "src/colmap/image/undistortion.cc",
+    "src/colmap/exe/image.cc",
+    "src/colmap/exe/colmap.cc",
+    "src/colmap/util/cancellation.h",
+    "src/colmap/util/cancellation.cc",
+)
+
+
 class ResidentAllocationFingerprintTest(unittest.TestCase):
-    def test_fusion_mutations_change_compiled_binding_and_rebuild_dependencies(self):
+    def test_phase_mutations_change_compiled_binding_and_rebuild_dependencies(self):
         repo = Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            # Copy real source bytes, including the fusion files even when a
+            # Copy real source bytes, including phase files even when a
             # regression omits them from the generator's declared closure.
             sources = dict.fromkeys(
-                (*generator.CLOSURE, *FUSION_ALLOCATION_SOURCES)
+                (*generator.CLOSURE, *FUSION_ALLOCATION_SOURCES,
+                 *UNDISTORTION_ALLOCATION_SOURCES)
             )
             for name in sources:
                 target = root / name
@@ -63,7 +77,8 @@ class ResidentAllocationFingerprintTest(unittest.TestCase):
                 return output.read_text()
 
             baseline = generate()
-            for name in FUSION_ALLOCATION_SOURCES:
+            for name in (*FUSION_ALLOCATION_SOURCES,
+                         *UNDISTORTION_ALLOCATION_SOURCES):
                 with self.subTest(source=name):
                     source = root / name
                     original = source.read_bytes()
