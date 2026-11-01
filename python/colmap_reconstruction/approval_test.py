@@ -51,6 +51,12 @@ if command == 'reconstruction_info':
         available_host_bytes=32 * 1024**3,
         available_device_bytes=(int(Path(os.environ['TEST_FREE']).read_text()) if Path(os.environ['TEST_FREE']).exists() else 16 * 1024**3),
         device_uuid=(Path(os.environ['TEST_DEVICE']).read_text() if Path(os.environ['TEST_DEVICE']).exists() else 'GPU-test'))))
+elif os.environ.get('TEST_SIDECAR') and command == 'feature_extractor':
+    image_list = Path(sys.argv[sys.argv.index('--image_list_path') + 1])
+    workspace = Path(sys.argv[sys.argv.index('--database_path') + 1]).parent
+    assert image_list == workspace / 'planning/extraction-images.txt'
+    assert image_list.read_bytes() == b'photo.jpg\\n'
+    sys.exit(17)  # List really consumed at the native boundary; no GPU claim.
 elif os.environ.get('TEST_SFM_PROCEED') and command in ('feature_extractor', 'exhaustive_matcher'):
     pass
 elif os.environ.get('TEST_SFM_PROCEED') and command == 'mapper':
@@ -76,7 +82,8 @@ elif os.environ.get('TEST_SFM_PROCEED') and command == 'optimized_dense_plan':
 elif command == 'photo_directory_summary':
     print(json.dumps(dict(schema_version=1, header_only=True, orientation_applied=False,
         photo_count=1, photos=[dict(path='photo.jpg', width=4004, height=3001, orientation=None)],
-        non_image_files=[], problems=[], build=dict(revision='a' * 8, cuda_compiled=True))))
+        non_image_files=['photo.xmp'] if os.environ.get('TEST_SIDECAR') else [],
+        problems=[], build=dict(revision='a' * 8, cuda_compiled=True))))
 else:
     print('TEST native execution reached', file=sys.stderr)
     sys.exit(17)
@@ -123,6 +130,48 @@ else:
                 output += chunk
         return process, master, output
 
+    def test_preview_ignores_default_cached_and_cwd_temp_locations_inside_photos(self):
+        # Exercise main in fresh processes while controlling the stdlib temp
+        # facility, not the frontend's planning/approval implementation.
+        bootstrap = '''
+import os, sys, tempfile
+from pathlib import Path
+from unittest.mock import patch
+from colmap_reconstruction.cli import main
+photos = Path(sys.argv[2]).resolve()
+mode = sys.argv[1]
+# Catch even transient tempfile probes, not just files left after cleanup.
+def protect_inputs(event, args):
+    if event == 'open' and isinstance(args[0], (str, bytes)):
+        path = Path(os.fsdecode(args[0])).resolve()
+        if path.is_relative_to(photos) and args[2] & os.O_CREAT:
+            raise RuntimeError('temporary probe attempted inside photos')
+    if event == 'os.mkdir' and Path(args[0]).resolve().is_relative_to(photos):
+        raise RuntimeError('temporary directory attempted inside photos')
+sys.addaudithook(protect_inputs)
+if mode == 'cached':
+    tempfile.tempdir = str(photos)
+    raise SystemExit(main(sys.argv[3:]))
+tempfile.tempdir = None
+candidates = [str(photos)] if mode == 'default' else [str(photos / 'missing'), os.getcwd()]
+with patch.object(tempfile, '_candidate_tempdir_list', return_value=candidates):
+    raise SystemExit(main(sys.argv[3:]))
+'''
+        environment = {key: value for key, value in self.env.items()
+                       if key not in ('TMPDIR', 'TEMP', 'TMP')}
+        # These subprocesses run from photos, so use an absolute module path.
+        environment['PYTHONPATH'] = str(Path(__file__).resolve().parents[1])
+        for mode in ('default', 'cached', 'cwd-fallback'):
+            with self.subTest(mode=mode):
+                result = subprocess.run([sys.executable, '-c', bootstrap, mode,
+                    str(self.photos), *self.argv[3:], '--plan-only'], cwd=self.photos,
+                    env=environment, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('Effective plan', result.stdout)
+                self.assert_preview_only()
+                self.assertEqual([path.name for path in self.photos.iterdir()], ['photo.jpg'])
+                self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
+
     def test_interactive_yes_launches_only_after_approval(self):
         process, terminal, preview = self.interactive()
         self.assert_preview_only()
@@ -131,6 +180,45 @@ else:
         self.assertEqual(process.returncode, 2, tail.decode())  # synthetic native exit 17
         self.assertIn('feature_extractor', [call[0] for call in self.commands()])
         self.assertTrue(self.workspace.is_dir())
+
+    def test_symlink_retarget_with_identical_bytes_requires_fresh_approval(self):
+        first = self.root / 'first.jpg'
+        second = self.root / 'second.jpg'
+        first.write_bytes(b'original')
+        second.write_bytes(b'original')
+        photo = self.photos / 'photo.jpg'
+        photo.unlink()
+        photo.symlink_to(first)
+        process, terminal, _ = self.interactive()
+        photo.unlink()
+        photo.symlink_to(second)
+        os.write(terminal, b'yes\n')
+        tail, _ = process.communicate(timeout=10)
+        self.assertEqual(process.returncode, 2, tail.decode())
+        self.assertIn(b'photo inputs/inventory changed', tail)
+        self.assert_preview_only()
+        self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
+
+    def test_approved_sidecar_image_list_is_consumed_from_owned_workspace(self):
+        self.env['TEST_SIDECAR'] = '1'
+        sidecar = self.photos / 'photo.xmp'
+        sidecar.write_bytes(b'original sidecar')
+        process, terminal, _ = self.interactive()
+        self.assertFalse(self.workspace.exists())
+        preview = list(self.root.glob('colmap-preview-*'))
+        self.assertEqual(len(preview), 1)
+        self.assertEqual((preview[0] / 'planning/extraction-images.txt').read_bytes(), b'photo.jpg\n')
+        os.write(terminal, b'yes\n')
+        tail, _ = process.communicate(timeout=10)
+        self.assertEqual(process.returncode, 2, tail.decode())
+        self.assertIn(b'native exit 17: feature_extractor', tail)
+        extraction = next(call for call in self.commands() if call[0] == 'feature_extractor')
+        image_list = Path(extraction[extraction.index('--image_list_path') + 1])
+        self.assertEqual(image_list, self.workspace / 'planning/extraction-images.txt')
+        self.assertEqual(image_list.read_bytes(), b'photo.jpg\n')
+        self.assertEqual(sidecar.read_bytes(), b'original sidecar')
+        self.assertEqual((self.photos / 'photo.jpg').read_bytes(), b'original')
+        self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
 
     def test_changed_photo_refuses_before_output_creation(self):
         process, terminal, _ = self.interactive()
@@ -144,13 +232,13 @@ else:
 
     def test_interactive_reject_cleans_preview_without_output(self):
         process, terminal, _ = self.interactive()
-        self.assertTrue(list(self.query_tmp.iterdir()))
+        self.assertTrue(list(self.root.glob('colmap-preview-*')))
         os.write(terminal, b'no\n')
         tail, _ = process.communicate(timeout=10)
         self.assertEqual(process.returncode, 2, tail.decode())
         self.assertIn(b'plan rejected', tail)
         self.assert_preview_only()
-        self.assertEqual(list(self.query_tmp.iterdir()), [])
+        self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
 
     def test_interactive_eof_cancels_without_output(self):
         process, terminal, _ = self.interactive()
@@ -159,7 +247,7 @@ else:
         self.assertEqual(process.returncode, 2, tail.decode())
         self.assertIn(b'EOF', tail)
         self.assert_preview_only()
-        self.assertEqual(list(self.query_tmp.iterdir()), [])
+        self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
 
     def test_signal_during_approval_cleans_without_output(self):
         process, terminal, _ = self.interactive()
@@ -168,7 +256,7 @@ else:
         self.assertEqual(process.returncode, 2, tail.decode())
         self.assertIn(b'cancelled', tail)
         self.assert_preview_only()
-        self.assertEqual(list(self.query_tmp.iterdir()), [])
+        self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
 
     def test_changed_executable_refuses_before_output(self):
         process, terminal, _ = self.interactive()
@@ -273,7 +361,7 @@ else:
         self.assertIn('CPU fallback unsupported', result.stderr)
         self.assertNotIn('Effective plan', result.stdout)
         self.assert_preview_only()
-        self.assertEqual(list(self.query_tmp.iterdir()), [])
+        self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
 
     def test_plan_only_failed_cuda_query_preserves_actionable_diagnostic(self):
         self.env['TEST_QUERY_FAIL'] = '1'
@@ -283,7 +371,7 @@ else:
         self.assertIn('plan unavailable', result.stderr)
         self.assertNotIn('Effective plan', result.stdout)
         self.assert_preview_only()
-        self.assertEqual(list(self.query_tmp.iterdir()), [])
+        self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
 
     def test_signal_during_native_query_drains_child_and_cleans_preview(self):
         fifo = self.root / 'query-started'
@@ -304,7 +392,7 @@ else:
             with self.assertRaises(ProcessLookupError):
                 os.kill(child_pid, 0)
         self.assert_preview_only()
-        self.assertEqual(list(self.query_tmp.iterdir()), [])
+        self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
 
     def test_small_free_fluctuation_does_not_request_reapproval(self):
         process, terminal, _ = self.interactive()
@@ -330,7 +418,7 @@ else:
         self.assertEqual(process.returncode, 2)
         self.assertIn(b'deadline expired', tail)
         self.assert_preview_only()
-        self.assertEqual(list(self.query_tmp.iterdir()), [])
+        self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
 
     def test_workspace_inside_photos_refuses_without_input_mutation(self):
         self.argv[self.argv.index('--workspace') + 1] = str(self.photos / 'output')
@@ -340,13 +428,14 @@ else:
         self.assertEqual([path.name for path in self.photos.iterdir()], ['photo.jpg'])
         self.assertFalse(self.calls.exists())
 
-    def test_query_tmpdir_inside_photos_refuses_without_input_mutation(self):
-        self.env['TMPDIR'] = str(self.photos)
+    def test_query_tmpdir_inside_photos_is_ignored_without_input_mutation(self):
+        self.env.update({name: str(self.photos) for name in ('TMPDIR', 'TEMP', 'TMP')})
         result = self.invoke('--plan-only')
-        self.assertEqual(result.returncode, 2)
-        self.assertIn('TMPDIR', result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Effective plan', result.stdout)
         self.assertEqual([path.name for path in self.photos.iterdir()], ['photo.jpg'])
-        self.assertFalse(self.calls.exists())
+        self.assert_preview_only()
+        self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
 
     def test_noninteractive_requires_yes_even_with_piped_approval(self):
         result = self.invoke(stdin='yes\n')

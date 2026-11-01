@@ -25,11 +25,12 @@ colmap-reconstruct --experimental-local --plan-only --photos /data/photos --work
 colmap-reconstruct --experimental-local --yes --photos /data/photos --workspace /data/new-run
 ```
 
-Preview queries use an owned temporary directory, cleaned on completion,
-rejection, failure, timeout or handled cancellation. The workspace and temporary
-query directory must be outside the photo tree. A CPU-only build or unavailable
-CUDA device query reports **plan unavailable**, not a runnable GPU plan or CPU
-fallback. Native query diagnostics are printed before temporary logs are removed.
+Preview queries use an owned temporary directory under the resolved workspace
+parent, cleaned on completion, rejection, failure, timeout or handled cancellation.
+The workspace and its parent must be outside the photo tree. Preview does not use
+or probe environment-selected, cached or default temporary locations. A CPU-only
+build or unavailable CUDA device query reports **plan unavailable**, not a runnable
+GPU plan or CPU fallback. Native query diagnostics are printed before temporary logs are removed.
 
 Approval binds executable SHA256, input bytes/inventory/resolved targets and
 selected options. Changed inputs/executable refuse before workspace creation;

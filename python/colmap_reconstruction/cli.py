@@ -665,16 +665,13 @@ def main(argv=None):
         args.workspace = parent / workspace.name
         if args.workspace.is_relative_to(args.photos):
             raise ValueError('workspace must be outside photos to preserve input discovery')
-        # tempfile probes its environment-selected directory before returning it.
-        # Refuse input-tree candidates before even that probe can mutate inputs.
-        for name in ('TMPDIR', 'TEMP', 'TMP'):
-            candidate = os.environ.get(name)
-            if candidate and Path(candidate).resolve().is_relative_to(args.photos):
-                raise ValueError(name + ' must be outside photos for temporary query logs')
         print('EXPERIMENTAL: logical dense admission only, NOT hard RSS/VRAM caps. '
               'SfM/fusion physical terms unknown; monitored host RSS is best-effort.', file=sys.stderr)
         reconstruction = Reconstruction(args, str(Path(executable).resolve()))
-        query_directory = tempfile.TemporaryDirectory(prefix='colmap-preview-')
+        # The resolved, owned output parent is outside photos by the containment
+        # check above. Explicit dir avoids every tempfile default/cache/fallback
+        # probe, which could otherwise write inside the input tree.
+        query_directory = tempfile.TemporaryDirectory(prefix='colmap-preview-', dir=parent)
         reconstruction.assets = Path(query_directory.name) / 'planning'
         reconstruction.process.workspace = Path(query_directory.name)
         previous = {}
