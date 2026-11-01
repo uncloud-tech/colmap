@@ -170,6 +170,22 @@ class FixedCohortCommandTest(unittest.TestCase):
                                       *arguments], capture_output=True, text=True, timeout=10)
             self.assertNotEqual(refused.returncode, 0)
 
+    def test_startup_has_no_mandatory_cuda_driver_dependency(self):
+        import shutil
+        import sys
+        readelf = shutil.which('readelf')
+        if sys.platform != 'linux' or not readelf:
+            self.skipTest('Linux ELF dependency inspection requires readelf')
+        executable = os.environ['COLMAP_TEST_EXECUTABLE']
+        dependencies = subprocess.run([readelf, '-d', executable], capture_output=True,
+                                      text=True, timeout=10)
+        self.assertEqual(dependencies.returncode, 0, dependencies.stderr)
+        self.assertNotRegex(dependencies.stdout, r'Shared library: \[libcuda\.so')
+        for arguments in (['--help'], ['reconstruction_info']):
+            result = subprocess.run([executable, *arguments], capture_output=True,
+                                    text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_same_executable_visible_inventory(self):
         import json
         identity = subprocess.run([os.environ['COLMAP_TEST_EXECUTABLE'], 'reconstruction_info'],

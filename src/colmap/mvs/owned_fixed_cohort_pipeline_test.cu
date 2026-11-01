@@ -4,7 +4,7 @@
 #include "colmap/mvs/owned_fixed_cohort_validation.h"
 #include "colmap/mvs/patch_match_cuda_owned.h"
 
-#include <cuda.h>
+#include "colmap/mvs/owned_inventory_cuda_driver.h"
 
 #include <cstring>
 #include <limits>
@@ -14,41 +14,56 @@
 namespace colmap::mvs::owned {
 namespace {
 TEST(FixedCohortDeviceInventory, RestoresExactNonPrimaryAndNullContexts) {
-  if (cuInit(0) != CUDA_SUCCESS)
+  InventoryCudaDriver driver;
+  decltype(&cuInit) init = nullptr;
+  try {
+    init = driver.Lookup<decltype(&cuInit)>("cuInit");
+  } catch (const std::runtime_error& error) {
+    GTEST_SKIP() << error.what();
+  }
+  const auto get_count = driver.Lookup<decltype(&cuDeviceGetCount)>("cuDeviceGetCount");
+  const auto get_current = driver.Lookup<decltype(&cuCtxGetCurrent)>("cuCtxGetCurrent");
+  const auto set_current = driver.Lookup<decltype(&cuCtxSetCurrent)>("cuCtxSetCurrent");
+  const auto destroy = driver.Lookup<decltype(&cuCtxDestroy)>("cuCtxDestroy", "cuCtxDestroy_v2");
+  const auto get_device = driver.Lookup<decltype(&cuDeviceGet)>("cuDeviceGet");
+  const auto create = driver.Lookup<decltype(&cuCtxCreate)>("cuCtxCreate", "cuCtxCreate_v2");
+  if (init(0) != CUDA_SUCCESS)
     GTEST_SKIP() << "CUDA driver required";
   int count = 0;
-  ASSERT_EQ(cuDeviceGetCount(&count), CUDA_SUCCESS);
+  ASSERT_EQ(get_count(&count), CUDA_SUCCESS);
   if (count == 0) GTEST_SKIP() << "visible CUDA device required";
   CUcontext original = nullptr;
-  ASSERT_EQ(cuCtxGetCurrent(&original), CUDA_SUCCESS);
+  ASSERT_EQ(get_current(&original), CUDA_SUCCESS);
   struct ContextCleanup {
     CUcontext original;
+    decltype(set_current) set;
+    decltype(destroy) release;
     CUcontext created = nullptr;
     ~ContextCleanup() {
       if (created != nullptr) {
-        EXPECT_EQ(cuCtxSetCurrent(created), CUDA_SUCCESS);
-        EXPECT_EQ(cuCtxDestroy(created), CUDA_SUCCESS);
+        EXPECT_EQ(set(created), CUDA_SUCCESS);
+        EXPECT_EQ(release(created), CUDA_SUCCESS);
       }
-      EXPECT_EQ(cuCtxSetCurrent(original), CUDA_SUCCESS);
+      EXPECT_EQ(set(original), CUDA_SUCCESS);
     }
-  } cleanup{original};
+  } cleanup{original, set_current, destroy};
   CUdevice device;
-  ASSERT_EQ(cuDeviceGet(&device, 0), CUDA_SUCCESS);
+  ASSERT_EQ(get_device(&device, 0), CUDA_SUCCESS);
 #if CUDA_VERSION >= 13000
-  ASSERT_EQ(cuCtxCreate(&cleanup.created, nullptr, 0, device), CUDA_SUCCESS);
+  ASSERT_EQ(create(&cleanup.created, nullptr, 0, device), CUDA_SUCCESS);
 #else
-  ASSERT_EQ(cuCtxCreate(&cleanup.created, 0, device), CUDA_SUCCESS);
+  ASSERT_EQ(create(&cleanup.created, 0, device), CUDA_SUCCESS);
 #endif
   NativeRunDeadlineGuard guard(NativeRunDeadline::FromBudget(std::chrono::seconds(30)));
   const auto inventory = ObserveFixedCohortDevices(guard);
   EXPECT_EQ(inventory.size(), static_cast<size_t>(count));
   CUcontext current = nullptr;
-  ASSERT_EQ(cuCtxGetCurrent(&current), CUDA_SUCCESS);
+  ASSERT_EQ(get_current(&current), CUDA_SUCCESS);
   EXPECT_EQ(current, cleanup.created);
-  ASSERT_EQ(cuCtxSetCurrent(nullptr), CUDA_SUCCESS);
+  ASSERT_EQ(set_current(nullptr), CUDA_SUCCESS);
   const auto without_context = ObserveFixedCohortDevices(guard);
   EXPECT_EQ(without_context.size(), static_cast<size_t>(count));
-  ASSERT_EQ(cuCtxGetCurrent(&current), CUDA_SUCCESS);
+  ASSERT_EQ(get_current(&current), CUDA_SUCCESS);
   EXPECT_EQ(current, nullptr);
 }
 

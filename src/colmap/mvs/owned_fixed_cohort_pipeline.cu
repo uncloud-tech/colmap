@@ -10,7 +10,7 @@
 #include "colmap/mvs/patch_match_cuda_owned.h"
 #include "colmap/mvs/patch_match_execution.h"
 
-#include <cuda.h>
+#include "colmap/mvs/owned_inventory_cuda_driver.h"
 
 #include <algorithm>
 #include <cmath>
@@ -70,25 +70,31 @@ FixedCohortCapacityObservation ObserveFixedCohortCapacities(int device) {
 std::vector<FixedCohortDeviceObservation> ObserveFixedCohortDevices(
     const NativeRunDeadlineGuard& guard) {
   guard.Check();
-  const auto driver_query = [](CUresult status) {
+  InventoryCudaDriver driver;
+  const auto init = driver.Lookup<decltype(&cuInit)>("cuInit");
+  const auto get_current = driver.Lookup<decltype(&cuCtxGetCurrent)>("cuCtxGetCurrent");
+  const auto set_current = driver.Lookup<decltype(&cuCtxSetCurrent)>("cuCtxSetCurrent");
+  const auto error_string = driver.Lookup<decltype(&cuGetErrorString)>("cuGetErrorString");
+  const auto driver_query = [error_string](CUresult status) {
     if (status == CUDA_SUCCESS) return;
     const char* reason = nullptr;
-    (void)cuGetErrorString(status, &reason);
+    (void)error_string(status, &reason);
     throw std::runtime_error(std::string("CUDA inventory context query/restore failed: ") +
                              (reason ? reason : "unknown driver error"));
   };
-  const auto initialized = cuInit(0);
+  const auto initialized = init(0);
   if (initialized == CUDA_ERROR_NO_DEVICE) return {};
   driver_query(initialized);
   // Capture before any Runtime API call can select/create a primary context.
   // The current context may be non-primary or null; an ordinal is insufficient.
   CUcontext previous = nullptr;
-  driver_query(cuCtxGetCurrent(&previous));
+  driver_query(get_current(&previous));
   struct RestoreContext {
     CUcontext context;
+    decltype(set_current) set;
     bool restored = false;
     CUresult Restore() {
-      const auto status = cuCtxSetCurrent(context);
+      const auto status = set(context);
       restored = status == CUDA_SUCCESS;
       return status;
     }
@@ -101,7 +107,7 @@ std::vector<FixedCohortDeviceObservation> ObserveFixedCohortDevices(
                        static_cast<int>(status));
       }
     }
-  } restore{previous};
+  } restore{previous, set_current};
   int count = 0;
   const auto status = cudaGetDeviceCount(&count);
   if (status == cudaErrorNoDevice) {
