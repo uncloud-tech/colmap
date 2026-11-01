@@ -32,7 +32,9 @@ Bitmap CreateTestBitmap() {
 TEST(CreateFeatureExtractorController,
      BudgetedBackpressureWritesAndWriterFailureDrains) {
   for (const bool fail_writer : {false, true}) {
-    const auto root = CreateTestDir();
+    const auto root = CreateTestDir() /
+                      (fail_writer ? "writer_failure" : "successful_write");
+    CreateDirIfNotExists(root);
     const auto photos = root / "photos";
     CreateDirIfNotExists(photos);
     constexpr size_t kNumImages = 12;
