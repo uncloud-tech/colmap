@@ -28,7 +28,8 @@ if(TESTS_ENABLED AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
         COMMAND "${CMAKE_COMMAND}" -E env
             "PYTHONPATH=${PROJECT_SOURCE_DIR}/python:${PROJECT_SOURCE_DIR}/python/tests"
             "${Python3_EXECUTABLE}" -m unittest
-            colmap_reconstruction.reconstruction_test test_reconstruction test_matching_admission)
+            colmap_reconstruction.reconstruction_test colmap_reconstruction.approval_test
+            test_reconstruction test_matching_admission)
     if(MVS_ENABLED)
         add_test(NAME reconstruction/matching_cli_test
             COMMAND "${CMAKE_COMMAND}" -E env

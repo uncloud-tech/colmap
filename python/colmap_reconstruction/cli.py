@@ -8,9 +8,11 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import select
 import re
 import struct
 import sys
+import tempfile
 
 from .process import NativeFailure, NativeProcess
 from .resource_policy import select_policy, validate_overrides
@@ -55,6 +57,8 @@ def parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--colmap', default='colmap', help='trusted native executable; defaults to installed sibling')
     parser.add_argument('--experimental-local', action='store_true', help='consent to engineering estimates, not hard RSS/VRAM caps or performance qualification')
+    parser.add_argument('--plan-only', action='store_true', help='inspect and display only; never create the requested workspace')
+    parser.add_argument('--yes', action='store_true', help='approve the displayed plan noninteractively; separate from engineering consent')
     parser.add_argument('--backend', choices=('experimental_fixed_cohort',), default='experimental_fixed_cohort', help='current adaptive native PHOTO/GEO then mapped fusion; never stock fallback')
     parser.add_argument('--photos', required=True, type=Path)
     parser.add_argument('--workspace', required=True, type=Path, help='NEW exclusively owned output directory; existing paths refuse')
@@ -114,6 +118,9 @@ class Reconstruction:
         self.executable_sha = digest(executable, check=self.process.remaining)
 
     def native(self, command, *arguments, capture=False):
+        if (command in ('feature_extractor', 'exhaustive_matcher', 'mapper', 'image_undistorter')
+                and hasattr(self, 'preview_options')):
+            self.check_approval_binding()
         if digest(self.executable, check=self.process.remaining) != self.executable_sha:
             raise NativeFailure('native executable changed during reconstruction')
         return self.process.run([self.executable, command, *map(str, arguments)], capture=capture)
@@ -128,6 +135,9 @@ class Reconstruction:
             self.args.gpu_index, '--deadline_seconds', seconds, capture=True))
         if observation.get('allocation_fingerprint') != self.identity['allocation_fingerprint']:
             raise NativeFailure('native resource observation build changed')
+        if (hasattr(self, 'approved_device_uuid')
+                and observation.get('device_uuid') != self.approved_device_uuid):
+            raise NativeFailure('selected device identity changed since preview; rerun to approve a fresh plan')
         effective = {}
         for side in ('host', 'device'):
             available = int(observation['available_' + side + '_bytes'])
@@ -137,6 +147,7 @@ class Reconstruction:
             effective[side] = available
         observation['effective_capacity_bytes'] = effective
         observation['capacity_classification'] = 'measured-free-limited-by-user-cap'
+        self.observation = dict(observation)
         write_json(self.assets / ('resources-%03d.json' % self.process.sequence), observation)
         for side in ('host', 'device'):
             if effective[side] <= getattr(self.args, 'reserve_' + side + '_bytes'):
@@ -167,13 +178,33 @@ class Reconstruction:
                      str(value).lower() if type(value) is bool else str(value)]
         return argv
 
-    def run(self):
+    def photo_snapshot(self):
+        """Bind bytes, names and resolved targets, including discovery sidecars."""
+        snapshot = {}
+        for path in sorted(self.args.photos.rglob('*')):
+            self.process.remaining()
+            snapshot[str(path.relative_to(self.args.photos))] = dict(
+                target=str(path.resolve(strict=True)),
+                sha256=digest(path, check=self.process.remaining) if path.is_file() else None)
+        return snapshot
+
+    def check_approval_binding(self):
+        self.process.remaining()
+        if vars(self.args) != self.preview_options:
+            raise ValueError('options changed since preview; rerun to review and approve a fresh plan')
+        if digest(self.executable, check=self.process.remaining) != self.executable_sha:
+            raise ValueError('native executable changed since preview; rerun to approve a fresh plan')
+        if self.photo_snapshot() != self.approved_photos:
+            raise ValueError('photo inputs/inventory changed since preview; rerun to approve a fresh plan')
+
+    def preview(self):
+        self.approved_photos = self.photo_snapshot()
         self.assets.mkdir()
         write_json(self.assets / 'intent.json', {key: str(value) if isinstance(value, Path) else value
                    for key, value in vars(self.args).items()})
         identity = json.loads(self.native('reconstruction_info', capture=True))
         if identity.get('schema_version') != 1 or identity.get('cuda_compiled') is not True:
-            raise ValueError('native CUDA/MVS build required')
+            raise ValueError('plan unavailable: native CUDA/MVS build required; CPU fallback unsupported')
         if not re.fullmatch(r'[0-9a-f]{64}', identity.get('allocation_fingerprint', '')):
             raise ValueError('missing native allocation fingerprint')
         self.identity = identity
@@ -183,6 +214,45 @@ class Reconstruction:
         write_json(self.assets / 'build.json', dict(identity=identity, executable=self.executable,
                    executable_sha256=self.executable_sha))
         self.resources()
+        self.approved_device_uuid = self.observation['device_uuid']
+        self.extraction_limit = self.inspect_photos()
+        if self.photo_snapshot() != self.approved_photos:
+            raise ValueError('photo inputs changed during inspection; rerun for a fresh plan')
+        self.preview_options = dict(vars(self.args))
+        plan = dict(
+            executable=dict(path=self.executable, sha256=self.executable_sha, build=self.identity),
+            output_path=str(self.workspace), photo_count=len(self.resolution['original']['photos']),
+            resolution=self.resolution, input_binding=self.approved_photos,
+            options={key: str(value) if isinstance(value, Path) else value
+                     for key, value in self.preview_options.items()},
+            hardware_observation=self.observation,
+            cpu_available=len(os.sched_getaffinity(0)),
+            hardware_not_exported_by_native='CPU model, CUDA name/total/SM: UNKNOWN',
+            resource_policy=self.resource_policy,
+            capacity_semantics='FREE snapshot, not reserved; reobserved/admitted at native boundaries',
+            effective_dispatch=dict(extraction=dict(backend='CUDA SIFT', threads=self.args.threads,
+                    gpu_index=self.args.gpu_index),
+                matching=dict(backend='CUDA SIFT exhaustive', threads=self.args.threads,
+                    gpu_index=self.args.gpu_index),
+                mapping=dict(backend='incremental CPU Ceres', threads=self.args.threads),
+                undistortion=dict(threads=self.args.threads),
+                stereo=dict(backend=self.args.backend, gpu_index=self.args.gpu_index,
+                    source_cap=self.args.source_cap, num_samples=self.args.num_samples,
+                    random_seed=self.args.random_seed, cache_size_gib=self.args.cache_size_gib,
+                    tile=self.args.tile, lookahead=not self.args.no_lookahead),
+                fusion=dict(backend='CPU', threads=1, use_mmap=True, use_cache=False)),
+            phases=['CUDA SIFT extraction', 'exhaustive GPU matching', 'incremental CPU Ceres SfM',
+                    'sparse model selection', 'geometric undistortion',
+                    'adaptive PHOTO then GEO experimental_fixed_cohort', 'mapped CPU fusion'],
+            dense_resolution='float32; stereo/fusion uncapped; no automatic resize or stock fallback',
+            scheduling='native memory-admitted phase owners and PHOTO storage; ceiling is not measured concurrency',
+            unresolved='UNKNOWN runtime, physical fit, post-SfM geometry, depth ranges and source graph; '
+                       'remaining native dense options resolve after SfM under these options, not a final dense plan; '
+                       'insufficient capacity or unsupported input refuses without quality change')
+        write_json(self.assets / 'approved-plan.json', plan)
+        print('Effective plan (approval required): ' + json.dumps(plan, sort_keys=True), flush=True)
+
+    def run(self):
         self.prepare()
         self.plan()
         self.dense_stage()
@@ -307,13 +377,14 @@ class Reconstruction:
             stereo=dict(max_image_size=-1, map_precision='float32'),
             fusion=dict(max_image_size=-1, semantics='consume geometric maps without additional resize'),
             automatic_resource_resize=False, non_image_files=summary['non_image_files'])
+        self.resolution = resolution
         write_json(self.assets / 'resolution-intent.json', resolution)
         print('Resolution intent (not approval): ' + json.dumps(resolution, sort_keys=True), file=sys.stderr)
         return extraction_limit
 
     def prepare(self):
         a = self.args
-        extraction_limit = self.inspect_photos()
+        extraction_limit = self.extraction_limit if hasattr(self, 'extraction_limit') else self.inspect_photos()
         common = ['--database_path', self.workspace / 'database.db']
         phase_capacity = self.resources()['host']
         previous_host_budget = self.process.host_budget_bytes
@@ -541,7 +612,32 @@ def validate_ply(path, *, check=None):
         return vertices[0]
 
 
+def approve_plan(process):
+    """Read one explicit TTY answer without escaping deadline/cancellation."""
+    if not sys.stdin.isatty():
+        raise ValueError('noninteractive execution requires explicit --yes plan approval')
+    print('Approve this plan? Type yes to run; no/Enter rejects (Ctrl-D cancels).', flush=True)
+    answer = bytearray()
+    while True:
+        remaining = process.remaining()
+        ready, _, _ = select.select([sys.stdin], [], [], min(remaining, 0.2))
+        if not ready:
+            continue
+        chunk = os.read(sys.stdin.fileno(), 1)
+        if not chunk:
+            raise NativeFailure('plan approval cancelled: EOF')
+        if chunk == b'\n':
+            break
+        answer.extend(chunk)
+        if len(answer) > 64:
+            raise ValueError('plan rejected: expected yes')
+    if answer.strip().lower() != b'yes':
+        raise ValueError('plan rejected; no reconstruction started')
+    process.remaining()
+
+
 def main(argv=None):
+    received_signal = None
     args = parse_args(argv)
     created_workspace = False
     try:
@@ -568,21 +664,55 @@ def main(argv=None):
         if not executable:
             raise ValueError('native COLMAP executable not found')
         args.workspace = parent / workspace.name
-        args.workspace.mkdir(mode=0o700)
-        created_workspace = True
+        if args.workspace.is_relative_to(args.photos):
+            raise ValueError('workspace must be outside photos to preserve input discovery')
         print('EXPERIMENTAL: logical dense admission only, NOT hard RSS/VRAM caps. '
               'SfM/fusion physical terms unknown; monitored host RSS is best-effort.', file=sys.stderr)
         reconstruction = Reconstruction(args, str(Path(executable).resolve()))
+        # The resolved, owned output parent is outside photos by the containment
+        # check above. Explicit dir avoids every tempfile default/cache/fallback
+        # probe, which could otherwise write inside the input tree.
+        query_directory = tempfile.TemporaryDirectory(prefix='colmap-preview-', dir=parent)
+        reconstruction.assets = Path(query_directory.name) / 'planning'
+        reconstruction.process.workspace = Path(query_directory.name)
         previous = {}
         def cancelled(signum, frame):
+            nonlocal received_signal
+            received_signal = signum
             # Do not raise between Popen and child assignment: remember the
             # request so the owned process loop can always drain its session.
             reconstruction.process.cancelled = True
         try:
             for sig in (signal.SIGINT, signal.SIGTERM):
                 previous[sig] = signal.signal(sig, cancelled)
+            try:
+                reconstruction.preview()
+            except NativeFailure as error:
+                # Query logs are temporary on refusal. Preserve a bounded native
+                # diagnostic in the terminal before cleaning their directory.
+                log = reconstruction.process.workspace / ('command-%03d.stderr' % reconstruction.process.sequence)
+                detail = ''
+                if log.is_file():
+                    with log.open('rb') as stream:
+                        stream.seek(max(0, log.stat().st_size - 4096))
+                        detail = stream.read(4096).decode('utf-8', errors='replace').strip()
+                raise NativeFailure('plan unavailable: ' + str(error) + ('; ' + detail if detail else '')) from error
+            reconstruction.process.remaining()
+            if args.plan_only:
+                return 0
+            if not args.yes:
+                approve_plan(reconstruction.process)
+            reconstruction.check_approval_binding()
+            args.workspace.mkdir(mode=0o700)
+            created_workspace = True
+            shutil.copytree(query_directory.name, args.workspace, dirs_exist_ok=True)
+            reconstruction.assets = args.workspace / 'planning'
+            reconstruction.process.workspace = args.workspace
+            if reconstruction.extraction_image_list:
+                reconstruction.extraction_image_list = ['--image_list_path', reconstruction.assets / 'extraction-images.txt']
             reconstruction.run()
         finally:
+            query_directory.cleanup()
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
         print(str(args.workspace / 'points.ply'))
@@ -594,7 +724,7 @@ def main(argv=None):
             except OSError:
                 pass  # Preserve the original failure, even if storage is full.
         print('Reconstruction refused/failed: ' + str(error), file=sys.stderr)
-        return 2
+        return 128 + received_signal if received_signal is not None else 2
 
 
 if __name__ == '__main__':
