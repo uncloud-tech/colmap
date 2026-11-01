@@ -70,6 +70,10 @@ bool FeatureMatchingOptions::RequiresOpenGL() const {
 }
 
 bool FeatureMatchingOptions::Check() const {
+  if (device_budget_bytes && !host_budget_bytes) {
+    LOG(ERROR) << "matching device budget requires host payload admission";
+    return false;
+  }
   if (use_gpu) {
     CHECK_OPTION_GT(CSVToVector<int>(gpu_index).size(), 0);
 #ifndef COLMAP_GPU_ENABLED

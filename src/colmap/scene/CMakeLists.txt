@@ -24,6 +24,7 @@ COLMAP_ADD_LIBRARY(
     SRCS
         correspondence_graph.h correspondence_graph.cc
         database.h database.cc
+        database_blob.h
         database_sqlite.h database_sqlite.cc
         database_cache.h database_cache.cc
         point3d.h point3d.cc

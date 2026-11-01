@@ -2,7 +2,9 @@
 
 #include "colmap/controllers/feature_matching.h"
 
+#include "colmap/controllers/matching_resource.h"
 #include "colmap/feature/types.h"
+#include "colmap/util/file.h"
 #include "colmap/retrieval/visual_index.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/util/testing.h"
@@ -37,6 +39,122 @@ std::unique_ptr<retrieval::VisualIndex> CreateSyntheticVisualIndex() {
                               FeatureDescriptorsFloatData::Random(50, 128)));
   return visual_index;
 }
+
+TEST(MatchingResource, MarginCreditsAndImmediateGrowthRefusal) {
+  EXPECT_EQ(MatchingMargined(100, 1, 7), 112);
+  auto ledger = std::make_shared<MatchingLedger>(112, 1, 7);
+  auto ticket = ledger->TryAcquire(100);
+  ASSERT_NE(ticket, nullptr);
+  EXPECT_EQ(ledger->used.load(), 100);
+  EXPECT_EQ(ledger->TryAcquire(1), nullptr);
+  EXPECT_THROW(ticket->Grow(1), std::runtime_error);
+  EXPECT_EQ(ledger->used.load(), 100);
+  ticket.reset();
+  EXPECT_EQ(ledger->used.load(), 0);
+  EXPECT_THROW(ledger->TryAcquire(101), std::runtime_error);
+  EXPECT_THROW(MatchingMultiply(UINT64_MAX, 2), std::overflow_error);
+}
+
+#if defined(COLMAP_MVS_ENABLED)
+TEST(CreateExhaustiveFeatureMatcher, BudgetedWritesBackpressureAndFailure) {
+  for (const bool fail_writer : {false, true}) {
+    // CreateTestDir reuses the current test's root: arms MUST be distinct.
+    const auto root = CreateTestDir() / (fail_writer ? "failure" : "success");
+    CreateDirIfNotExists(root);
+    const auto path = root / "db";
+    auto database = Database::Open(path);
+    CreateTestDatabase(4, *database);
+    database->ClearMatches();
+    database->ClearTwoViewGeometries();
+    // All views observe the same twenty synthetic 3D points/descriptors.
+    TwoViewGeometryOptions geometry_options;
+    FeatureMatchingOptions options;
+    options.use_gpu = false;
+    options.num_threads = 1;
+    // Freeze the real inventory first; admit one pair but not two. The
+    // controller must drain its own writer rather than block its producer.
+    auto inventory = MatchingInventory::Read(*database, options);
+    const auto persistent = inventory.HostPersistent(options, 1);
+    uint64_t largest = 0;
+    for (const auto& a : inventory.images)
+      for (const auto& b : inventory.images)
+        largest = std::max(largest, inventory.PairPayload(a.first, b.first, options));
+    options.host_budget_bytes = MatchingMargined(persistent + largest, 0, 0);
+    auto result = std::make_shared<FeatureMatchingResult>();
+    auto matcher = CreateExhaustiveFeatureMatcher(
+        ExhaustivePairingOptions(), options, geometry_options, path, result);
+    size_t waits = 0, writes = 0;
+    matcher->AddCallback(kFeatureMatchingAdmissionWait, [&] { ++waits; });
+    matcher->AddCallback(kFeatureMatchingBeforeWrite, [&] {
+      ++writes;
+      if (fail_writer) throw std::runtime_error("injected matching writer failure");
+    });
+    matcher->Start();
+    matcher->Wait();
+    EXPECT_GT(waits, 0);
+    EXPECT_GT(writes, 0);
+    EXPECT_EQ(result->success, !fail_writer);
+    EXPECT_EQ(static_cast<bool>(result->error), fail_writer);
+    EXPECT_EQ(result->live_host_bytes, 0);
+    EXPECT_EQ(result->live_device_bytes, 0);
+    if (!fail_writer) {
+      EXPECT_EQ(database->ReadAllMatches().size(), 6);
+      EXPECT_EQ(database->ReadTwoViewGeometries().size(), 6);
+      EXPECT_GT(database->NumMatches(), 0);
+      EXPECT_GT(database->NumInlierMatches(), 0);
+    } else {
+      EXPECT_EQ(database->NumMatchedImagePairs(), 0);
+    }
+  }
+}
+TEST(CreateExhaustiveFeatureMatcher, BudgetedWorkerGrowthAndCancellationDrain) {
+  for (const bool cancel : {false, true}) {
+    const auto root = CreateTestDir() / (cancel ? "cancel" : "feature_growth");
+    CreateDirIfNotExists(root);
+    const auto path = root / "db";
+    auto database = Database::Open(path);
+    CreateTestDatabase(4, *database);
+    database->ClearMatches();
+    database->ClearTwoViewGeometries();
+    FeatureMatchingOptions options;
+    options.use_gpu = false;
+    options.num_threads = 1;
+    options.host_budget_bytes = 64 * 1024 * 1024;
+    auto result = std::make_shared<FeatureMatchingResult>();
+    auto matcher = CreateExhaustiveFeatureMatcher(
+        ExhaustivePairingOptions(), options, TwoViewGeometryOptions(), path, result);
+    bool injected = false;
+    matcher->AddCallback(kFeatureMatchingBeforeMatch, [&] {
+      if (injected) return;
+      injected = true;
+      if (cancel) {
+        matcher->Stop();
+        return;
+      }
+      // A real keypoint-table shape increase after the inventory, before
+      // cache allocation. The worker must transport refusal, not terminate or
+      // leave its producer waiting for an output that will never exist.
+      const auto id = database->ReadAllImages().front().ImageId();
+      auto keypoints = database->ReadKeypoints(id);
+      keypoints.emplace_back(0, 0);
+      database->UpdateKeypoints(id, keypoints);
+    });
+    matcher->Start();
+    matcher->Wait();
+    EXPECT_TRUE(injected);
+    EXPECT_FALSE(result->success);
+    ASSERT_TRUE(result->error);
+    EXPECT_EQ(result->live_host_bytes, 0);
+    EXPECT_EQ(result->live_device_bytes, 0);
+    if (!cancel) {
+      try { std::rethrow_exception(result->error); }
+      catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("shape changed"), std::string::npos);
+      }
+    }
+  }
+}
+#endif
 
 TEST(CreateExhaustiveFeatureMatcher, Nominal) {
   const auto test_dir = CreateTestDir();

@@ -156,6 +156,79 @@ calibration or a complete physical-fit claim. Device capability gates and the
 existing native backend remain unchanged; real GPU compatibility requires GPU
 validation, not these CPU-path tests.
 
+### Exhaustive SIFT matching admission
+
+The installed CUDA frontend passes fresh measured host/device ceilings, lowered
+by user caps, and existing automatic policy/reserve terms to `exhaustive_matcher`.
+The host monitor is phase-scoped and restored in `finally` on success or failure.
+No extra expert declarations are required. Host policy is loader scratch + process
+host + unknown host; **device** policy is process device + unknown device, never
+host coefficients. These uncalibrated policy allowances carry their existing
+per-term provenance in `resource-policy.json`; they are not measured workspaces.
+
+Native `FeatureMatching.host_budget_bytes=0` retains legacy behavior. Nonzero
+budgets support exhaustive non-guided/non-rig SIFT with the unchanged default CPU
+FAISS or native CUDA GPU backend. Guided/rig/multiple-model/non-SIFT/GLSL/HIP modes
+refuse explicitly in budgeted mode. CPU must not specify a device budget; native
+CUDA requires one. GPU `-1` retains native all-visible-device selection; ordinals
+must otherwise be distinct. Native observation records each selected ordinal and
+UUID, constrains each device by its actual FREE, and can lower host FREE after
+CUDA context initialization. No threshold, seed, RANSAC option, thread count,
+feature count, pair coverage or pair generation/enqueue order is changed. GPU
+DB rows exceeding `max_num_matches` refuse rather than truncating features;
+there is no automatic CPU fallback.
+
+Inventory uses SQLite rows/columns/type/BLOB length **without decoding BLOBs**:
+SIFT descriptors are 128 uint8 bytes per feature; keypoints accept existing 2/4/6
+float encodings and convert to the actual native keypoint layout. Inconsistent
+shapes/orphan features refuse. Feature shapes must remain immutable; cache loads
+recheck them before allocating. The conservative persistent reservation includes
+all DB images, read/converted keypoint overlap and descriptor payload, FAISS float
+build input/index/ID/centroid payload, and explicit detached cache/index overlap
+for worker-held shared objects after LRU eviction. Shared cached data is not
+charged independently for every pair. This is **not actual cache residency** and
+can over-refuse, especially for unused images. It is not a cache eviction
+optimization. Persistent credits retire only after workers, retained CPU indexes,
+cache owners and CUDA buffers are actually destroyed.
+
+CUDA uses M = round-up-to-32(min(max_num_matches, actual DB max rows)). Persistent
+known device storage includes two 8M-by-4-float descriptor textures, two M-by-2
+location textures, the M-by-M float dot texture, match rows and optional
+M-by-ceil(M/8)-by-4-float cross-check texture (the source clamps channels to four).
+The retained host `sift_buffer` is charged separately, including growth overlap;
+it is not device memory. CUDA allocation/query/matching failures refuse, not
+successful empty matches.
+
+Per-pair known credits use actual descriptor/keypoint rows, stored-match rows
+(which can exceed the configured GPU result limit), complete verifier point
+vectors, corresponding points/ray/Jacobian/mask arrays, CPU float search/index
+conversion or brute-force distance-matrix staging, and raw/inlier/result DB BLOB
+storage. Credits travel through the existing matcher/verifier/output queues until
+DB writing and payload destruction. Result vector **capacities**, not only sizes,
+are reconciled at the writer; extra logical growth fails immediately if unavailable.
+Estimator/library internal growth remains policy, not a physical allocation guard.
+
+The producer is also the DB writer: on nonblocking admission contention it drains
+one pending result, writes it under the existing DB serialization, retires its
+payload, and retries the **same** pair. It never waits holding all credits for a
+writer that cannot run. Existing cache DB locks are per operation, not held across
+admission/draining. Exhaustive pair blocks and feature reads remain unchanged;
+interleaved writes concern result tables, not frozen feature inputs. Failure,
+no-fit, cancellation or writer/worker exceptions stop/wake all queues, join workers
+and clear remaining payload owners, returning command status 1 (main retains
+SIGINT status 130). Partial DB state is retained honestly, not labelled success.
+
+Exactly one ceil(3%) is applied to live known + raw policy; reserve is outside it.
+This is **logical payload admission, not physical fit**: FAISS training/search,
+list capacities, RANSAC/solver/refinement scratch, metadata, SQLite pages, vector
+allocator slack, texture handles/driver and allocator overhead remain UNKNOWN.
+Geometric verification may differ across runs because default thread-local PRNG
+state is consumed by worker scheduling; raw match equality and full geometry
+field/inlier-order comparisons require separate effective-input/RNG binding.
+No seeds or geometry fields are changed/canonicalized to force agreement.
+Matching's full physical model/calibration and mapper growth/admission remain
+future Story29 work; this slice does not qualify whole-pipeline fit or performance.
+
 ### Undistortion admission
 
 Immediately before undistortion, the frontend also passes an observed, lower-capped

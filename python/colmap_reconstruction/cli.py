@@ -229,9 +229,22 @@ class Reconstruction:
                 '--FeatureExtraction.reserve_host_bytes', a.reserve_host_bytes)
         finally:
             self.process.host_budget_bytes = previous_host_budget
-        self.resources()
-        self.native('exhaustive_matcher', *common, '--FeatureMatching.gpu_index', a.gpu_index,
-            '--FeatureMatching.num_threads', a.threads)
+        matching_capacity = self.resources()
+        previous_host_budget = self.process.host_budget_bytes
+        self.process.host_budget_bytes = matching_capacity['host']
+        try:
+            # This frontend requires a native CUDA build and retains its default
+            # GPU matching backend. Device policy is independent of host policy.
+            self.native('exhaustive_matcher', *common, '--FeatureMatching.gpu_index', a.gpu_index,
+                '--FeatureMatching.num_threads', a.threads,
+                '--FeatureMatching.host_budget_bytes', matching_capacity['host'],
+                '--FeatureMatching.policy_host_bytes', a.loader_scratch_host_bytes + a.process_host_bytes + a.unknown_host_bytes,
+                '--FeatureMatching.reserve_host_bytes', a.reserve_host_bytes,
+                '--FeatureMatching.device_budget_bytes', matching_capacity['device'],
+                '--FeatureMatching.policy_device_bytes', a.process_device_bytes + a.unknown_device_bytes,
+                '--FeatureMatching.reserve_device_bytes', a.reserve_device_bytes)
+        finally:
+            self.process.host_budget_bytes = previous_host_budget
         sparse = self.workspace / 'sparse'
         sparse.mkdir()
         self.resources()

@@ -7,6 +7,7 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <sqlite3.h>
 
 namespace colmap {
 namespace {
@@ -144,6 +145,58 @@ TEST(FeatureMatcherCache, Features) {
         data.database->ReadDescriptors(image.ImageId());
     EXPECT_EQ(cached_descriptors->type, db_descriptors.type);
     EXPECT_EQ(cached_descriptors->data, db_descriptors.data);
+  }
+}
+
+TEST(FeatureMatcherCache, BudgetedLoadsUseValidatedSnapshot) {
+  for (const std::string table : {"keypoints", "descriptors", "matches"}) {
+    const auto path = CreateTestDir() / (table + ".db");
+    auto database = Database::Open(path);
+    sqlite3* writer = nullptr;
+    ASSERT_EQ(sqlite3_open(path.string().c_str(), &writer), SQLITE_OK);
+    ASSERT_EQ(
+        sqlite3_exec(
+            writer,
+            "INSERT INTO images(image_id,name,camera_id) VALUES(1,'one',1);",
+            nullptr,
+            nullptr,
+            nullptr),
+        SQLITE_OK);
+    database->WriteKeypoints(1, FeatureKeypoints{FeatureKeypoint(0, 0)});
+    database->WriteDescriptors(
+        1,
+        FeatureDescriptors(FeatureExtractorType::SIFT,
+                           FeatureDescriptorsData::Zero(1, 128)));
+    database->WriteMatches(1, 2, FeatureMatches{{0, 0}});
+    FeatureMatcherCache cache(1, database);
+    auto mutate = [&] {
+      // SQLite WAL permits an external commit AFTER metadata validation.
+      // The allocation must still consume the validated old snapshot.
+      const auto sql = "UPDATE " + table + " SET rows=2;";
+      ASSERT_EQ(sqlite3_exec(writer, sql.c_str(), nullptr, nullptr, nullptr),
+                SQLITE_OK);
+    };
+    if (table == "matches") {
+      cache.SetMatchingMatchValidator([&](Database& db, image_t a, image_t b) {
+        EXPECT_EQ(db.ReadMatchingMatchCount(a, b), 1);
+        mutate();
+      });
+      EXPECT_EQ(cache.GetMatches(1, 2).size(), 1);
+      EXPECT_ANY_THROW(database->ReadMatches(1, 2));
+    } else {
+      cache.SetMatchingShapeValidator([&](Database& db, image_t id) {
+        EXPECT_EQ(db.ReadMatchingFeatureShape(id).keypoint_rows, 1);
+        mutate();
+      });
+      if (table == "keypoints") {
+        EXPECT_EQ(cache.GetKeypoints(1)->size(), 1);
+        EXPECT_ANY_THROW(database->ReadKeypoints(1));
+      } else {
+        EXPECT_EQ(cache.GetDescriptors(1)->data.rows(), 1);
+        EXPECT_ANY_THROW(database->ReadDescriptors(1));
+      }
+    }
+    sqlite3_close(writer);
   }
 }
 

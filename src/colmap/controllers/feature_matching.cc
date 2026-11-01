@@ -13,6 +13,7 @@
 #include "colmap/util/timer.h"
 
 #include <fstream>
+#include <type_traits>
 
 namespace colmap {
 namespace {
@@ -133,7 +134,11 @@ class FeatureMatcherThread : public Thread {
       const typename PairGeneratorType::PairingOptions& pairing_options,
       const FeatureMatchingOptions& matching_options,
       const TwoViewGeometryOptions& geometry_options,
-      const std::filesystem::path& database_path) {
+      const std::filesystem::path& database_path,
+      std::shared_ptr<FeatureMatchingResult> result = nullptr) {
+    if (matching_options.host_budget_bytes &&
+        !std::is_same_v<PairGeneratorType, ExhaustivePairGenerator>)
+      throw std::invalid_argument("budgeted matching supports exhaustive pairing only");
     auto database = Database::Open(database_path);
     auto cache = std::make_shared<FeatureMatcherCache>(
         pairing_options.CacheSize(), database);
@@ -144,7 +149,7 @@ class FeatureMatcherThread : public Thread {
         cache,
         [pairing_options, cache]() {
           return std::make_unique<PairGeneratorType>(pairing_options, cache);
-        });
+        }, std::move(result));
   }
 
   using PairGeneratorFactory = std::function<std::unique_ptr<PairGenerator>()>;
@@ -153,25 +158,63 @@ class FeatureMatcherThread : public Thread {
                        const TwoViewGeometryOptions& geometry_options,
                        std::shared_ptr<Database> database,
                        std::shared_ptr<FeatureMatcherCache> cache,
-                       PairGeneratorFactory pair_generator_factory)
-      : matching_options_(matching_options),
+                       PairGeneratorFactory pair_generator_factory,
+                       std::shared_ptr<FeatureMatchingResult> result = nullptr)
+      : result_(result ? std::move(result) : std::make_shared<FeatureMatchingResult>()),
+        matching_options_(matching_options),
         geometry_options_(geometry_options),
         database_(std::move(database)),
         cache_(std::move(cache)),
         pair_generator_factory_(std::move(pair_generator_factory)),
-        matcher_(matching_options, geometry_options, cache_) {
+        matcher_(std::make_unique<FeatureMatcherController>(matching_options, geometry_options, cache_)) {
+    RegisterCallback(kFeatureMatchingAdmissionWait);
+    RegisterCallback(kFeatureMatchingBeforeWrite);
+    RegisterCallback(kFeatureMatchingBeforeMatch);
     THROW_CHECK(matching_options.Check());
     THROW_CHECK(geometry_options.Check());
   }
 
  private:
   void Run() override {
+    if (!matching_options_.host_budget_bytes) {
+      RunImpl();
+      return;
+    }
+    auto resources = matcher_->Resources();
+    try {
+      matcher_->stopped = [this] { return IsStopped(); };
+      matcher_->admission_wait = [this] { Callback(kFeatureMatchingAdmissionWait); };
+      matcher_->before_write = [this] { Callback(kFeatureMatchingBeforeWrite); };
+      matcher_->SetBeforeMatch([this] { Callback(kFeatureMatchingBeforeMatch); });
+      RunImpl();
+      if (IsStopped()) throw std::runtime_error("matching cancelled");
+      result_->success = true;
+    } catch (...) {
+      result_->error = std::current_exception();
+    }
+    // Join/drain workers and destroy persistent matcher buffers first. Remove
+    // every cache owner (including factory capture) BEFORE releasing credits.
+    matcher_.reset();
+    pair_generator_factory_ = {};
+    cache_.reset();
+    resources->persistent_devices.clear();
+    resources->persistent_host.reset();
+    if (resources->host) result_->live_host_bytes = resources->host->used.load();
+    for (const auto& device : resources->devices)
+      result_->live_device_bytes = MatchingAdd(result_->live_device_bytes, device->used.load());
+    LOG(INFO) << "Feature matching workers drained: live_host_bytes=" << result_->live_host_bytes
+              << " live_device_bytes=" << result_->live_device_bytes
+              << " success=" << result_->success;
+  }
+
+  void RunImpl() {
     LOG_HEADING1("Feature matching & geometric verification");
 
     Timer run_timer;
     run_timer.Start();
 
-    if (!matcher_.Setup()) {
+    if (!matcher_->Setup()) {
+      if (matching_options_.host_budget_bytes) throw std::runtime_error("matching setup failed");
       return;
     }
 
@@ -187,7 +230,7 @@ class FeatureMatcherThread : public Thread {
       timer.Start();
       const std::vector<std::pair<image_t, image_t>> image_pairs =
           pair_generator->Next();
-      matcher_.Match(image_pairs);
+      matcher_->Match(image_pairs);
       LOG(INFO) << StringPrintf("in %.3fs", timer.ElapsedSeconds());
     }
 
@@ -207,12 +250,13 @@ class FeatureMatcherThread : public Thread {
     }
   }
 
+  std::shared_ptr<FeatureMatchingResult> result_;
   const FeatureMatchingOptions matching_options_;
   const TwoViewGeometryOptions geometry_options_;
   const std::shared_ptr<Database> database_;
-  const std::shared_ptr<FeatureMatcherCache> cache_;
-  const PairGeneratorFactory pair_generator_factory_;
-  FeatureMatcherController matcher_;
+  std::shared_ptr<FeatureMatcherCache> cache_;
+  PairGeneratorFactory pair_generator_factory_;
+  std::unique_ptr<FeatureMatcherController> matcher_;
 };
 
 class GeometricVerifierThread : public Thread {
@@ -304,9 +348,10 @@ std::unique_ptr<Thread> CreateExhaustiveFeatureMatcher(
     const ExhaustivePairingOptions& pairing_options,
     const FeatureMatchingOptions& matching_options,
     const TwoViewGeometryOptions& geometry_options,
-    const std::filesystem::path& database_path) {
+    const std::filesystem::path& database_path,
+    std::shared_ptr<FeatureMatchingResult> result) {
   return FeatureMatcherThread::Create<ExhaustivePairGenerator>(
-      pairing_options, matching_options, geometry_options, database_path);
+      pairing_options, matching_options, geometry_options, database_path, std::move(result));
 }
 
 std::unique_ptr<Thread> CreateVocabTreeFeatureMatcher(
@@ -513,6 +558,8 @@ std::unique_ptr<Thread> CreateFeaturePairsFeatureMatcher(
     const FeatureMatchingOptions& matching_options,
     const TwoViewGeometryOptions& geometry_options,
     const std::filesystem::path& database_path) {
+  if (matching_options.host_budget_bytes)
+    throw std::invalid_argument("budgeted matching supports exhaustive pairing only");
   return std::make_unique<FeaturePairsFeatureMatcher>(
       pairing_options, matching_options, geometry_options, database_path);
 }

@@ -11,6 +11,16 @@
 
 namespace colmap {
 
+// Register callbacks before Start(). Worker callbacks may run concurrently;
+// they must not re-enter queue/ledger locks. Exceptions cancel and drain work.
+enum { kFeatureMatchingAdmissionWait = 0, kFeatureMatchingBeforeWrite,
+       kFeatureMatchingBeforeMatch };
+struct FeatureMatchingResult {
+  std::exception_ptr error;
+  bool success = false;
+  uint64_t live_host_bytes = 0, live_device_bytes = 0;
+};
+
 // Exhaustively match images by processing each block in the exhaustive match
 // matrix in one batch:
 //
@@ -38,7 +48,8 @@ std::unique_ptr<Thread> CreateExhaustiveFeatureMatcher(
     const ExhaustivePairingOptions& pairing_options,
     const FeatureMatchingOptions& matching_options,
     const TwoViewGeometryOptions& geometry_options,
-    const std::filesystem::path& database_path);
+    const std::filesystem::path& database_path,
+    std::shared_ptr<FeatureMatchingResult> result = nullptr);
 
 // Match each image against its nearest neighbors using a vocabulary tree.
 std::unique_ptr<Thread> CreateVocabTreeFeatureMatcher(

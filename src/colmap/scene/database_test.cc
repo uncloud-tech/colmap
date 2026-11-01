@@ -14,6 +14,7 @@
 #include <Eigen/Geometry>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <sqlite3.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -25,6 +26,70 @@ namespace {
 class ParameterizedDatabaseTests
     : public ::testing::TestWithParam<std::function<std::shared_ptr<Database>(
           const std::filesystem::path&)>> {};
+
+TEST(SqliteDatabase, RejectMalformedMatchMetadataBeforeAllocation) {
+  const auto path = CreateTestDir() / "malformed.db";
+  auto database = OpenSqliteDatabase(path);
+  sqlite3* writer = nullptr;
+  ASSERT_EQ(sqlite3_open(path.string().c_str(), &writer), SQLITE_OK);
+  const auto pair = ImagePairToPairId(1, 2);
+  // Inventory is metadata-only: this is safe even on the vulnerable version.
+  for (const std::string& shape : {"4294967297,2,x'0000000000000000'",
+                                   "9223372036854775807,2,x''",
+                                   "1,3,x'0000000000000000'",
+                                   "-1,2,x''",
+                                   "1,-2,x''",
+                                   "2,2,x'0000000000000000'",
+                                   "1.5,2,x'0000000000000000'",
+                                   "1,2,'12345678'"}) {
+    ASSERT_EQ(
+        sqlite3_exec(writer, "DELETE FROM matches", nullptr, nullptr, nullptr),
+        SQLITE_OK);
+    const auto sql = "INSERT INTO matches VALUES (" + std::to_string(pair) +
+                     "," + shape + ");";
+    ASSERT_EQ(sqlite3_exec(writer, sql.c_str(), nullptr, nullptr, nullptr),
+              SQLITE_OK);
+    EXPECT_ANY_THROW(database->ReadNumMatches()) << shape;
+    EXPECT_ANY_THROW(database->ReadMatchingMatchCount(1, 2)) << shape;
+  }
+  sqlite3_close(writer);
+}
+
+TEST(SqliteDatabase, RecheckConsumedMatrixMetadataAfterExternalMutation) {
+  const auto path = CreateTestDir() / "mutated.db";
+  auto database = OpenSqliteDatabase(path);
+  sqlite3* writer = nullptr;
+  ASSERT_EQ(sqlite3_open(path.string().c_str(), &writer), SQLITE_OK);
+  ASSERT_EQ(
+      sqlite3_exec(
+          writer,
+          "INSERT INTO images(image_id,name,camera_id) VALUES(1,'one',1);",
+          nullptr,
+          nullptr,
+          nullptr),
+      SQLITE_OK);
+  database->WriteMatches(1, 2, FeatureMatches{{0, 0}});
+  database->WriteKeypoints(1, FeatureKeypoints{FeatureKeypoint(0, 0)});
+  database->WriteDescriptors(
+      1,
+      FeatureDescriptors(FeatureExtractorType::SIFT,
+                         FeatureDescriptorsData::Zero(1, 128)));
+  EXPECT_EQ(database->ReadMatchingMatchCount(1, 2), 1);
+  EXPECT_EQ(database->ReadMatchingFeatureShape(1).keypoint_rows, 1);
+  // Small on purpose: no giant allocation is attempted in pre-fix RED.
+  ASSERT_EQ(
+      sqlite3_exec(writer,
+                   "UPDATE matches SET rows=2; UPDATE keypoints SET rows=2; "
+                   "UPDATE descriptors SET rows=2;",
+                   nullptr,
+                   nullptr,
+                   nullptr),
+      SQLITE_OK);
+  EXPECT_ANY_THROW(database->ReadMatches(1, 2));
+  EXPECT_ANY_THROW(database->ReadKeypoints(1));
+  EXPECT_ANY_THROW(database->ReadDescriptors(1));
+  sqlite3_close(writer);
+}
 
 TEST_P(ParameterizedDatabaseTests, OpenInMemory) {
   std::shared_ptr<Database> database = GetParam()(kInMemorySqliteDatabasePath);

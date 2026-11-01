@@ -38,6 +38,15 @@ struct FeatureMatchingOptions : public FeatureMatchingTypeOptions {
 
   FeatureMatcherType type = FeatureMatcherType::SIFT_BRUTEFORCE;
 
+  // Optional logical payload admission. Zero host budget preserves legacy.
+  // Opaque FAISS/RANSAC/SQLite/driver allocations remain policy, not a fit proof.
+  uint64_t host_budget_bytes = 0;
+  uint64_t policy_host_bytes = 0;
+  uint64_t reserve_host_bytes = 0;
+  uint64_t device_budget_bytes = 0;
+  uint64_t policy_device_bytes = 0;
+  uint64_t reserve_device_bytes = 0;
+
   // Number of threads for feature matching and geometric verification.
   int num_threads = -1;
 
