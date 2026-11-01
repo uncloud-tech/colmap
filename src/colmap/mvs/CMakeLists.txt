@@ -315,6 +315,7 @@ if(CUDA_ENABLED)
             colmap_mvs
             colmap_util_cuda
             CUDA::cudart
+            ${CMAKE_DL_LIBS}
             CUDA::curand
             Threads::Threads
     )

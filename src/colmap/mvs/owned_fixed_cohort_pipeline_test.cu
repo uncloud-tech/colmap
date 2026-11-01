@@ -1,15 +1,124 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #include "colmap/mvs/owned_cohort_lifecycle_test_util.h"
 #include "colmap/mvs/owned_fixed_cohort_pipeline.h"
+#include "colmap/mvs/owned_fixed_cohort_validation.h"
 #include "colmap/mvs/patch_match_cuda_owned.h"
+
+#include "colmap/mvs/owned_inventory_cuda_driver.h"
 
 #include <cstring>
 #include <limits>
+
+#if CUDART_VERSION < 12050 && defined(__linux__)
+#include <dlfcn.h>
+#endif
 
 #include <gtest/gtest.h>
 
 namespace colmap::mvs::owned {
 namespace {
+TEST(FixedCohortDeviceInventory, RestoresExactNonPrimaryAndNullContexts) {
+  InventoryCudaDriver driver;
+  decltype(&cuInit) init = nullptr;
+  try {
+    init = driver.Lookup<decltype(&cuInit)>("cuInit");
+  } catch (const std::runtime_error& error) {
+    GTEST_SKIP() << error.what();
+  }
+  const auto get_count = driver.Lookup<decltype(&cuDeviceGetCount)>("cuDeviceGetCount");
+  const auto get_current = driver.Lookup<decltype(&cuCtxGetCurrent)>("cuCtxGetCurrent");
+  const auto set_current = driver.Lookup<decltype(&cuCtxSetCurrent)>("cuCtxSetCurrent");
+  const auto destroy = driver.Lookup<decltype(&cuCtxDestroy)>("cuCtxDestroy", "cuCtxDestroy_v2");
+  const auto get_device = driver.Lookup<decltype(&cuDeviceGet)>("cuDeviceGet");
+  // Unversioned cuCtxCreate lookup at the SDK version may return the v3
+  // five-argument ABI even though cuda.h's default prototype is v2 (three).
+  // Request the 3.2 API explicitly and use its exact stable v2 prototype.
+  using CreateContext = CUresult (CUDAAPI*)(CUcontext*, unsigned int, CUdevice);
+  void* create_address = nullptr;
+#if CUDART_VERSION >= 12050
+  ASSERT_EQ(cudaGetDriverEntryPointByVersion("cuCtxCreate", &create_address, 3020, 0),
+            cudaSuccess);
+#elif defined(__linux__)
+  struct CreateLibrary {
+    void* handle;
+    ~CreateLibrary() { if (handle) EXPECT_EQ(dlclose(handle), 0); }
+  } create_library{dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL)};
+  ASSERT_NE(create_library.handle, nullptr);
+  create_address = dlsym(create_library.handle, "cuCtxCreate_v2");
+#else
+  GTEST_SKIP() << "versioned context creation lookup requires CUDA 12.5+ or Linux";
+#endif
+  ASSERT_NE(create_address, nullptr);
+  const auto create = reinterpret_cast<CreateContext>(create_address);
+  if (init(0) != CUDA_SUCCESS)
+    GTEST_SKIP() << "CUDA driver required";
+  int count = 0;
+  ASSERT_EQ(get_count(&count), CUDA_SUCCESS);
+  if (count == 0) GTEST_SKIP() << "visible CUDA device required";
+  CUcontext original = nullptr;
+  ASSERT_EQ(get_current(&original), CUDA_SUCCESS);
+  struct ContextCleanup {
+    CUcontext original;
+    decltype(set_current) set;
+    decltype(destroy) release;
+    CUcontext created = nullptr;
+    ~ContextCleanup() {
+      if (created != nullptr) {
+        EXPECT_EQ(set(created), CUDA_SUCCESS);
+        EXPECT_EQ(release(created), CUDA_SUCCESS);
+      }
+      EXPECT_EQ(set(original), CUDA_SUCCESS);
+    }
+  } cleanup{original, set_current, destroy};
+  CUdevice device;
+  ASSERT_EQ(get_device(&device, 0), CUDA_SUCCESS);
+  ASSERT_EQ(create(&cleanup.created, 0, device), CUDA_SUCCESS);
+  NativeRunDeadlineGuard guard(NativeRunDeadline::FromBudget(std::chrono::seconds(30)));
+  const auto inventory = ObserveFixedCohortDevices(guard);
+  EXPECT_EQ(inventory.size(), static_cast<size_t>(count));
+  CUcontext current = nullptr;
+  ASSERT_EQ(get_current(&current), CUDA_SUCCESS);
+  EXPECT_EQ(current, cleanup.created);
+  ASSERT_EQ(set_current(nullptr), CUDA_SUCCESS);
+  const auto without_context = ObserveFixedCohortDevices(guard);
+  EXPECT_EQ(without_context.size(), static_cast<size_t>(count));
+  ASSERT_EQ(get_current(&current), CUDA_SUCCESS);
+  EXPECT_EQ(current, nullptr);
+}
+
+TEST(FixedCohortDeviceInventory, RestoresContextAndReportsVisibleOrdinals) {
+  int count = 0;
+  if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0)
+    GTEST_SKIP() << "visible CUDA runtime device required";
+  int original = -1;
+  ASSERT_EQ(cudaGetDevice(&original), cudaSuccess);
+  struct RestoreDevice {
+    int device;
+    ~RestoreDevice() { cudaSetDevice(device); }
+  } restore{original};
+  // On multi-device hosts, leave a nonzero current ordinal before inventory.
+  ASSERT_EQ(cudaSetDevice(count - 1), cudaSuccess);
+  NativeRunDeadlineGuard guard(NativeRunDeadline::FromBudget(std::chrono::seconds(30)));
+  const auto inventory = ObserveFixedCohortDevices(guard);
+  ASSERT_EQ(inventory.size(), static_cast<size_t>(count));
+  int current = -1;
+  ASSERT_EQ(cudaGetDevice(&current), cudaSuccess);
+  EXPECT_EQ(current, count - 1);
+  for (int device = 0; device < count; ++device) {
+    const auto& observed = inventory[device];
+    EXPECT_EQ(observed.capacity.device, device);
+    if (observed.usable) {
+      EXPECT_FALSE(observed.capacity.device_uuid.empty());
+      EXPECT_FALSE(observed.capacity.device_name.empty());
+      EXPECT_GT(observed.capacity.compute_capability_major, 0);
+      EXPECT_LE(observed.capacity.available.device, observed.capacity.device_total);
+      EXPECT_TRUE(observed.reason.empty());
+    } else {
+      EXPECT_FALSE(observed.reason.empty());
+    }
+  }
+}
+
 std::vector<Image> Images(int count = 2) {
   const float K[9] = {10, 0, 2, 0, 10, 2, 0, 0, 1};
   const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
