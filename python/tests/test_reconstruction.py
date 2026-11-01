@@ -95,7 +95,7 @@ class ReconstructionTest(unittest.TestCase):
                         self.assertIn('undistortion', policy)
                         self.assertIsNone(policy['whole_pipeline_physical_fit'])
                         self.assertEqual(json.loads((workspace / 'planning/resource-policy.json').read_text()), policy)
-                    self.assertEqual(commands, ['reconstruction_info', 'feature_extractor',
+                    self.assertEqual(commands, ['reconstruction_info', 'photo_directory_summary', 'feature_extractor',
                         'exhaustive_matcher', 'mapper', 'model_analyzer', 'image_undistorter',
                         'optimized_dense_plan', 'experimental_fixed_cohort', 'stereo_fusion'])
                 else:
@@ -107,6 +107,53 @@ class ReconstructionTest(unittest.TestCase):
                     *allowances()], cwd=temp, env=scenario_env, capture_output=True)
                 self.assertNotEqual(again.returncode, 0)
                 self.assertEqual(calls.read_bytes(), before)
+
+    @unittest.skipUnless(sys.platform == 'linux' and os.geteuid() != 0,
+                         'Experimental local execution requires non-root Linux')
+    def test_resolution_no_fit_never_retries_at_reduced_size(self):
+        import shutil
+        from colmap_reconstruction.cli import main
+        for stage in ('EXTRACTION_NOFIT', 'NOFIT', 'DENSE_RESIZE'):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[2].parent) as directory:
+                root = Path(directory)
+                photos = root / 'photos'
+                photos.mkdir()
+                original = photos / 'original.jpg'
+                original.write_bytes(b'original fixture untouched')
+                native = root / 'colmap'
+                shutil.copy(Path(__file__).with_name('fake_native.py'), native)
+                native.chmod(0o755)
+                calls = root / 'calls.jsonl'
+                from unittest.mock import patch
+                with patch.dict(os.environ, {'FAKE_' + stage: '1', 'FAKE_CALLS': str(calls)}):
+                    status = main(['--experimental-local', '--photos', str(photos),
+                        '--workspace', str(root / 'output'), '--colmap', str(native), *allowances()])
+                self.assertEqual(status, 2)
+                self.assertEqual(original.read_bytes(), b'original fixture untouched')
+                self.assertFalse((root / 'output/result.json').exists())
+                records = list(map(json.loads, calls.read_text().splitlines()))
+                extraction = [a for c, a in records if c == 'feature_extractor']
+                self.assertEqual(len(extraction), 1)
+                self.assertEqual(extraction[0]['--FeatureExtraction.max_image_size'], '4004')
+                self.assertEqual(extraction[0]['--FeatureExtraction.use_gpu'], 'true')
+                self.assertNotIn('stereo_fusion', [c for c, a in records])
+                self.assertNotIn('patch_match_stereo', [c for c, a in records])
+                if stage == 'DENSE_RESIZE':
+                    self.assertNotIn('experimental_fixed_cohort', [c for c, a in records])
+                    self.assertIn('unrequested resolution cap',
+                        json.loads((root / 'output/failure.json').read_text())['reason'])
+                if stage == 'NOFIT':
+                    undistort = [a for c, a in records if c == 'image_undistorter']
+                    self.assertEqual(len(undistort), 1)
+                    self.assertEqual(undistort[0]['--max_image_size'], '-1')
+                    self.assertEqual(len([c for c, a in records if c == 'experimental_fixed_cohort']), 1)
+                    effective = json.loads((root / 'output/planning/resolution-effective.json').read_text())
+                    self.assertEqual(effective['images'], [
+                        dict(name='image0.pgm', width=3, height=2),
+                        dict(name='image1.pgm', width=3, height=2)])
+                    self.assertEqual(effective['stereo_max_image_size'], -1)
+                    self.assertEqual(effective['fusion_max_image_size'], -1)
+                    self.assertEqual(effective['map_precision'], 'float32')
 
     @unittest.skipUnless(sys.platform == 'linux' and os.geteuid() != 0,
                          'Experimental local execution requires non-root Linux')
@@ -413,6 +460,7 @@ while True:
             with patch.dict(os.environ, FAKE_SPARSE_MODELS=json.dumps(models), FAKE_CALLS=str(calls)):
                 reconstruction = Reconstruction(parse_args(args), str(native))
                 reconstruction.assets.mkdir()
+                reconstruction.identity = {'source_commit': 'a' * 40}
                 with patch.object(reconstruction, 'resources'):
                     reconstruction.prepare()
             return (json.loads((reconstruction.assets / 'sparse-model.json').read_text()),

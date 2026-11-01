@@ -75,7 +75,7 @@ def parse_args(argv):
     parser.add_argument('--num-samples', type=int, choices=range(1, 16), default=15)
     parser.add_argument('--random-seed', type=int, default=0)
     parser.add_argument('--cache-size-gib', type=positive_float, default=1)
-    parser.add_argument('--max-image-size', type=int, default=-1, help='explicit undistortion resize only; -1 preserves size')
+    parser.add_argument('--max-image-size', type=int, default=-1, help='expert undistorted-camera edge cap only; -1 means no resource resize, but undistortion geometry can change dimensions; never limits extraction')
     parser.add_argument('--sparse-model', help='exact mapper model directory name or largest (most registered images, ties by lexicographically smallest name); required for multiple models')
     parser.add_argument('--tile', choices=(16, 32), type=int, default=16)
     parser.add_argument('--no-lookahead', action='store_true')
@@ -214,15 +214,86 @@ class Reconstruction:
             dense_report=self.report, resource_policy=self.resource_policy,
             performance_qualified=False, hard_memory_cap=False))
 
+    def inspect_photos(self):
+        summary = json.loads(self.native('photo_directory_summary', '--image_path',
+                                         self.args.photos, capture=True))
+        if (not isinstance(summary, dict) or type(summary.get('schema_version')) is not int
+                or summary['schema_version'] != 1 or summary.get('header_only') is not True
+                or summary.get('orientation_applied') is not False):
+            raise ValueError('invalid native photo inspection schema/dimension semantics')
+        build = summary.get('build')
+        if (not isinstance(build, dict) or build.get('cuda_compiled') is not True
+                or not isinstance(build.get('revision'), str) or not build['revision']
+                or not self.identity['source_commit'].startswith(build['revision'])):
+            raise ValueError('native photo inspection build mismatch')
+        photos = summary.get('photos')
+        if (not isinstance(photos, list) or not photos
+                or type(summary.get('photo_count')) is not int
+                or summary['photo_count'] != len(photos)):
+            raise ValueError('empty or inconsistent native photo inspection')
+        if summary.get('problems') != []:
+            raise ValueError('photo inspection problems; repair unreadable/unknown-dimension inputs; '
+                             'no reference skipping: ' + json.dumps(summary.get('problems')))
+        if not isinstance(summary.get('non_image_files'), list):
+            raise ValueError('invalid native non-image inventory')
+        paths = set()
+        working_dimensions = []
+        for photo in photos:
+            if (not isinstance(photo, dict) or not isinstance(photo.get('path'), str)
+                    or not photo['path'] or photo['path'] in paths
+                    or any(type(photo.get(key)) is not int or not 0 < photo[key] <= (2**31 - 1) // 2
+                           for key in ('width', 'height'))):
+                # The GPU first octave is doubled: never overflow its signed
+                # maxd multiplication or use nonpositive SIFT's implicit 3200.
+                raise ValueError('invalid/unsupported native photo dimensions or duplicate path')
+            orientation = photo.get('orientation')
+            if orientation is not None and (type(orientation) is not int or orientation <= 0):
+                raise ValueError('invalid native photo EXIF orientation')
+            # ImageReader derives gravity from EXIF 1/3/6/8. The extraction
+            # worker rotates 6/8 by 90/270 degrees before CUDA SIFT, whose
+            # GLTexInput::TruncateWidthCU otherwise silently drops columns.
+            swapped = orientation in (6, 8)
+            working_width = photo['height'] if swapped else photo['width']
+            if working_width % 4:
+                raise ValueError('unsupported CUDA SIFT input ' + photo['path']
+                    + ': effective working width ' + str(working_width)
+                    + (' after EXIF rotation' if swapped else '')
+                    + ' must be a multiple of four (backend truncates columns); '
+                      'no automatic resize/fallback. Use supported input dimensions '
+                      'explicitly; originals are unchanged. Native odd-width support is pending.')
+            working_dimensions.append(dict(path=photo['path'], width=working_width,
+                height=photo['width'] if swapped else photo['height']))
+            paths.add(photo['path'])
+        extraction_limit = max(max(photo['width'], photo['height']) for photo in photos)
+        write_json(self.assets / 'photos.json', summary)
+        resolution = dict(
+            original=dict(semantics='encoded dimensions; originals unchanged', photos=photos),
+            extraction=dict(backend='CUDA SIFT', max_image_size=extraction_limit,
+                first_octave=-1, working_dimensions=working_dimensions,
+                semantics='no thumbnail; EXIF gravity rotation; first octave upsamples 2x'),
+            undistortion=dict(max_image_size=self.args.max_image_size,
+                geometric_options=dict(blank_pixels=0.0, min_scale=0.2, max_scale=2.0),
+                resolved_dimensions=None,
+                semantics='pinhole geometry may change dimensions even with cap -1; resolved after SfM'),
+            stereo=dict(max_image_size=-1, map_precision='float32'),
+            fusion=dict(max_image_size=-1, semantics='consume geometric maps without additional resize'),
+            automatic_resource_resize=False, non_image_files=summary['non_image_files'])
+        write_json(self.assets / 'resolution-intent.json', resolution)
+        print('Resolution intent (not approval): ' + json.dumps(resolution, sort_keys=True), file=sys.stderr)
+        return extraction_limit
+
     def prepare(self):
         a = self.args
+        extraction_limit = self.inspect_photos()
         common = ['--database_path', self.workspace / 'database.db']
         phase_capacity = self.resources()['host']
         previous_host_budget = self.process.host_budget_bytes
         self.process.host_budget_bytes = phase_capacity
         try:
             self.native('feature_extractor', *common, '--image_path', a.photos,
-                '--FeatureExtraction.max_image_size', '3200', '--FeatureExtraction.gpu_index', a.gpu_index,
+                '--FeatureExtraction.max_image_size', str(extraction_limit),
+                '--FeatureExtraction.type', 'SIFT', '--FeatureExtraction.use_gpu', 'true',
+                '--SiftExtraction.first_octave', '-1', '--FeatureExtraction.gpu_index', a.gpu_index,
                 '--FeatureExtraction.num_threads', a.threads,
                 '--FeatureExtraction.host_budget_bytes', phase_capacity,
                 '--FeatureExtraction.policy_host_bytes', a.loader_scratch_host_bytes + a.process_host_bytes + a.unknown_host_bytes,
@@ -287,6 +358,7 @@ class Reconstruction:
         try:
             self.native('image_undistorter', '--image_path', a.photos, '--input_path', sparse / selected,
                 '--output_path', self.dense, '--max_image_size', a.max_image_size,
+                '--blank_pixels', '0', '--min_scale', '0.2', '--max_scale', '2',
                 '--num_patch_match_src_images', a.source_cap, '--num_threads', a.threads,
                 '--host_budget_bytes', phase_capacity,
                 '--policy_host_bytes', a.loader_scratch_host_bytes + a.process_host_bytes + a.unknown_host_bytes,
@@ -309,6 +381,9 @@ class Reconstruction:
             raise ValueError('native plan/build revision mismatch')
         for phase in ('photo', 'geo'):
             jobs = self.graph['phases'][phase]['jobs']
+            if (self.graph['phases'][phase]['requested_options'].get('max_image_size') != -1
+                    or any(job['options'].get('max_image_size') != -1 for job in jobs)):
+                raise ValueError('native dense plan attempted an unrequested resolution cap; no reduced retry')
             if len(jobs) != self.registered_images or len({j['reference'] for j in jobs}) != len(jobs):
                 raise ValueError('dense graph does not cover every registered selected-model reference')
         self.images = {image['index']: image for image in self.graph['images']}
@@ -318,6 +393,12 @@ class Reconstruction:
                 raise ValueError('native image outside owned dense workspace')
         self.input_files = {entry['path']: entry['sha256'] for entry in self.graph['input_files']}
         self.check_inputs(self.input_files)
+        effective = dict(images=[dict(name=image['name'], width=image['width'], height=image['height'])
+                                for image in self.graph['images']],
+            semantics='resolved undistorted geometry, shared by uncapped PHOTO/GEO and fusion inputs',
+            stereo_max_image_size=-1, fusion_max_image_size=-1, map_precision='float32')
+        write_json(self.assets / 'resolution-effective.json', effective)
+        print('Resolved dense dimensions: ' + json.dumps(effective, sort_keys=True), file=sys.stderr)
 
     def check_inputs(self, files):
         if any(digest(path, check=self.process.remaining) != expected for path, expected in files.items()):

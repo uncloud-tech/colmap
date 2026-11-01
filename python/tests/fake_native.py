@@ -40,6 +40,8 @@ def graph(workspace):
         jobs = [dict(reference=i, sources=[1-i, 1-i], options=dict(requested,
                      depth_min=i+1, depth_max=i+8, sigma_spatial=5)) for i in range(2)]
         phases[phase] = dict(requested_options=requested, jobs=jobs)
+    if os.environ.get('FAKE_DENSE_RESIZE'):
+        phases['geo']['jobs'][0]['options']['max_image_size'] = 1600
     return dict(schema_version=1, workspace_path=str(workspace), images=images,
                 build=dict(revision='a' * 8), phases=phases,
                 input_files=[dict(path=i['path'], sha256=hashlib.sha256(Path(i['path']).read_bytes()).hexdigest()) for i in images])
@@ -47,8 +49,16 @@ def graph(workspace):
 
 if command == 'reconstruction_info':
     print(os.environ.get('FAKE_IDENTITY_JSON', json.dumps(identity)))
+elif command == 'photo_directory_summary':
+    print(os.environ.get('FAKE_PHOTO_SUMMARY', json.dumps(dict(
+        schema_version=1, image_path=args['--image_path'], photo_count=2,
+        photos=[dict(path='image%d.pgm' % i, width=4004, height=3001, orientation=None) for i in range(2)],
+        problems=[], non_image_files=[], header_only=True, orientation_applied=False,
+        build=dict(revision='a' * 8, cuda_compiled=True)))))
 elif command in ('feature_extractor', 'exhaustive_matcher'):
-    pass
+    if command == 'feature_extractor' and os.environ.get('FAKE_EXTRACTION_NOFIT'):
+        print('CUDA SIFT size/allocation unsupported; workers drained', file=sys.stderr)
+        raise SystemExit(3)
 elif command == 'mapper':
     for name in models:
         (Path(args['--output_path']) / name).mkdir()
