@@ -264,8 +264,10 @@ class Reconstruction {
   void CreateImageDirs(const std::filesystem::path& path) const;
 
  private:
-  // Initial cache-copy credit outlives all model payload members. Retain it
-  // conservatively through TearDown; model/track growth is NOT accounted here.
+  void Swap(Reconstruction& other) noexcept;
+
+  // Initial/clone Point2D-copy credit outlives all model payload members. Retain
+  // it through TearDown. Native Point3D/Track growth is NOT attached here.
   std::shared_ptr<MappingLedger::Ticket> mapping_credit_;
   std::pair<Eigen::AlignedBox3d, Eigen::Vector3d> ComputeBBBoxAndCentroid(
       double min_percentile, double max_percentile, bool use_images) const;

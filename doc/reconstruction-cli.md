@@ -273,13 +273,30 @@ Point2D copy and observation counters/visibility pyramids are admitted separatel
 Retained models keep their copy credits until actual owner destruction; credits
 are conservatively **not** returned merely by `TearDown`, deleting vector elements
 or writing a model. Model/graph payloads die before their credit holders.
+Copies of budgeted reconstructions independently admit the clone's covered
+Point2D payload before copying it; assignment prepares and rebinds the complete
+replacement before a nonthrowing member-swap commit. Other cloned model payloads
+remain UNKNOWN, except for explicitly opted-in Track storage described below.
+
+A component-only `Track(ledger)` API admits requested vector replacement payloads
+before allocation, including old/new overlap. Copies acquire independent credits;
+moves transfer ownership. Erase retains storage credit, and compression prepares
+a replacement before retiring the old storage. Allocator-provided capacity beyond
+the requested amount remains **UNKNOWN**, not covered by the aggregate 3% margin.
+Arbitrary growth through the compatible mutable `Elements()` vector reference and
+caller allocations passed to `SetElements` are outside interception. This optional
+Track ownership is **not attached to native mapper/triangulator Tracks**: merge
+node preparation and observation-statistics transaction safety are deferred.
+Therefore this component does not expand production Track-growth admission or
+provide a Point3D-storage cap. `AddObservation` does finish any throwing track
+append before linking the image; it does not enable native Track admission.
 
 Admission applies exactly one aggregate `ceil(3%)` to live known + raw host
 policy, with reserve outside. Capacity is `min(observed_FREE, supplied_cap)`;
 already-live usage is excluded from FREE and is not subtracted again. This is
 **initial payload and controlled graph-growth admission, NOT a whole-SfM hard
 cap or physical-fit guarantee**. Point3D/track growth, triangulation temporaries,
-other reconstruction copies, RANSAC/Ceres/linear-solver workspace, full-resolution
+uncovered reconstruction-copy payloads, RANSAC/Ceres/linear-solver workspace, full-resolution
 color bitmap/decoder storage, metadata/hash tables, SQLite caches and allocator
 internals remain UNKNOWN, covered only by uncalibrated additional policy and
 external safeguards. Direct-child RSS monitoring is best-effort, not a process-
