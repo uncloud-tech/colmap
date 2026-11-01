@@ -9,6 +9,10 @@
 #include <cstring>
 #include <limits>
 
+#if CUDART_VERSION < 12050 && defined(__linux__)
+#include <dlfcn.h>
+#endif
+
 #include <gtest/gtest.h>
 
 namespace colmap::mvs::owned {
@@ -26,7 +30,26 @@ TEST(FixedCohortDeviceInventory, RestoresExactNonPrimaryAndNullContexts) {
   const auto set_current = driver.Lookup<decltype(&cuCtxSetCurrent)>("cuCtxSetCurrent");
   const auto destroy = driver.Lookup<decltype(&cuCtxDestroy)>("cuCtxDestroy", "cuCtxDestroy_v2");
   const auto get_device = driver.Lookup<decltype(&cuDeviceGet)>("cuDeviceGet");
-  const auto create = driver.Lookup<decltype(&cuCtxCreate)>("cuCtxCreate", "cuCtxCreate_v2");
+  // Unversioned cuCtxCreate lookup at the SDK version may return the v3
+  // five-argument ABI even though cuda.h's default prototype is v2 (three).
+  // Request the 3.2 API explicitly and use its exact stable v2 prototype.
+  using CreateContext = CUresult (CUDAAPI*)(CUcontext*, unsigned int, CUdevice);
+  void* create_address = nullptr;
+#if CUDART_VERSION >= 12050
+  ASSERT_EQ(cudaGetDriverEntryPointByVersion("cuCtxCreate", &create_address, 3020, 0),
+            cudaSuccess);
+#elif defined(__linux__)
+  struct CreateLibrary {
+    void* handle;
+    ~CreateLibrary() { if (handle) EXPECT_EQ(dlclose(handle), 0); }
+  } create_library{dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL)};
+  ASSERT_NE(create_library.handle, nullptr);
+  create_address = dlsym(create_library.handle, "cuCtxCreate_v2");
+#else
+  GTEST_SKIP() << "versioned context creation lookup requires CUDA 12.5+ or Linux";
+#endif
+  ASSERT_NE(create_address, nullptr);
+  const auto create = reinterpret_cast<CreateContext>(create_address);
   if (init(0) != CUDA_SUCCESS)
     GTEST_SKIP() << "CUDA driver required";
   int count = 0;
@@ -49,11 +72,7 @@ TEST(FixedCohortDeviceInventory, RestoresExactNonPrimaryAndNullContexts) {
   } cleanup{original, set_current, destroy};
   CUdevice device;
   ASSERT_EQ(get_device(&device, 0), CUDA_SUCCESS);
-#if CUDA_VERSION >= 13000
-  ASSERT_EQ(create(&cleanup.created, nullptr, 0, device), CUDA_SUCCESS);
-#else
   ASSERT_EQ(create(&cleanup.created, 0, device), CUDA_SUCCESS);
-#endif
   NativeRunDeadlineGuard guard(NativeRunDeadline::FromBudget(std::chrono::seconds(30)));
   const auto inventory = ObserveFixedCohortDevices(guard);
   EXPECT_EQ(inventory.size(), static_cast<size_t>(count));
