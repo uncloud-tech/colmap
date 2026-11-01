@@ -43,6 +43,11 @@ if command == 'reconstruction_info':
         with open(os.environ['TEST_BLOCK_QUERY'], 'w') as fifo:
             fifo.write(str(os.getpid()) + '\\n')
         signal.pause()
+    if '--gpu_index' in sys.argv and os.environ.get('TEST_POSTAPPROVAL_QUERY_FAIL'):
+        calls = [json.loads(line) for line in Path(os.environ['TEST_CALLS']).read_text().splitlines()]
+        if sum('--gpu_index' in call for call in calls) == 2:
+            print('CUDA device access lost; restore device access and rerun', file=sys.stderr)
+            sys.exit(3)
     if len(sys.argv) > 2 and os.environ.get('TEST_QUERY_FAIL'):
         print('CUDA device unavailable', file=sys.stderr)
         sys.exit(3)
@@ -432,6 +437,19 @@ with patch.object(tempfile, '_candidate_tempdir_list', return_value=candidates):
         self.assertIn('CUDA device unavailable', result.stderr)
         self.assertIn('plan unavailable', result.stderr)
         self.assertNotIn('Effective plan', result.stdout)
+        self.assert_preview_only()
+        self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
+
+    def test_postapproval_failed_cuda_query_preserves_diagnostic_before_cleanup(self):
+        self.env['TEST_POSTAPPROVAL_QUERY_FAIL'] = '1'
+        result = self.invoke('--yes')
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('Effective plan (approval required):', result.stdout)
+        self.assertIn('CUDA device access lost; restore device access and rerun', result.stderr)
+        queries = [call for call in self.commands() if call[0] == 'reconstruction_info']
+        self.assertEqual(len(queries), 3)
+        self.assertEqual(queries[0][1], '--deadline_seconds')
+        self.assertEqual([call[1:3] for call in queries[1:]], [['--gpu_index', '0']] * 2)
         self.assert_preview_only()
         self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
 

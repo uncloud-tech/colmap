@@ -712,6 +712,16 @@ def main(argv=None):
                 previous[sig] = signal.signal(sig, cancelled)
             try:
                 reconstruction.preview()
+                reconstruction.process.remaining()
+                if args.plan_only:
+                    return 0
+                if not args.yes:
+                    approve_plan(reconstruction.process)
+                reconstruction.check_approval_binding()
+                # Consent binds one ordinal/UUID, never a fresh auto-selection.
+                # Recheck authoritative FREE before creating the requested output.
+                reconstruction.resources()
+                reconstruction.check_approval_binding()
             except NativeFailure as error:
                 # Query logs are temporary on refusal. Preserve a bounded native
                 # diagnostic in the terminal before cleaning their directory.
@@ -722,16 +732,6 @@ def main(argv=None):
                         stream.seek(max(0, log.stat().st_size - 4096))
                         detail = stream.read(4096).decode('utf-8', errors='replace').strip()
                 raise NativeFailure('plan unavailable: ' + str(error) + ('; ' + detail if detail else '')) from error
-            reconstruction.process.remaining()
-            if args.plan_only:
-                return 0
-            if not args.yes:
-                approve_plan(reconstruction.process)
-            reconstruction.check_approval_binding()
-            # Consent binds one ordinal/UUID, never a fresh auto-selection.
-            # Recheck authoritative FREE before creating the requested output.
-            reconstruction.resources()
-            reconstruction.check_approval_binding()
             args.workspace.mkdir(mode=0o700)
             created_workspace = True
             shutil.copytree(query_directory.name, args.workspace, dirs_exist_ok=True)
