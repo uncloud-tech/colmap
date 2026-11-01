@@ -247,9 +247,18 @@ class Reconstruction:
             self.process.host_budget_bytes = previous_host_budget
         sparse = self.workspace / 'sparse'
         sparse.mkdir()
-        self.resources()
-        self.native('mapper', *common, '--image_path', a.photos, '--output_path', sparse,
-            '--Mapper.num_threads', a.threads, '--Mapper.ba_gpu_index', a.gpu_index)
+        mapping_capacity = self.resources()['host']
+        previous_host_budget = self.process.host_budget_bytes
+        self.process.host_budget_bytes = mapping_capacity
+        try:
+            # ba_gpu_index selects an ordinal only; default Ceres BA stays CPU.
+            self.native('mapper', *common, '--image_path', a.photos, '--output_path', sparse,
+                '--Mapper.num_threads', a.threads, '--Mapper.ba_gpu_index', a.gpu_index,
+                '--Mapper.host_budget_bytes', mapping_capacity,
+                '--Mapper.policy_host_bytes', a.loader_scratch_host_bytes + a.process_host_bytes + a.unknown_host_bytes,
+                '--Mapper.reserve_host_bytes', a.reserve_host_bytes)
+        finally:
+            self.process.host_budget_bytes = previous_host_budget
         candidates = sorted(path.name for path in sparse.iterdir() if path.is_dir() and not path.is_symlink())
         selected = a.sparse_model
         policy = 'largest' if selected == 'largest' else 'explicit' if selected is not None else 'single'

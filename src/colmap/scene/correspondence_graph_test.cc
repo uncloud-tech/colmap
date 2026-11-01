@@ -27,6 +27,37 @@ TEST(Correspondence, Print) {
   EXPECT_EQ(stream.str(), "Correspondence(image_id=1, point2D_idx=2)");
 }
 
+TEST(CorrespondenceGraph, MappingGrowthRefusalPreservesGraphAndRetiresOwners) {
+  auto ledger = std::make_shared<MappingLedger>(4096, 0, 0);
+  {
+    CorrespondenceGraph graph;
+    graph.SetMappingBudget(ledger);
+    graph.AddImage(1, 2);
+    graph.AddImage(2, 2);
+    const auto before = ledger->Used();
+    auto blocker = ledger->Acquire(3970 - before);
+    TwoViewGeometry geometry;
+    geometry.inlier_matches = {{0, 0}, {1, 1}};
+    EXPECT_THROW(graph.AddTwoViewGeometry(1, 2, geometry), std::runtime_error);
+    EXPECT_EQ(graph.NumImagePairs(), 0);
+    blocker.reset();
+    graph.AddTwoViewGeometry(1, 2, geometry);
+    auto flatten_blocker = ledger->Acquire(3970 - ledger->Used());
+    EXPECT_THROW(graph.Finalize(), std::runtime_error);
+    EXPECT_EQ(graph.NumCorrespondencesForImage(1), 2);
+    FeatureMatches before_finalize;
+    graph.ExtractMatchesBetweenImages(1, 2, before_finalize);
+    EXPECT_EQ(before_finalize, geometry.inlier_matches);
+    flatten_blocker.reset();
+    graph.Finalize();
+    FeatureMatches matches;
+    graph.ExtractMatchesBetweenImages(1, 2, matches);
+    EXPECT_EQ(matches, geometry.inlier_matches);
+    EXPECT_GT(ledger->Used(), 0);
+  }
+  EXPECT_EQ(ledger->Used(), 0);
+}
+
 TEST(CorrespondenceGraph, Empty) {
   CorrespondenceGraph correspondence_graph;
   EXPECT_EQ(correspondence_graph.NumImages(), 0);

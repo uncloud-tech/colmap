@@ -202,6 +202,66 @@ MATCHING_ALLOCATION_SOURCES = (
     "src/colmap/retrieval/utils.h",
 )
 
+MAPPING_ALLOCATION_SOURCES = (
+    "src/colmap/scene/mapping_resource.h",
+    "src/colmap/controllers/incremental_pipeline.h",
+    "src/colmap/controllers/incremental_pipeline.cc",
+    "src/colmap/scene/database.h",
+    "src/colmap/scene/database.cc",
+    "src/colmap/scene/database_sqlite.h",
+    "src/colmap/scene/database_sqlite.cc",
+    "src/colmap/scene/database_cache.h",
+    "src/colmap/scene/database_cache.cc",
+    "src/colmap/scene/correspondence_graph.h",
+    "src/colmap/scene/correspondence_graph.cc",
+    "src/colmap/scene/reconstruction.h",
+    "src/colmap/scene/reconstruction.cc",
+    "src/colmap/scene/reconstruction_manager.h",
+    "src/colmap/scene/reconstruction_manager.cc",
+    "src/colmap/scene/reconstruction_io_binary.h",
+    "src/colmap/scene/reconstruction_io_binary.cc",
+    "src/colmap/scene/reconstruction_io_utils.h",
+    "src/colmap/scene/reconstruction_io_utils.cc",
+    "src/colmap/scene/camera.h",
+    "src/colmap/scene/camera.cc",
+    "src/colmap/scene/image.h",
+    "src/colmap/scene/image.cc",
+    "src/colmap/scene/frame.h",
+    "src/colmap/scene/frame.cc",
+    "src/colmap/scene/point2d.h",
+    "src/colmap/scene/point2d.cc",
+    "src/colmap/scene/point3d.h",
+    "src/colmap/scene/point3d.cc",
+    "src/colmap/scene/track.h",
+    "src/colmap/scene/track.cc",
+    "src/colmap/scene/visibility_pyramid.h",
+    "src/colmap/scene/visibility_pyramid.cc",
+    "src/colmap/sensor/rig.h",
+    "src/colmap/sensor/rig.cc",
+    "src/colmap/sfm/incremental_mapper.h",
+    "src/colmap/sfm/incremental_mapper.cc",
+    "src/colmap/sfm/incremental_mapper_impl.h",
+    "src/colmap/sfm/incremental_mapper_impl.cc",
+    "src/colmap/sfm/incremental_triangulator.h",
+    "src/colmap/sfm/incremental_triangulator.cc",
+    "src/colmap/sfm/observation_manager.h",
+    "src/colmap/sfm/observation_manager.cc",
+    "src/colmap/estimators/bundle_adjustment.h",
+    "src/colmap/estimators/bundle_adjustment.cc",
+    "src/colmap/estimators/bundle_adjustment_ceres.h",
+    "src/colmap/estimators/bundle_adjustment_ceres.cc",
+    "src/colmap/exe/sfm.h",
+    "src/colmap/exe/sfm.cc",
+    "src/colmap/util/base_controller.h",
+    "src/colmap/util/base_controller.cc",
+    "src/colmap/util/cancellation.h",
+    "src/colmap/util/cancellation.cc",
+    "src/colmap/controllers/option_manager.h",
+    "src/colmap/controllers/option_manager.cc",
+    "src/colmap/sensor/models/runtime.h",
+    "src/colmap/sensor/models.cc",
+)
+
 class ResidentAllocationFingerprintTest(unittest.TestCase):
     def test_phase_mutations_change_compiled_binding_and_rebuild_dependencies(self):
         repo = Path(__file__).resolve().parents[2]
@@ -211,7 +271,7 @@ class ResidentAllocationFingerprintTest(unittest.TestCase):
             # regression omits them from the generator's declared closure.
             sources = dict.fromkeys(
                 (*generator.CLOSURE, *FUSION_ALLOCATION_SOURCES,
-                 *UNDISTORTION_ALLOCATION_SOURCES, *EXTRACTION_ALLOCATION_SOURCES, *MATCHING_ALLOCATION_SOURCES)
+                 *UNDISTORTION_ALLOCATION_SOURCES, *EXTRACTION_ALLOCATION_SOURCES, *MATCHING_ALLOCATION_SOURCES, *MAPPING_ALLOCATION_SOURCES)
             )
             for name in sources:
                 target = root / name
@@ -235,7 +295,7 @@ class ResidentAllocationFingerprintTest(unittest.TestCase):
 
             baseline = generate()
             for name in (*FUSION_ALLOCATION_SOURCES,
-                         *UNDISTORTION_ALLOCATION_SOURCES, *EXTRACTION_ALLOCATION_SOURCES, *MATCHING_ALLOCATION_SOURCES):
+                         *UNDISTORTION_ALLOCATION_SOURCES, *EXTRACTION_ALLOCATION_SOURCES, *MATCHING_ALLOCATION_SOURCES, *MAPPING_ALLOCATION_SOURCES):
                 with self.subTest(source=name):
                     source = root / name
                     original = source.read_bytes()

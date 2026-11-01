@@ -4,6 +4,7 @@
 
 #include "colmap/geometry/gps.h"
 #include "colmap/util/hash_containers.h"
+#include "colmap/util/cancellation.h"
 #include "colmap/util/string.h"
 #include "colmap/util/timer.h"
 
@@ -42,6 +43,40 @@ DatabaseCache::DatabaseCache()
     : correspondence_graph_(std::make_shared<class CorrespondenceGraph>()) {}
 
 void DatabaseCache::Load(const Database& database, const Options& options) {
+  // Snapshot covers metadata AND every consumed payload; no WAL race between
+  // preflight and graph materialization. Legacy loading takes no new lock.
+  std::unique_ptr<DatabaseTransaction> snapshot;
+  std::shared_ptr<MappingLedger::Ticket> loader_credit;
+  Database::MappingShape shape;
+  const auto check_stopped = [&]() {
+    if (options.mapping_budget && (ScopedSignalHandler::IsInterruptRequested() ||
+        (options.check_if_stopped && options.check_if_stopped())))
+      throw std::runtime_error("mapping cancelled during database loading");
+  };
+  if (options.mapping_budget) {
+    THROW_CHECK(rigs_.empty() && cameras_.empty() && frames_.empty() && images_.empty());
+    check_stopped();
+    snapshot = std::make_unique<DatabaseTransaction>(&database);
+    shape = database.ReadMappingShape();
+    check_stopped();
+    // All DB rows, even those later filtered by existing mapper semantics.
+    // This may over-refuse; it never changes image or correspondence coverage.
+    mapping_credit_ = options.mapping_budget->Acquire(
+        MappingMultiply(shape.keypoint_rows, sizeof(Point2D)));
+    auto temporary = MappingAdd(shape.keypoint_blob_bytes,
+        MappingMultiply(shape.keypoint_rows, sizeof(FeatureKeypoint) + sizeof(Eigen::Vector2d)));
+    temporary = MappingAdd(temporary, MappingMultiply(shape.inlier_rows, 2 * sizeof(FeatureMatch)));
+    temporary = MappingAdd(temporary, MappingMultiply(shape.num_geometries,
+        sizeof(std::pair<image_pair_t, TwoViewGeometry>)));
+    temporary = MappingAdd(temporary, MappingMultiply(shape.geometry_camera_bytes, 3));
+    loader_credit = options.mapping_budget->Acquire(temporary);
+    LOG(INFO) << "Mapping database logical inventory: keypoint_rows=" << shape.keypoint_rows
+              << " inlier_rows=" << shape.inlier_rows << " geometry_rows=" << shape.num_geometries
+              << " initial_cache_bytes=" << mapping_credit_->bytes
+              << " loader_overlap_bytes=" << temporary
+              << "; conservative whole-DB payload, not residency or full physical fit";
+  }
+  check_stopped();
   const bool has_rigs = database.NumRigs() > 0;
   const bool has_frames = database.NumFrames() > 0;
 
@@ -117,7 +152,8 @@ void DatabaseCache::Load(const Database& database, const Options& options) {
   LOG(INFO) << "Loading matches...";
 
   std::vector<std::pair<image_pair_t, TwoViewGeometry>> two_view_geometries =
-      database.ReadTwoViewGeometries();
+      options.mapping_budget ? database.ReadMappingTwoViewGeometries(shape.num_geometries)
+                             : database.ReadTwoViewGeometries();
 
   // Undefined rows are only written by outdated producers; current
   // verification never stores them. They are skipped below, warn loudly.
@@ -222,6 +258,7 @@ void DatabaseCache::Load(const Database& database, const Options& options) {
     // triangulation on an existing reconstruction).
     images_.reserve(load_frame_ids.size());
     for (auto& image : images) {
+      check_stopped();
       if (load_frame_ids.count(image.FrameId()) == 0) {
         continue;
       }
@@ -272,12 +309,15 @@ void DatabaseCache::Load(const Database& database, const Options& options) {
 
   correspondence_graph_ = std::make_shared<class CorrespondenceGraph>();
 
+  if (options.mapping_budget) correspondence_graph_->SetMappingBudget(options.mapping_budget, shape.geometry_camera_bytes);
   for (const auto& [image_id, image] : images_) {
+    check_stopped();
     correspondence_graph_->AddImage(image_id, image.NumPoints2D());
   }
 
   size_t num_ignored_image_pairs = 0;
   for (auto& [pair_id, two_view_geometry] : two_view_geometries) {
+    check_stopped();
     if (UseInlierMatchesCheck(options,
                               two_view_geometry.config,
                               two_view_geometry.inlier_matches.size())) {
@@ -311,6 +351,8 @@ std::shared_ptr<DatabaseCache> DatabaseCache::Create(const Database& database,
 
 std::shared_ptr<DatabaseCache> DatabaseCache::CreateFromCache(
     const DatabaseCache& database_cache, const Options& options) {
+  if (options.mapping_budget)
+    throw std::invalid_argument("budgeted mapping does not support CreateFromCache copies");
   auto cache = std::make_shared<DatabaseCache>();
 
   // Collect candidate image ids matching the name filter.

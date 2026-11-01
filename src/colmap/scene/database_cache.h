@@ -11,6 +11,7 @@
 #include "colmap/util/types.h"
 
 #include <memory>
+#include <functional>
 #include <string>
 
 #include <Eigen/Core>
@@ -40,9 +41,16 @@ class DatabaseCache {
 
     // Whether to convert pose priors to ENU coordinate system.
     bool convert_pose_priors_to_enu = false;
+
+    // Opt-in initial DB/model payload + graph growth, not all SfM allocations.
+    std::shared_ptr<MappingLedger> mapping_budget;
+    std::function<bool()> check_if_stopped;
   };
 
   DatabaseCache();
+  std::shared_ptr<MappingLedger> MappingBudget() const {
+    return mapping_credit_ ? mapping_credit_->ledger : nullptr;
+  }
 
   // Load cameras, images, features, and matches from database.
   void Load(const Database& database, const Options& options);
@@ -101,6 +109,8 @@ class DatabaseCache {
   const class Image* FindImageWithName(const std::string& name) const;
 
  private:
+  // First member: credit retires only AFTER the owned cache payloads.
+  std::shared_ptr<MappingLedger::Ticket> mapping_credit_;
   void ConvertPosePriorsToENU();
 
   NodeHashMap<rig_t, class Rig> rigs_;

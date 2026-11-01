@@ -2,7 +2,9 @@
 
 #include "colmap/scene/database.h"
 #include "colmap/scene/database_blob.h"
+#include "colmap/scene/mapping_resource.h"
 #include "colmap/util/endian.h"
+#include "colmap/util/cancellation.h"
 #include "colmap/util/string.h"
 #include "colmap/util/version.h"
 
@@ -261,7 +263,24 @@ std::string CameraToBlob(const Camera& camera) {
   return stream.str();
 }
 
+// Serialized fixed header: camera id, model id, width, height, prior, count.
+constexpr size_t kCameraBlobHeaderBytes = sizeof(camera_t) + sizeof(int) + 3 * sizeof(uint64_t) + sizeof(uint8_t);
+void ValidateCameraBlob(const void* data, size_t header_bytes, uint64_t total_bytes) {
+  THROW_CHECK_GE(header_bytes, kCameraBlobHeaderBytes);
+  std::istringstream stream(std::string(static_cast<const char*>(data), kCameraBlobHeaderBytes), std::ios::binary);
+  ReadBinaryLittleEndian<camera_t>(&stream);
+  const auto model = static_cast<CameraModelId>(ReadBinaryLittleEndian<int>(&stream));
+  ReadBinaryLittleEndian<uint64_t>(&stream);
+  ReadBinaryLittleEndian<uint64_t>(&stream);
+  ReadBinaryLittleEndian<uint8_t>(&stream);
+  const auto count = ReadBinaryLittleEndian<uint64_t>(&stream);
+  THROW_CHECK(ExistsCameraModelWithId(model));
+  THROW_CHECK_EQ(count, CameraModelNumParams(model));
+  THROW_CHECK_EQ(total_bytes, MappingAdd(kCameraBlobHeaderBytes, MappingMultiply(count, sizeof(double))));
+}
+
 Camera CameraFromBlob(const void* data, const size_t num_bytes) {
+  ValidateCameraBlob(data, num_bytes, num_bytes);
   const std::string bytes(static_cast<const char*>(data), num_bytes);
   std::istringstream stream(bytes, std::ios::binary);
   Camera camera;
@@ -899,6 +918,85 @@ class SqliteDatabase : public Database {
     return pose_priors;
   }
 
+  MappingShape ReadMappingShape() const override {
+    MappingShape shape;
+    // Statements expose lengths/types and a bounded camera header, not payloads.
+    const auto scan = [&](const char* sql, const auto& consume) {
+      sqlite3_stmt* stmt = nullptr;
+      SQLITE3_CALL(sqlite3_prepare_v2(database_, sql, -1, &stmt, nullptr));
+      try {
+        while (SQLITE3_CALL(sqlite3_step(stmt)) == SQLITE_ROW) {
+          if (ScopedSignalHandler::IsInterruptRequested())
+            throw std::runtime_error("mapping metadata inventory cancelled");
+          consume(stmt);
+        }
+      } catch (...) {
+        sqlite3_finalize(stmt);
+        throw;
+      }
+      SQLITE3_CALL(sqlite3_finalize(stmt));
+    };
+    scan("SELECT model,length(params),typeof(params) FROM cameras", [&](sqlite3_stmt* stmt) {
+      THROW_CHECK_EQ(sqlite3_column_type(stmt, 0), SQLITE_INTEGER);
+      const auto model_id = sqlite3_column_int64(stmt, 0);
+      THROW_CHECK_GE(model_id, std::numeric_limits<int>::min());
+      THROW_CHECK_LE(model_id, std::numeric_limits<int>::max());
+      const auto model = static_cast<CameraModelId>(model_id);
+      THROW_CHECK(ExistsCameraModelWithId(model));
+      THROW_CHECK_EQ(std::string(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2))), "blob");
+      THROW_CHECK_EQ(sqlite3_column_int64(stmt, 1), CameraModelNumParams(model) * sizeof(double));
+    });
+    scan("SELECT image_id,rows,cols,length(data),typeof(data) IN ('blob','null') FROM keypoints", [&](sqlite3_stmt* stmt) {
+      const auto blob = ReadDatabaseBlobShape(stmt, 1, true, sizeof(float), std::numeric_limits<int>::max());
+      THROW_CHECK(blob.cols == 0 || blob.cols == 2 || blob.cols == 4 || blob.cols == 6);
+      THROW_CHECK(blob.rows == 0 || blob.cols != 0);
+      THROW_CHECK_EQ(sqlite3_column_type(stmt, 0), SQLITE_INTEGER);
+      const auto id = sqlite3_column_int64(stmt, 0);
+      THROW_CHECK_GE(id, 0);
+      THROW_CHECK_LT(id, kMaxNumImages);
+      THROW_CHECK(ExistsImage(static_cast<image_t>(id)));
+      shape.keypoint_rows = MappingAdd(shape.keypoint_rows, blob.rows);
+      shape.keypoint_blob_bytes = MappingAdd(shape.keypoint_blob_bytes, blob.bytes);
+    });
+    scan("SELECT pair_id,rows,cols,length(data),typeof(data) IN ('blob','null'),config,"
+         "length(F),typeof(F),length(E),typeof(E),length(H),typeof(H),"
+         "length(qvec),typeof(qvec),length(tvec),typeof(tvec),"
+         "length(camera1),typeof(camera1),substr(camera1,1,33),"
+         "length(camera2),typeof(camera2),substr(camera2,1,33) FROM two_view_geometries", [&](sqlite3_stmt* stmt) {
+      const auto blob = ReadDatabaseBlobShape(stmt, 1, true, sizeof(point2D_t), std::numeric_limits<int>::max());
+      THROW_CHECK_EQ(blob.cols, 2);
+      THROW_CHECK_EQ(sqlite3_column_type(stmt, 0), SQLITE_INTEGER);
+      const auto pair = sqlite3_column_int64(stmt, 0);
+      THROW_CHECK_GE(pair, 0);
+      THROW_CHECK_LT(static_cast<uint64_t>(pair), static_cast<uint64_t>(kMaxNumImages) * kMaxNumImages);
+      const auto [id1, id2] = PairIdToImagePair(pair);
+      THROW_CHECK(ExistsImage(id1) && ExistsImage(id2));
+      THROW_CHECK_EQ(sqlite3_column_type(stmt, 5), SQLITE_INTEGER);
+      const auto config = sqlite3_column_int64(stmt, 5);
+      THROW_CHECK_GE(config, std::numeric_limits<int>::min());
+      THROW_CHECK_LE(config, std::numeric_limits<int>::max());
+      for (int col : {6, 8, 10, 12, 14}) {
+        const std::string type = reinterpret_cast<const char*>(sqlite3_column_text(stmt, col + 1));
+        if (type == "null") continue;
+        THROW_CHECK_EQ(type, "blob");
+        THROW_CHECK_EQ(sqlite3_column_int64(stmt, col), (col < 12 ? 9 : col == 12 ? 4 : 3) * sizeof(double));
+      }
+      THROW_CHECK_EQ(sqlite3_column_type(stmt, 12) == SQLITE_NULL, sqlite3_column_type(stmt, 14) == SQLITE_NULL);
+      for (int col : {16, 19}) {
+        const std::string type = reinterpret_cast<const char*>(sqlite3_column_text(stmt, col + 1));
+        if (type == "null") continue;
+        THROW_CHECK_EQ(type, "blob");
+        const auto bytes = sqlite3_column_int64(stmt, col);
+        THROW_CHECK_GE(bytes, 0);
+        ValidateCameraBlob(sqlite3_column_blob(stmt, col + 2), sqlite3_column_bytes(stmt, col + 2), bytes);
+        shape.geometry_camera_bytes = MappingAdd(shape.geometry_camera_bytes, bytes);
+      }
+      shape.num_geometries = MappingAdd(shape.num_geometries, 1);
+      shape.inlier_rows = MappingAdd(shape.inlier_rows, blob.rows);
+    });
+    return shape;
+  }
+
   MatchingFeatureShape ReadMatchingFeatureShape(image_t image_id) const override {
     // Read LENGTH, never materialize the feature BLOB during inventory.
     MatchingFeatureShape shape;
@@ -1175,10 +1273,16 @@ class SqliteDatabase : public Database {
 
   std::vector<std::pair<image_pair_t, TwoViewGeometry>> ReadTwoViewGeometries()
       const override {
+    return ReadMappingTwoViewGeometries(0);
+  }
+
+  std::vector<std::pair<image_pair_t, TwoViewGeometry>>
+  ReadMappingTwoViewGeometries(size_t reserved_rows) const override {
     Sqlite3StmtContext context(sql_stmt_read_two_view_geometries_);
 
     std::vector<std::pair<image_pair_t, TwoViewGeometry>>
         all_two_view_geometries;
+    if (reserved_rows) all_two_view_geometries.reserve(reserved_rows);
 
     int rc;
     while ((rc = SQLITE3_CALL(sqlite3_step(

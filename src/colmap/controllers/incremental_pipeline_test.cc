@@ -11,9 +11,95 @@
 #include "colmap/util/testing.h"
 
 #include <gtest/gtest.h>
+#include <cmath>
 
 namespace colmap {
 namespace {
+
+#if defined(COLMAP_MVS_ENABLED)
+TEST(IncrementalPipeline, BudgetedInitialPayloadPreservesNonemptyReconstruction) {
+  auto database = Database::Open(CreateTestDir() / "mapping.db");
+  Reconstruction truth;
+  SyntheticDatasetOptions data;
+  data.num_rigs = 2;
+  data.num_cameras_per_rig = 1;
+  data.num_frames_per_rig = 7;
+  data.num_points3D = 50;
+  data.camera_has_prior_focal_length = false;
+  SynthesizeDataset(data, &truth, database.get());
+  auto manager = std::make_shared<ReconstructionManager>();
+  auto options = std::make_shared<IncrementalPipelineOptions>();
+  options->host_budget_bytes = 64ULL << 20;
+  {
+    IncrementalPipeline pipeline(options, database, manager);
+    pipeline.Run();
+    ASSERT_EQ(manager->Size(), 1);
+    const auto& result = *manager->Get(0);
+    EXPECT_EQ(result.NumRegImages(), truth.NumImages());
+    EXPECT_GT(result.NumPoints3D(), 0);
+    EXPECT_GT(result.ComputeNumObservations(), 0);
+    for (const auto& [point_id, point] : result.Points3D()) {
+      EXPECT_TRUE(point.xyz.allFinite());
+      EXPECT_TRUE(std::isfinite(point.error));
+      EXPECT_GE(point.track.Length(), 2);
+      for (const auto& observation : point.track.Elements())
+        EXPECT_EQ(result.Image(observation.image_id).Point2D(observation.point2D_idx).point3D_id, point_id);
+    }
+    EXPECT_THAT(truth, ReconstructionNear(result, 1e-2, 1e-4));
+  }
+  auto retained = manager->Get(0);
+  auto ledger = retained->MappingBudget();
+  ASSERT_TRUE(ledger);
+  EXPECT_GT(ledger->Used(), 0);
+  manager->Clear();
+  EXPECT_GT(ledger->Used(), 0);
+  retained.reset();
+  EXPECT_EQ(ledger->Used(), 0);
+  options->host_budget_bytes = 1;
+  auto refused = std::make_shared<ReconstructionManager>();
+  EXPECT_ANY_THROW(IncrementalPipeline(options, database, refused));
+  EXPECT_EQ(refused->Size(), 0);
+}
+
+TEST(IncrementalPipeline, ModelCopyAndCounterRefusalDoNotCompleteOrStrandCredits) {
+  auto database = Database::Open(CreateTestDir() / "mapping-growth.db");
+  Reconstruction truth;
+  SyntheticDatasetOptions data;
+  data.num_rigs = 2;
+  data.num_cameras_per_rig = 1;
+  data.num_frames_per_rig = 7;
+  data.num_points3D = 50;
+  SynthesizeDataset(data, &truth, database.get());
+  constexpr uint64_t capacity = 16ULL << 20;
+  for (bool allow_model_copy : {false, true}) {
+    auto manager = std::make_shared<ReconstructionManager>();
+    auto options = std::make_shared<IncrementalPipelineOptions>();
+    options->host_budget_bytes = capacity;
+    std::shared_ptr<MappingLedger> ledger;
+    {
+      IncrementalPipeline pipeline(options, database, manager);
+      ledger = pipeline.DatabaseCache()->MappingBudget();
+      const auto cache_used = ledger->Used();
+      uint64_t copy = 0;
+      for (const auto& [id, image] : pipeline.DatabaseCache()->Images())
+        copy += image.NumPoints2D() * sizeof(Point2D);
+      const auto available = allow_model_copy ? copy + 128 : 0;
+      auto blocker = ledger->Acquire(capacity / 103 * 100 - cache_used - available);
+      int completed = 0;
+      pipeline.AddCallback(IncrementalPipeline::LAST_IMAGE_REG_CALLBACK, [&]() { ++completed; });
+      EXPECT_ANY_THROW(pipeline.Run());
+      EXPECT_EQ(completed, 0);
+      blocker.reset();
+      // A failed attempt can retain its initial model in the manager, but it
+      // cannot masquerade as a completed reconstruction or release live credit.
+      manager->Clear();
+      EXPECT_EQ(ledger->Used(), cache_used);
+    }
+    EXPECT_EQ(ledger->Used(), 0);
+  }
+}
+
+#endif
 
 TEST(IncrementalPipeline, WithoutNoise) {
   const auto database_path = CreateTestDir() / "database.db";

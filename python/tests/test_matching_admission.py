@@ -32,7 +32,7 @@ class MatchingAdmissionTest(unittest.TestCase):
                         if fail_matching:
                             raise NativeFailure('matching failure')
                     elif command == 'mapper':
-                        self.assertEqual(reconstruction.process.host_budget_bytes, previous)
+                        self.assertEqual(reconstruction.process.host_budget_bytes, 1200)
                         raise NativeFailure('mapper sentinel')
 
                 reconstruction.native = native

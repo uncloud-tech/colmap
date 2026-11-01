@@ -9,6 +9,9 @@
 #include "colmap/util/file.h"
 #include "colmap/util/hash_containers.h"
 #include "colmap/util/timer.h"
+#if defined(COLMAP_MVS_ENABLED)
+#include "colmap/mvs/owned_fixed_cohort_validation.h"
+#endif
 
 namespace colmap {
 namespace {
@@ -324,9 +327,24 @@ IncrementalPipeline::IncrementalPipeline(
   LOG(INFO) << "Loading database";
   Timer timer;
   timer.Start();
-  database_cache_ = DatabaseCache::Create(
-      *database,
-      CreateDatabaseCacheOptions(*options_, *reconstruction_manager_));
+  auto cache_options = CreateDatabaseCacheOptions(*options_, *reconstruction_manager_);
+  if (options_->host_budget_bytes) {
+    if (options_->ba_use_gpu || options_->ba_local_backend != BundleAdjustmentBackend::CERES ||
+        options_->ba_global_backend != BundleAdjustmentBackend::CERES || reconstruction_manager_->Size())
+      throw std::invalid_argument("budgeted mapping supports fresh CPU Ceres mapping only; no backend fallback");
+#if defined(COLMAP_MVS_ENABLED)
+    const auto capacity = std::min(options_->host_budget_bytes, mvs::owned::ObserveFixedCohortHostAvailable());
+    cache_options.mapping_budget = std::make_shared<MappingLedger>(capacity,
+        options_->policy_host_bytes, options_->reserve_host_bytes);
+    LOG(INFO) << "Mapping initial DB/model and graph logical admission: capacity_bytes=" << capacity
+              << " policy_host_bytes=" << options_->policy_host_bytes
+              << " reserve_host_bytes=" << options_->reserve_host_bytes
+              << "; CPU Ceres; point3D/track/triangulation/RANSAC/Ceres/color decoder/metadata/hash/allocator workspace UNKNOWN; physical fit UNKNOWN";
+#else
+    throw std::invalid_argument("budgeted mapping requires native host observation (MVS build)");
+#endif
+  }
+  database_cache_ = DatabaseCache::Create(*database, cache_options);
   timer.PrintMinutes();
 
   CustomizeIncrementalPipelineOptions(*database_cache_, *options_);
@@ -345,6 +363,8 @@ IncrementalPipeline::IncrementalPipeline(
   THROW_CHECK(options_->Check());
   THROW_CHECK_NOTNULL(database_cache);
 
+  if (options_->host_budget_bytes)
+    throw std::invalid_argument("budgeted mapping does not support preloaded-cache copies");
   database_cache_ = DatabaseCache::CreateFromCache(
       *database_cache,
       CreateDatabaseCacheOptions(*options_, *reconstruction_manager_));

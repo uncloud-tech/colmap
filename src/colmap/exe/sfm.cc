@@ -340,31 +340,42 @@ int RunMapper(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
-  auto reconstruction_manager = std::make_shared<ReconstructionManager>();
-  if (!input_path.empty()) {
-    if (!ExistsDir(input_path)) {
-      LOG(ERROR) << "`input_path` is not a directory.";
+  const auto run = [&]() -> int {
+    auto reconstruction_manager = std::make_shared<ReconstructionManager>();
+    if (!input_path.empty()) {
+      if (options.mapper->host_budget_bytes)
+        throw std::invalid_argument("budgeted mapping does not support input_path continuation");
+      if (!ExistsDir(input_path)) {
+        LOG(ERROR) << "`input_path` is not a directory.";
+        return EXIT_FAILURE;
+      }
+      reconstruction_manager->Read(input_path);
+    }
+
+    if (!RunIncrementalMapperImpl(*options.database_path,
+                                  *options.image_path,
+                                  output_path,
+                                  options.mapper,
+                                  reconstruction_manager)) {
       return EXIT_FAILURE;
     }
-    reconstruction_manager->Read(input_path);
-  }
 
-  if (!RunIncrementalMapperImpl(*options.database_path,
-                                *options.image_path,
-                                output_path,
-                                options.mapper,
-                                reconstruction_manager)) {
+    if (input_path.empty()) {
+      for (size_t i = 0; i < reconstruction_manager->Size(); ++i) {
+        const auto reconstruction_path = output_path / std::to_string(i);
+        options.Write(reconstruction_path / "project.ini");
+      }
+    }
+
+    return EXIT_SUCCESS;
+  };
+  if (!options.mapper->host_budget_bytes) return run();
+  try {
+    return run();
+  } catch (const std::exception& error) {
+    LOG(ERROR) << "Mapping failed; owned payloads retired, no success flush: " << error.what();
     return EXIT_FAILURE;
   }
-
-  if (input_path.empty()) {
-    for (size_t i = 0; i < reconstruction_manager->Size(); ++i) {
-      const auto reconstruction_path = output_path / std::to_string(i);
-      options.Write(reconstruction_path / "project.ini");
-    }
-  }
-
-  return EXIT_SUCCESS;
 }
 
 bool RunGlobalMapperImpl(

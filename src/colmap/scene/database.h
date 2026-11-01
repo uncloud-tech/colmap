@@ -143,6 +143,15 @@ class Database {
       bool is_deprecated_image_prior = true) const = 0;
   virtual std::vector<PosePrior> ReadAllPosePriors() const = 0;
 
+  struct MappingShape {
+    uint64_t keypoint_rows = 0, keypoint_blob_bytes = 0;
+    uint64_t num_geometries = 0, inlier_rows = 0, geometry_camera_bytes = 0;
+  };
+  // Metadata only; budgeted mapping never loads descriptors/raw matches.
+  virtual MappingShape ReadMappingShape() const;
+  virtual std::vector<std::pair<image_pair_t, TwoViewGeometry>>
+  ReadMappingTwoViewGeometries(size_t reserved_rows) const;
+
   struct MatchingFeatureShape {
     uint64_t keypoint_rows = 0, keypoint_cols = 0, keypoint_bytes = 0;
     uint64_t descriptor_rows = 0, descriptor_cols = 0, descriptor_bytes = 0;
@@ -312,7 +321,7 @@ class Database {
   friend class DatabaseTransaction;
 
   // Used to ensure that only one transaction is active at the same time.
-  std::mutex transaction_mutex_;
+  mutable std::mutex transaction_mutex_;
 
   static std::vector<Factory> factories_;
 };
@@ -322,13 +331,13 @@ class Database {
 // destruction, respectively.
 class DatabaseTransaction {
  public:
-  explicit DatabaseTransaction(Database* database);
+  explicit DatabaseTransaction(const Database* database);
   ~DatabaseTransaction();
 
  private:
   NON_COPYABLE(DatabaseTransaction)
   NON_MOVABLE(DatabaseTransaction)
-  Database* database_;
+  const Database* database_;
   std::unique_lock<std::mutex> database_lock_;
 };
 

@@ -241,7 +241,16 @@ void Database::Merge(const Database& database1,
   }
 }
 
-DatabaseTransaction::DatabaseTransaction(Database* database)
+Database::MappingShape Database::ReadMappingShape() const {
+  throw std::invalid_argument("budgeted mapping requires SQLite metadata inventory");
+}
+
+std::vector<std::pair<image_pair_t, TwoViewGeometry>>
+Database::ReadMappingTwoViewGeometries(size_t) const {
+  throw std::invalid_argument("budgeted mapping requires supported geometry loader");
+}
+
+DatabaseTransaction::DatabaseTransaction(const Database* database)
     : database_(database), database_lock_(database->transaction_mutex_) {
   THROW_CHECK_NOTNULL(database_);
   database_->BeginTransaction();

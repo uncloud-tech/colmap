@@ -7,13 +7,15 @@
 #include "colmap/scene/database_sqlite.h"
 
 #include <gmock/gmock.h>
+#include "colmap/util/testing.h"
+#include <sqlite3.h>
 #include <gtest/gtest.h>
 
 namespace colmap {
 namespace {
 
-std::shared_ptr<Database> CreateTestDatabase() {
-  auto database = Database::Open(kInMemorySqliteDatabasePath);
+std::shared_ptr<Database> CreateTestDatabase(const std::filesystem::path& path = kInMemorySqliteDatabasePath) {
+  auto database = Database::Open(path);
 
   Camera camera1 = Camera::CreateFromModelId(
       kInvalidCameraId, SimplePinholeCameraModel::model_id, 1, 1, 1);
@@ -86,6 +88,52 @@ std::shared_ptr<Database> CreateTestDatabase() {
       image3.ImageId(), image4.ImageId(), two_view_geometry);
 
   return database;
+}
+
+TEST(DatabaseCache, MappingAdmissionLoadsWithoutDescriptorsAndRetiresSharedGraphOnce) {
+  auto database = CreateTestDatabase();
+  const auto shape = database->ReadMappingShape();
+  EXPECT_EQ(shape.keypoint_rows, 24);
+  EXPECT_EQ(shape.num_geometries, 3);
+  EXPECT_EQ(shape.inlier_rows, 3);
+  auto ledger = std::make_shared<MappingLedger>(1 << 20, 0, 0);
+  DatabaseCache::Options options;
+  options.mapping_budget = ledger;
+  auto cache = DatabaseCache::Create(*database, options);
+  auto graph = cache->CorrespondenceGraph();
+  EXPECT_EQ(cache->NumImages(), 4);
+  const auto live = ledger->Used();
+  auto graph_alias = graph;
+  EXPECT_EQ(ledger->Used(), live);
+  cache.reset();
+  EXPECT_GT(ledger->Used(), 0);
+  graph.reset();
+  graph_alias.reset();
+  EXPECT_EQ(ledger->Used(), 0);
+  options.mapping_budget = std::make_shared<MappingLedger>(1, 0, 0);
+  EXPECT_ANY_THROW(DatabaseCache::Create(*database, options));
+  EXPECT_EQ(options.mapping_budget->Used(), 0);
+}
+
+TEST(DatabaseCache, MappingMetadataAndPayloadUseSameWalSnapshot) {
+  const auto path = CreateTestDir() / "mapping-wal.db";
+  auto database = CreateTestDatabase(path);
+  sqlite3* writer = nullptr;
+  ASSERT_EQ(sqlite3_open(path.string().c_str(), &writer), SQLITE_OK);
+  ASSERT_EQ(sqlite3_exec(writer, "PRAGMA journal_mode=WAL", nullptr, nullptr, nullptr), SQLITE_OK);
+  DatabaseCache::Options options;
+  options.mapping_budget = std::make_shared<MappingLedger>(1 << 20, 0, 0);
+  int checks = 0;
+  options.check_if_stopped = [&]() {
+    if (++checks == 2) {
+      EXPECT_EQ(sqlite3_exec(writer, "UPDATE keypoints SET rows=1,data=zeroblob(24) WHERE image_id=1", nullptr, nullptr, nullptr), SQLITE_OK);
+    }
+    return false;
+  };
+  auto cache = DatabaseCache::Create(*database, options);
+  EXPECT_EQ(cache->Image(1).NumPoints2D(), 10);
+  EXPECT_EQ(database->ReadMappingShape().keypoint_rows, 15);
+  sqlite3_close(writer);
 }
 
 TEST(DatabaseCache, Empty) {

@@ -27,6 +27,22 @@ class ParameterizedDatabaseTests
     : public ::testing::TestWithParam<std::function<std::shared_ptr<Database>(
           const std::filesystem::path&)>> {};
 
+TEST(SqliteDatabase, MappingInventoryRejectsMalformedGeometryBeforeMaterialization) {
+  const auto path = CreateTestDir() / "mapping.db";
+  auto database = OpenSqliteDatabase(path);
+  sqlite3* writer = nullptr;
+  ASSERT_EQ(sqlite3_open(path.string().c_str(), &writer), SQLITE_OK);
+  for (const auto* shape : {"4294967297,2,x'0000000000000000'",
+                           "1.5,2,x'0000000000000000'",
+                           "1,2,'12345678'", "1,3,x'0000000000000000'"}) {
+    ASSERT_EQ(sqlite3_exec(writer, "DELETE FROM two_view_geometries", nullptr, nullptr, nullptr), SQLITE_OK);
+    const auto sql = "INSERT INTO two_view_geometries(pair_id,rows,cols,data,config) VALUES(2147483649," + std::string(shape) + ",2)";
+    ASSERT_EQ(sqlite3_exec(writer, sql.c_str(), nullptr, nullptr, nullptr), SQLITE_OK);
+    EXPECT_ANY_THROW(database->ReadMappingShape());
+  }
+  sqlite3_close(writer);
+}
+
 TEST(SqliteDatabase, RejectMalformedMatchMetadataBeforeAllocation) {
   const auto path = CreateTestDir() / "malformed.db";
   auto database = OpenSqliteDatabase(path);
