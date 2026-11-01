@@ -27,7 +27,13 @@ struct TrackElement {
 class Track {
  public:
   Track();
-  // Component-only opt-in. Native mapping does not attach Track budgets yet.
+  // Component-only opt-in, not a permanent object-to-ledger binding. Copy/move
+  // assignment replaces the destination's ledger policy with the source's,
+  // clearing it for an unbudgeted source. Copying such a source allocates without
+  // admission; subsequent growth also remains unbudgeted. Old destination storage
+  // is destroyed before its credits retire. Native mapping attachment is OFF;
+  // future attachment must audit/prevent unintended policy shedding rather than
+  // assume assignment retains the destination ledger.
   // Mutable Elements() growth and externally allocated SetElements arguments
   // are outside this interception boundary. Allocator excess is UNKNOWN.
   explicit Track(std::shared_ptr<MappingLedger> ledger);

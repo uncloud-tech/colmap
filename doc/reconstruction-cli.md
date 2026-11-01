@@ -280,9 +280,17 @@ remain UNKNOWN, except for explicitly opted-in Track storage described below.
 
 A component-only `Track(ledger)` API admits requested vector replacement payloads
 before allocation, including old/new overlap. Copies acquire independent credits;
-moves transfer ownership. Erase retains storage credit, and compression prepares
-a replacement before retiring the old storage. Allocator-provided capacity beyond
-the requested amount remains **UNKNOWN**, not covered by the aggregate 3% margin.
+moves transfer ownership. `Track(ledger)` does **not** permanently bind the object
+to that ledger: copy/move assignment replaces the destination's ledger policy
+with the source's, including clearing it for an unbudgeted source. Copy assignment
+from an unbudgeted source allocates without admission, and subsequent growth
+remains unbudgeted. Old destination storage is destroyed before its credits
+retire. This source-policy assignment is accepted only for the opt-in value
+component; future production attachment must audit/prevent unintended policy
+shedding, not assume assignment retains the destination ledger. Erase retains
+storage credit, and compression prepares a replacement before retiring old storage.
+Allocator-provided capacity beyond the requested amount remains **UNKNOWN**, not
+covered by the aggregate 3% margin.
 Arbitrary growth through the compatible mutable `Elements()` vector reference and
 caller allocations passed to `SetElements` are outside interception. This optional
 Track ownership is **not attached to native mapper/triangulator Tracks**: merge
