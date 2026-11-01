@@ -14,6 +14,7 @@
 #include "colmap/util/opengl_utils.h"
 #include "colmap/util/timer.h"
 
+#include <iomanip>
 #include <numeric>
 
 namespace colmap {
@@ -405,10 +406,12 @@ class FeatureExtractorController : public Thread {
           capacity, extraction_options_.policy_host_bytes,
           extraction_options_.reserve_host_bytes);
       budget_->Acquire(0, [] { return false; });
-      LOG(INFO) << "Feature extraction frozen logical host capacity: " << capacity
-                << "; unknown workspace/decoder/allocator policy: "
-                << extraction_options_.policy_host_bytes
-                << "; full physical fit UNKNOWN";
+      LOG(INFO) << "Feature extraction frozen logical host capacity: "
+                << "capacity_bytes=" << capacity
+                << " host_budget_bytes=" << extraction_options_.host_budget_bytes
+                << " policy_host_bytes=" << extraction_options_.policy_host_bytes
+                << " reserve_host_bytes=" << extraction_options_.reserve_host_bytes
+                << "; workspace/decoder/allocator UNKNOWN; full physical fit UNKNOWN";
 #else
       throw std::invalid_argument(
           "budgeted extraction needs native host observation (MVS build)");
@@ -637,20 +640,26 @@ class FeatureExtractorController : public Thread {
       std::function<void(int, int, int)> admit_header;
       if (budget_)
         admit_header = [&](int w, int h, int channels) {
+          const int max_size = extraction_options_.EffMaxImageSize();
+          const bool cpu_staging =
+              !extraction_options_.use_gpu ||
+              extraction_options_.sift->estimate_affine_shape ||
+              extraction_options_.sift->domain_size_pooling ||
+              extraction_options_.sift->force_covariant_extractor;
+          const uint64_t known_payload_bytes =
+              ExtractionBitmapPayload(w, h, channels, max_size, cpu_staging);
           image_data.credit = budget_->Acquire(
-              ExtractionBitmapPayload(
-                  w,
-                  h,
-                  channels,
-                  extraction_options_.EffMaxImageSize(),
-                  !extraction_options_.use_gpu ||
-                      extraction_options_.sift->estimate_affine_shape ||
-                      extraction_options_.sift->domain_size_pooling ||
-                      extraction_options_.sift->force_covariant_extractor),
+              known_payload_bytes,
               [this] { return IsStopped(); },
               [this] { Callback(kFeatureExtractionAdmissionWait); });
-          LOG(INFO) << "Feature extraction admitted image before decode: " << w
-                    << "x" << h << "; logical live bytes: " << budget_->Used();
+          LOG(INFO) << "Feature extraction admitted image before decode: image="
+                    << std::quoted(image_data.image.Name())
+                    << " source_width=" << w << " source_height=" << h
+                    << " file_channels=" << channels << " max_size=" << max_size
+                    << " cpu_staging=" << (cpu_staging ? 1 : 0)
+                    << " known_payload_bytes=" << known_payload_bytes
+                    << " ledger_used_bytes=" << budget_->Used()
+                    << " ledger_peak_bytes=" << budget_->Peak();
         };
       image_data.status = image_reader_.Next(&image_data.rig,
                                              &image_data.camera,

@@ -300,9 +300,12 @@ void OptionManager::AddFeatureExtractionOptions() {
       })));
   AddDefaultOption("FeatureExtraction.num_threads",
                    &feature_extraction->num_threads);
-  AddDefaultOption("FeatureExtraction.host_budget_bytes", &feature_extraction->host_budget_bytes);
-  AddDefaultOption("FeatureExtraction.policy_host_bytes", &feature_extraction->policy_host_bytes);
-  AddDefaultOption("FeatureExtraction.reserve_host_bytes", &feature_extraction->reserve_host_bytes);
+  AddDefaultByteOption("FeatureExtraction.host_budget_bytes",
+                       &feature_extraction->host_budget_bytes);
+  AddDefaultByteOption("FeatureExtraction.policy_host_bytes",
+                       &feature_extraction->policy_host_bytes);
+  AddDefaultByteOption("FeatureExtraction.reserve_host_bytes",
+                       &feature_extraction->reserve_host_bytes);
   AddDefaultOption("FeatureExtraction.use_gpu", &feature_extraction->use_gpu);
   AddDefaultOption("FeatureExtraction.gpu_index",
                    &feature_extraction->gpu_index);

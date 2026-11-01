@@ -274,6 +274,8 @@ CLOSURE = (
     "src/colmap/controllers/extraction_resource.h",
     "src/colmap/controllers/image_reader.h",
     "src/colmap/controllers/image_reader.cc",
+    "src/colmap/controllers/base_option_manager.h",
+    "src/colmap/controllers/base_option_manager.cc",
     "src/colmap/controllers/option_manager.h",
     "src/colmap/controllers/option_manager.cc",
     "src/colmap/feature/extractor.h",

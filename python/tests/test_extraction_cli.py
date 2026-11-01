@@ -66,6 +66,15 @@ class ExtractionCliTest(unittest.TestCase):
             result = subprocess.run(self.command(database, budget),
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
             self.assertEqual(result.returncode, 0, result.stdout.decode(errors='replace'))
+        for name, w, h, channels, payload in (
+                ('a.png', 128, 128, 1, 81920),
+                ('b.png', 93, 67, 3, 31155), ('c.png', 1, 1, 1, 5)):
+            event = (f'image="{name}" source_width={w} source_height={h} '
+                     f'file_channels={channels} max_size=3200 cpu_staging=1 '
+                     f'known_payload_bytes={payload} ledger_used_bytes=')
+            self.assertIn(event.encode(), result.stdout)
+        self.assertIn(b'reserve_host_bytes=0', result.stdout)
+        self.assertIn(b'ledger_peak_bytes=', result.stdout)
         expected = self.blobs(control)
         self.assertEqual(len(expected), 3)
         self.assertGreater(sum(row[1] for row in expected), 0)
@@ -77,6 +86,24 @@ class ExtractionCliTest(unittest.TestCase):
         self.assertIn(b'before decode', result.stdout)
         self.assertIn(b'workers drained', result.stdout)
         self.assertEqual(self.blobs(refused), [])
+
+    def test_real_main_rejects_noncanonical_byte_options(self):
+        # Real executable/OptionManager boundary: no GPU, database, or decode
+        # failure may masquerade as parser rejection.
+        for option in ('host_budget_bytes', 'policy_host_bytes', 'reserve_host_bytes'):
+            for value in ('-1', '+1', '01', '18446744073709551616',
+                          '1.5', '1e3', '1x', ' 1', '1 ', ''):
+                with self.subTest(option=option, value=value):
+                    command = self.command(self.root / 'parse.db', 0)
+                    command += [f'--FeatureExtraction.{option}', value]
+                    # Replace the existing host option rather than duplicating it.
+                    if option == 'host_budget_bytes':
+                        command = command[:-4] + command[-2:]
+                    result = subprocess.run(command, stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT, timeout=30)
+                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertIn(b'canonical byte allowance', result.stdout)
+                    self.assertFalse((self.root / 'parse.db').exists())
 
     def test_real_main_budget_constructor_refuses_without_abort(self):
         (self.photos / 'a.png').write_bytes(png(128, 128))

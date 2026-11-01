@@ -46,6 +46,8 @@ UNDISTORTION_ALLOCATION_SOURCES = (
 
 
 EXTRACTION_ALLOCATION_SOURCES = (
+    "src/colmap/controllers/base_option_manager.h",
+    "src/colmap/controllers/base_option_manager.cc",
     "src/colmap/controllers/extraction_resource.h",
     "src/colmap/controllers/feature_extraction.h",
     "src/colmap/controllers/feature_extraction.cc",
