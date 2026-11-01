@@ -18,6 +18,8 @@
 #endif
 
 #include <functional>
+#include <limits>
+#include <stdexcept>
 #include <set>
 #include <utility>
 
@@ -33,6 +35,40 @@ Bitmap CreateImageWithSquare(const int size) {
     }
   }
   return bitmap;
+}
+
+TEST(SiftHostAllocation, CpuOutputUnchangedAndGrowthRefuses) {
+  for (bool covariant : {false, true}) {
+    FeatureExtractionOptions options;
+    options.use_gpu = false;
+    options.sift->force_covariant_extractor = covariant;
+    const Bitmap bitmap = CreateImageWithSquare(128);
+    auto control = CreateSiftFeatureExtractor(options);
+    ASSERT_NE(control, nullptr);
+    FeatureKeypoints original_keypoints;
+    FeatureDescriptors original_descriptors;
+    ASSERT_TRUE(control->Extract(bitmap, &original_keypoints, &original_descriptors));
+    uint64_t charged = 0;
+    options.reserve_host_payload = [&](uint64_t bytes) { charged += bytes; };
+    auto candidate = CreateSiftFeatureExtractor(options);
+    FeatureKeypoints keypoints;
+    FeatureDescriptors descriptors;
+    ASSERT_TRUE(candidate->Extract(bitmap, &keypoints, &descriptors));
+    EXPECT_GT(charged, 0);
+    EXPECT_EQ(keypoints, original_keypoints);
+    ASSERT_EQ(descriptors.data.rows(), original_descriptors.data.rows());
+    EXPECT_TRUE((descriptors.data.array() == original_descriptors.data.array()).all());
+    options.reserve_host_payload = [](uint64_t) { throw std::runtime_error("growth refused"); };
+    auto refused = CreateSiftFeatureExtractor(options);
+    FeatureKeypoints refused_keypoints;
+    FeatureDescriptors refused_descriptors;
+    EXPECT_THROW(refused->Extract(bitmap, &refused_keypoints, &refused_descriptors), std::runtime_error);
+    EXPECT_TRUE(refused_keypoints.empty());
+    EXPECT_EQ(refused_descriptors.data.size(), 0);
+  }
+  FeatureExtractionOptions options;
+  options.reserve_host_payload = [](uint64_t) {};
+  EXPECT_THROW(options.ReserveHostPayload(std::numeric_limits<uint64_t>::max(), 2), std::overflow_error);
 }
 
 // Helper to create empty descriptors for testing.

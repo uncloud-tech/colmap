@@ -45,6 +45,30 @@ UNDISTORTION_ALLOCATION_SOURCES = (
 )
 
 
+EXTRACTION_ALLOCATION_SOURCES = (
+    "src/colmap/controllers/base_option_manager.h",
+    "src/colmap/controllers/base_option_manager.cc",
+    "src/colmap/controllers/extraction_resource.h",
+    "src/colmap/controllers/feature_extraction.h",
+    "src/colmap/controllers/feature_extraction.cc",
+    "src/colmap/controllers/image_reader.cc",
+    "src/colmap/feature/extractor.h",
+    "src/colmap/feature/extractor.cc",
+    "src/colmap/feature/sift.h",
+    "src/colmap/feature/sift.cc",
+    "src/colmap/feature/types.h",
+    "src/colmap/feature/utils.cc",
+    "src/colmap/scene/database_sqlite.cc",
+    "src/thirdparty/VLFeat/sift.c",
+    "src/thirdparty/VLFeat/covdet.c",
+    "src/thirdparty/SiftGPU/SiftGPU.cpp",
+    "src/thirdparty/SiftGPU/SiftPyramid.cpp",
+    "src/thirdparty/SiftGPU/PyramidCU.cpp",
+    "src/thirdparty/SiftGPU/ProgramCU.cu",
+    "src/colmap/exe/feature.cc",
+)
+
+
 class ResidentAllocationFingerprintTest(unittest.TestCase):
     def test_phase_mutations_change_compiled_binding_and_rebuild_dependencies(self):
         repo = Path(__file__).resolve().parents[2]
@@ -54,7 +78,7 @@ class ResidentAllocationFingerprintTest(unittest.TestCase):
             # regression omits them from the generator's declared closure.
             sources = dict.fromkeys(
                 (*generator.CLOSURE, *FUSION_ALLOCATION_SOURCES,
-                 *UNDISTORTION_ALLOCATION_SOURCES)
+                 *UNDISTORTION_ALLOCATION_SOURCES, *EXTRACTION_ALLOCATION_SOURCES)
             )
             for name in sources:
                 target = root / name
@@ -78,7 +102,7 @@ class ResidentAllocationFingerprintTest(unittest.TestCase):
 
             baseline = generate()
             for name in (*FUSION_ALLOCATION_SOURCES,
-                         *UNDISTORTION_ALLOCATION_SOURCES):
+                         *UNDISTORTION_ALLOCATION_SOURCES, *EXTRACTION_ALLOCATION_SOURCES):
                 with self.subTest(source=name):
                     source = root / name
                     original = source.read_bytes()

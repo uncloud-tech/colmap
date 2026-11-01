@@ -6,7 +6,9 @@
 #include "colmap/util/file.h"
 #include "colmap/util/string.h"
 
+#include <charconv>
 #include <fstream>
+#include <stdexcept>
 
 #include <boost/property_tree/ini_parser.hpp>
 
@@ -28,6 +30,30 @@ BaseOptionManager::BaseOptionManager(bool add_project_options) {
 
   AddRandomOptions();
   AddLogOptions();
+}
+
+void BaseOptionManager::AddDefaultByteOption(const std::string& name,
+                                             uint64_t* option) {
+  desc_->add_options()(
+      name.c_str(),
+      config::value<std::string>()
+          ->default_value(std::to_string(*option))
+          ->notifier([name, option](const std::string& text) {
+            uint64_t value = 0;
+            const auto parsed =
+                std::from_chars(text.data(), text.data() + text.size(), value);
+            if (text.empty() || (text.size() > 1 && text.front() == '0') ||
+                parsed.ec != std::errc() ||
+                parsed.ptr != text.data() + text.size()) {
+              throw std::invalid_argument(
+                  name + " requires a canonical byte allowance");
+            }
+            *option = value;
+          }),
+      "Canonical unsigned decimal byte allowance (0 disables the allowance)");
+  // Serialize the typed value, including programmatic edits after registration.
+  // Do not instantiate RegisterOption<uint64_t> or narrow through a double/int.
+  options_bytes_.emplace_back(name, option);
 }
 
 bool BaseOptionManager::RegisterOptionGroupOnce(
@@ -123,6 +149,7 @@ void BaseOptionManager::ResetImpl(bool reset_logging) {
   options_double_.clear();
   options_string_.clear();
   options_path_.clear();
+  options_bytes_.clear();
 
   added_option_groups_.clear();
 }
@@ -306,6 +333,12 @@ void BaseOptionManager::Write(const std::filesystem::path& path) const {
   // options without a section in between other sections and therefore
   // the errors will be assigned to the wrong section if read later.
 
+  for (const auto& [key, value] : options_bytes_) {
+    if (!StringContains(key, ".")) {
+      pt.put(key, std::to_string(*value));
+    }
+  }
+
   for (const auto& [key, value] : options_bool_) {
     if (!StringContains(key, ".")) {
       pt.put(key, *value);
@@ -363,6 +396,12 @@ void BaseOptionManager::Write(const std::filesystem::path& path) const {
   for (const auto& [key, value] : options_path_) {
     if (StringContains(key, ".")) {
       pt.put(key, value->string());
+    }
+  }
+
+  for (const auto& [key, value] : options_bytes_) {
+    if (StringContains(key, ".")) {
+      pt.put(key, std::to_string(*value));
     }
   }
 

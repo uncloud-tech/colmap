@@ -101,6 +101,61 @@ observed host capacity (limited by any user cap) to native fusion and the existi
 direct-child RSS monitor. No extra byte flags are required. Native fusion again
 limits that phase cap by its own observed host/cgroup FREE before allocation.
 
+### Feature extraction admission
+
+Before extraction the installed frontend passes a fresh observed host phase cap
+(lowered by a user cap), raw host policy and reserve to native extraction. The
+same phase cap scopes the direct-child RSS monitor; the prior monitor limit is
+restored on success or failure. Extraction still uses maximum image size **3200**,
+not the dense resize, with unchanged SIFT options and GPU selection/capability.
+There is no silent CPU fallback, feature-count clamp or quality reduction.
+
+Native `FeatureExtraction.host_budget_bytes` defaults to zero, retaining legacy
+behavior. Nonzero budgets support grayscale SIFT (CPU, covariant CPU or GPU) with
+UINT8, non-deep 1–4-channel images and a build supporting the native host/cgroup
+observer. Masks and non-SIFT extractors explicitly refuse in budgeted mode only.
+The same open decoder header is admitted before pixels are allocated; dimensions
+must fit Bitmap's int arithmetic. A valid one-pixel dimension remains positive
+when bounded thumbnailing. The reader releases its database transaction while
+waiting, so the writer can retire payloads without a transaction/credit deadlock.
+
+For original pixel area P and actual rounded thumbnail area T, native admission
+reserves the maximum of decode/conversion overlap (P for gray, 4P for RGB),
+original + thumbnail when resized (P+T), gravity rotation (2T), and CPU grayscale
+plus float staging (5T, prepaid rather than charged again). This per-job credit
+travels through the existing reader/resizer/extractor/writer queues. It is held
+until the job's actual payloads are destroyed, not just until extraction finishes.
+All simultaneously queued and executing images therefore share one ledger.
+
+SIFT adds credits before controlled output/scratch allocation using actual
+feature counts and requested capacities, including old/new vector growth,
+per-level CPU storage, descriptor transforms, GPU float download and database
+keypoint serialization. `max_num_features` is **not** treated as a storage bound:
+orientations and complete retained scale levels can exceed it. Budgeted GPU
+keypoint download storage is job-local and actually freed before credit release;
+legacy GPU buffer reuse is unchanged. Actual vector capacities are reconciled
+where available. Scratch credits conservatively remain held through writer
+retirement even after temporary storage is freed; this can refuse a job that
+would fit a tighter lifetime analysis. Only new-job admission waits. Growth while
+holding live credits refuses immediately rather than deadlocking all extractors.
+
+Capacity is frozen once from native observed FREE, lowered by the supplied cap;
+live allocations are never subtracted again. Native applies exactly one aggregate
+ceil(3%) to known live credits plus raw policy, then adds reserve outside it.
+Singleton no-fit, unsupported input, extraction/writer failure or cancellation
+stops and drains all queues/workers, returning failure. The database can retain
+honest partial state; it is not deleted, rolled back wholesale or labelled a
+successful frontend reconstruction. No successful `result.json` is published.
+
+These are **logical owned-payload checks, not a physical host/device cap**.
+VLFeat pyramids and detector state, SiftGPU host/device workspace, decoder/filter
+internals, SQLite page/cache storage, metadata, allocation rounding and library
+bookkeeping remain explicit UNKNOWN policy. CPU SIFT workspace can dominate the
+known pixels/output by gigabytes. Reusing default policy is not CPU/GPU overhead
+calibration or a complete physical-fit claim. Device capability gates and the
+existing native backend remain unchanged; real GPU compatibility requires GPU
+validation, not these CPU-path tests.
+
 ### Undistortion admission
 
 Immediately before undistortion, the frontend also passes an observed, lower-capped

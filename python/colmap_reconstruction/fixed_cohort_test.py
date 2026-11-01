@@ -224,7 +224,23 @@ class RefusalAndLifetimeTest(unittest.TestCase):
                         'src/colmap/scene/camera.cc',
                         'src/colmap/sensor/models/pinhole.h',
                         'src/colmap/sensor/bitmap.cc',
-                        'src/colmap/exe/image.cc'):
+                        'src/colmap/exe/image.cc',
+                        'src/colmap/controllers/base_option_manager.h',
+                        'src/colmap/controllers/base_option_manager.cc',
+                        'src/colmap/controllers/extraction_resource.h',
+                        'src/colmap/controllers/feature_extraction.cc',
+                        'src/colmap/controllers/image_reader.cc',
+                        'src/colmap/feature/extractor.cc',
+                        'src/colmap/feature/sift.cc',
+                        'src/colmap/feature/types.h',
+                        'src/colmap/feature/utils.cc',
+                        'src/colmap/scene/database_sqlite.cc',
+                        'src/thirdparty/VLFeat/sift.c',
+                        'src/thirdparty/VLFeat/covdet.c',
+                        'src/thirdparty/SiftGPU/SiftPyramid.cpp',
+                        'src/thirdparty/SiftGPU/PyramidCU.cpp',
+                        'src/thirdparty/SiftGPU/ProgramCU.cu',
+                        'src/colmap/exe/feature.cc'):
             with self.subTest(changed=changed), tempfile.TemporaryDirectory(
                     prefix='cohort-source-', dir=self.root) as directory:
                 root = Path(directory)
@@ -385,7 +401,7 @@ class WorkspaceFixtureBindingTest(unittest.TestCase):
         self.assertIn('MakeWorkspaceFixture', header)
         self.assertIn('b.max_active_owners = 1', header)
         self.assertIn('b.max_active_owners = 2', header)
-        self.assertIn(tool['cpp']('90ffab1675dd924a86a947c454bbceb6de066bfa8f91eac5ad61a02fd043b351'), header)
+        self.assertIn(tool['cpp']('ace3e28dec51223037b0c6b5a73c54797eee86b45f02829e171b774206db083b'), header)
         self.assertIn('b.caller_inputs = {12288ULL,0ULL}', header)
         self.assertIn('b.host_outputs = {393216ULL,0ULL}', header)
         self.assertIn('b.snapshots = {0ULL,196608ULL}', header)

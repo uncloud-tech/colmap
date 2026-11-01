@@ -3,6 +3,10 @@
 #include "colmap/controllers/feature_extraction.h"
 
 #include "colmap/feature/sift.h"
+#include "colmap/controllers/extraction_resource.h"
+#if defined(COLMAP_MVS_ENABLED)
+#include "colmap/mvs/owned_fixed_cohort_validation.h"
+#endif
 #include "colmap/scene/database.h"
 #include "colmap/util/cuda.h"
 #include "colmap/util/file.h"
@@ -10,6 +14,7 @@
 #include "colmap/util/opengl_utils.h"
 #include "colmap/util/timer.h"
 
+#include <iomanip>
 #include <numeric>
 
 namespace colmap {
@@ -59,6 +64,8 @@ void MaskFeatures(const Bitmap& mask,
 struct ImageData {
   ImageReader::Status status = ImageReader::Status::FAILURE;
 
+  // Declared first: credit destruction follows every payload member.
+  std::shared_ptr<ExtractionBudget::Ticket> credit;
   Rig rig;
   Camera camera;
   Image image;
@@ -70,7 +77,26 @@ struct ImageData {
   FeatureDescriptors descriptors;
 };
 
-class ImageResizerThread : public Thread {
+class ExtractionWorker : public Thread {
+ public:
+  std::function<void(std::exception_ptr)> failure;
+ private:
+  void Run() final {
+    if (!failure) {
+      RunWorker();
+      return;
+    }
+    try {
+      RunWorker();
+      if (IsStopped()) throw std::runtime_error("feature extraction cancelled");
+    } catch (...) {
+      failure(std::current_exception());
+    }
+  }
+  virtual void RunWorker() = 0;
+};
+
+class ImageResizerThread : public ExtractionWorker {
  public:
   ImageResizerThread(int max_image_size,
                      JobQueue<ImageData>* input_queue,
@@ -82,7 +108,7 @@ class ImageResizerThread : public Thread {
   }
 
  private:
-  void Run() override {
+  void RunWorker() override {
     while (true) {
       if (IsStopped()) {
         break;
@@ -93,7 +119,8 @@ class ImageResizerThread : public Thread {
         auto& image_data = input_job.Data();
 
         if (image_data.status == ImageReader::Status::SUCCESS) {
-          image_data.bitmap->Thumbnail(max_image_size_);
+          image_data.bitmap->Thumbnail(max_image_size_, Bitmap::RescaleFilter::kBilinear,
+                                       image_data.credit != nullptr);
         }
 
         output_queue_->Push(std::move(image_data));
@@ -109,7 +136,7 @@ class ImageResizerThread : public Thread {
   JobQueue<ImageData>* output_queue_;
 };
 
-class FeatureExtractorThread : public Thread {
+class FeatureExtractorThread : public ExtractionWorker {
  public:
   FeatureExtractorThread(const FeatureExtractionOptions& extraction_options,
                          const std::shared_ptr<Bitmap>& camera_mask,
@@ -120,6 +147,12 @@ class FeatureExtractorThread : public Thread {
         input_queue_(input_queue),
         output_queue_(output_queue) {
     THROW_CHECK(extraction_options_.Check());
+    if (extraction_options_.host_budget_bytes) {
+      extraction_options_.reserve_host_payload = [this](uint64_t bytes) {
+        THROW_CHECK_NOTNULL(current_credit_.get());
+        current_credit_->Grow(bytes);
+      };
+    }
 
     if (extraction_options_.RequiresOpenGL()) {
       opengl_context_ = std::make_unique<OpenGLContextManager>();
@@ -127,7 +160,7 @@ class FeatureExtractorThread : public Thread {
   }
 
  private:
-  void Run() override {
+  void RunWorker() override {
     if (opengl_context_ != nullptr) {
       THROW_CHECK(opengl_context_->MakeCurrent());
     }
@@ -137,6 +170,7 @@ class FeatureExtractorThread : public Thread {
     if (extractor == nullptr) {
       LOG(ERROR) << "Failed to create feature extractor.";
       SignalInvalidSetup();
+      if (failure) throw std::runtime_error("failed to create feature extractor");
       return;
     }
 
@@ -161,6 +195,7 @@ class FeatureExtractorThread : public Thread {
           if (rot90 > 0) {
             image_data.bitmap->Rot90(rot90);
           }
+          current_credit_ = image_data.credit;
           if (extractor->Extract(*image_data.bitmap,
                                  &image_data.keypoints,
                                  &image_data.descriptors)) {
@@ -188,7 +223,9 @@ class FeatureExtractorThread : public Thread {
             }
           } else {
             image_data.status = ImageReader::Status::FAILURE;
+            if (failure) throw std::runtime_error("feature extraction failed");
           }
+          current_credit_.reset();
         }
 
         // Release the memory, since it is not used afterwards.
@@ -206,7 +243,8 @@ class FeatureExtractorThread : public Thread {
     }
   }
 
-  const FeatureExtractionOptions extraction_options_;
+  FeatureExtractionOptions extraction_options_;
+  std::shared_ptr<ExtractionBudget::Ticket> current_credit_;
   std::shared_ptr<Bitmap> camera_mask_;
 
   std::unique_ptr<OpenGLContextManager> opengl_context_;
@@ -215,8 +253,9 @@ class FeatureExtractorThread : public Thread {
   JobQueue<ImageData>* output_queue_;
 };
 
-class FeatureWriterThread : public Thread {
+class FeatureWriterThread : public ExtractionWorker {
  public:
+  std::function<void()> before_write;
   FeatureWriterThread(FeatureExtractorType extractor_type,
                       size_t num_images,
                       Database* database,
@@ -227,7 +266,7 @@ class FeatureWriterThread : public Thread {
         input_queue_(input_queue) {}
 
  private:
-  void Run() override {
+  void RunWorker() override {
     size_t image_index = 0;
     while (true) {
       if (IsStopped()) {
@@ -270,6 +309,19 @@ class FeatureWriterThread : public Thread {
           LOG(INFO) << "  Mask:            Yes";
         }
 
+        if (image_data.credit) {
+          // SQLite's feature writer materializes a six-float keypoint matrix
+          // before binding it. Descriptor binding is SQLITE_STATIC (no owned
+          // product copy); SQLite page/cache internals remain policy.
+          const auto blob_bytes = ExtractionMultiply(image_data.keypoints.size(),
+                                                     6 * sizeof(float));
+          THROW_CHECK_LE(blob_bytes,
+                         static_cast<uint64_t>(std::numeric_limits<int>::max()));
+          THROW_CHECK_LE(image_data.descriptors.data.size(),
+                         std::numeric_limits<int>::max());
+          image_data.credit->Grow(blob_bytes);
+        }
+        if (before_write) before_write();
         DatabaseTransaction database_transaction(database_);
 
         if (image_data.image.ImageId() == kInvalidImageId) {
@@ -328,13 +380,43 @@ class FeatureExtractorController : public Thread {
  public:
   FeatureExtractorController(const std::filesystem::path& database_path,
                              const ImageReaderOptions& reader_options,
-                             const FeatureExtractionOptions& extraction_options)
-      : reader_options_(reader_options),
+                             const FeatureExtractionOptions& extraction_options,
+                             std::shared_ptr<FeatureExtractionResult> result)
+      : result_(result ? std::move(result)
+                       : std::make_shared<FeatureExtractionResult>()),
+        reader_options_(reader_options),
         extraction_options_(extraction_options),
         database_(Database::Open(database_path)),
         image_reader_(reader_options_, database_.get()) {
+    RegisterCallback(kFeatureExtractionAdmissionWait);
+    RegisterCallback(kFeatureExtractionBeforeWrite);
     THROW_CHECK(reader_options_.Check());
     THROW_CHECK(extraction_options_.Check());
+
+    if (extraction_options_.host_budget_bytes) {
+      if (extraction_options_.type != FeatureExtractorType::SIFT ||
+          reader_options_.as_rgb || !reader_options_.mask_path.empty() ||
+          !reader_options_.camera_mask_path.empty())
+        throw std::invalid_argument(
+            "budgeted extraction supports grayscale SIFT without masks only");
+#if defined(COLMAP_MVS_ENABLED)
+      const auto capacity = std::min(extraction_options_.host_budget_bytes,
+          mvs::owned::ObserveFixedCohortHostAvailable());
+      budget_ = std::make_unique<ExtractionBudget>(
+          capacity, extraction_options_.policy_host_bytes,
+          extraction_options_.reserve_host_bytes);
+      budget_->Acquire(0, [] { return false; });
+      LOG(INFO) << "Feature extraction frozen logical host capacity: "
+                << "capacity_bytes=" << capacity
+                << " host_budget_bytes=" << extraction_options_.host_budget_bytes
+                << " policy_host_bytes=" << extraction_options_.policy_host_bytes
+                << " reserve_host_bytes=" << extraction_options_.reserve_host_bytes
+                << "; workspace/decoder/allocator UNKNOWN; full physical fit UNKNOWN";
+#else
+      throw std::invalid_argument(
+          "budgeted extraction needs native host observation (MVS build)");
+#endif
+    }
 
     std::shared_ptr<Bitmap> camera_mask;
     if (!reader_options_.camera_mask_path.empty()) {
@@ -464,10 +546,64 @@ class FeatureExtractorController : public Thread {
                                                     image_reader_.NumImages(),
                                                     database_.get(),
                                                     writer_queue_.get());
+    if (budget_) {
+      auto failure = [this](std::exception_ptr error) { Abort(error); };
+      for (auto& worker : resizers_)
+        static_cast<ExtractionWorker*>(worker.get())->failure = failure;
+      for (auto& worker : extractors_)
+        static_cast<ExtractionWorker*>(worker.get())->failure = failure;
+      static_cast<ExtractionWorker*>(writer_.get())->failure = failure;
+      static_cast<FeatureWriterThread*>(writer_.get())->before_write = [this] {
+        Callback(kFeatureExtractionBeforeWrite);
+      };
+    }
   }
 
  private:
+  void Abort(std::exception_ptr error) {
+    {
+      std::lock_guard<std::mutex> lock(failure_mutex_);
+      if (!result_->error) result_->error = error;
+    }
+    budget_->Cancel();
+    resizer_queue_->Stop();
+    extractor_queue_->Stop();
+    writer_queue_->Stop();
+    resizer_queue_->Clear();
+    extractor_queue_->Clear();
+    writer_queue_->Clear();
+    for (auto& worker : resizers_) worker->Stop();
+    for (auto& worker : extractors_) worker->Stop();
+    writer_->Stop();
+  }
   void Run() override {
+    if (!budget_) {
+      RunPipeline();
+      return;
+    }
+    try {
+      RunPipeline();
+    } catch (...) {
+      Abort(std::current_exception());
+    }
+    for (auto& worker : resizers_) worker->Wait();
+    for (auto& worker : extractors_) worker->Wait();
+    writer_->Wait();
+    // Destroy workers only after joining, to retire retained library/output
+    // buffers and callback credit references even on a failed extraction.
+    resizers_.clear();
+    extractors_.clear();
+    writer_.reset();
+    result_->live_bytes = budget_->Used();
+    LOG(INFO) << "Feature extraction logical credits retired: "
+              << result_->live_bytes << ", peak: " << budget_->Peak();
+    result_->success = !result_->error && !IsStopped();
+    if (!result_->success) {
+      LOG(ERROR) << "Feature extraction failed/cancelled; workers drained; "
+                    "database may be partial";
+    }
+  }
+  void RunPipeline() {
     LOG_HEADING1("Feature extraction");
     Timer run_timer;
     run_timer.Start();
@@ -483,13 +619,14 @@ class FeatureExtractorController : public Thread {
     writer_->Start();
 
     for (auto& extractor : extractors_) {
-      if (!extractor->CheckValidSetup()) {
+      if (!budget_ && !extractor->CheckValidSetup()) {
         return;
       }
     }
 
     while (image_reader_.NextIndex() < image_reader_.NumImages()) {
       if (IsStopped()) {
+        if (budget_) throw std::runtime_error("feature extraction cancelled");
         resizer_queue_->Stop();
         extractor_queue_->Stop();
         resizer_queue_->Clear();
@@ -500,16 +637,43 @@ class FeatureExtractorController : public Thread {
       ImageData image_data;
       image_data.bitmap = std::make_unique<Bitmap>();
       Bitmap mask;
+      std::function<void(int, int, int)> admit_header;
+      if (budget_)
+        admit_header = [&](int w, int h, int channels) {
+          const int max_size = extraction_options_.EffMaxImageSize();
+          const bool cpu_staging =
+              !extraction_options_.use_gpu ||
+              extraction_options_.sift->estimate_affine_shape ||
+              extraction_options_.sift->domain_size_pooling ||
+              extraction_options_.sift->force_covariant_extractor;
+          const uint64_t known_payload_bytes =
+              ExtractionBitmapPayload(w, h, channels, max_size, cpu_staging);
+          image_data.credit = budget_->Acquire(
+              known_payload_bytes,
+              [this] { return IsStopped(); },
+              [this] { Callback(kFeatureExtractionAdmissionWait); });
+          LOG(INFO) << "Feature extraction admitted image before decode: image="
+                    << std::quoted(image_data.image.Name())
+                    << " source_width=" << w << " source_height=" << h
+                    << " file_channels=" << channels << " max_size=" << max_size
+                    << " cpu_staging=" << (cpu_staging ? 1 : 0)
+                    << " known_payload_bytes=" << known_payload_bytes
+                    << " ledger_used_bytes=" << budget_->Used()
+                    << " ledger_peak_bytes=" << budget_->Peak();
+        };
       image_data.status = image_reader_.Next(&image_data.rig,
                                              &image_data.camera,
                                              &image_data.image,
                                              &image_data.pose_prior,
                                              image_data.bitmap.get(),
-                                             &mask);
+                                             &mask, admit_header);
       if (!mask.IsEmpty()) {
         image_data.mask = std::make_unique<Bitmap>(std::move(mask));
       }
 
+      if (budget_ && image_data.status != ImageReader::Status::SUCCESS &&
+          image_data.status != ImageReader::Status::IMAGE_EXISTS)
+        throw std::runtime_error("budgeted image read/camera validation failed");
       if (image_data.status != ImageReader::Status::SUCCESS) {
         // Release the memory, since it is not used afterwards.
         *image_data.bitmap = Bitmap();
@@ -540,6 +704,9 @@ class FeatureExtractorController : public Thread {
     run_timer.PrintMinutes();
   }
 
+  std::unique_ptr<ExtractionBudget> budget_;
+  std::mutex failure_mutex_;
+  std::shared_ptr<FeatureExtractionResult> result_;
   const ImageReaderOptions reader_options_;
   const FeatureExtractionOptions extraction_options_;
 
@@ -653,9 +820,10 @@ class FeatureImporterController : public Thread {
 std::unique_ptr<Thread> CreateFeatureExtractorController(
     const std::filesystem::path& database_path,
     const ImageReaderOptions& reader_options,
-    const FeatureExtractionOptions& extraction_options) {
+    const FeatureExtractionOptions& extraction_options,
+    std::shared_ptr<FeatureExtractionResult> result) {
   return std::make_unique<FeatureExtractorController>(
-      database_path, reader_options, extraction_options);
+      database_path, reader_options, extraction_options, std::move(result));
 }
 
 std::unique_ptr<Thread> CreateFeatureImporterController(

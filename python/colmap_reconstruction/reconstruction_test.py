@@ -40,7 +40,9 @@ class FrontendTest(unittest.TestCase):
                             (root / 'sparse/0').mkdir()
                         if command == 'model_analyzer':
                             return json.dumps(dict(num_registered_images=2, num_points3D=1))
-                        if command == 'image_undistorter':
+                        if command == 'feature_extractor':
+                            self.assertEqual(reconstruction.process.host_budget_bytes, 1000)
+                        elif command == 'image_undistorter':
                             self.assertEqual(reconstruction.process.host_budget_bytes, 1000)
                             self.assertEqual(arguments[arguments.index('--host_budget_bytes') + 1], 1000)
                             if fails:
@@ -62,6 +64,33 @@ class FrontendTest(unittest.TestCase):
                         observed_free = 2000
                         self.assertEqual(reconstruction.resources()['host'], 2000)
                         reconstruction.native('optimized_dense_plan')
+
+    def test_extraction_budget_is_scoped_and_keeps_3200(self):
+        from unittest.mock import patch
+        from colmap_reconstruction.cli import Reconstruction, parse_args
+        from colmap_reconstruction.process import NativeFailure
+        for previous in (None, 3000):
+            with self.subTest(previous=previous), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                reconstruction = Reconstruction(parse_args([
+                    '--photos', str(root), '--workspace', str(root),
+                    '--loader-scratch-host-bytes', '0', '--process-host-bytes', '0',
+                    '--unknown-host-bytes', '0', '--reserve-host-bytes', '0']), sys.executable)
+                reconstruction.process.host_budget_bytes = previous
+                failure = NativeFailure('extraction failed')
+                def native(command, *arguments, **kwargs):
+                    self.assertEqual(command, 'feature_extractor')
+                    self.assertEqual(reconstruction.process.host_budget_bytes, 2000)
+                    self.assertEqual(arguments[arguments.index('--FeatureExtraction.host_budget_bytes') + 1], 2000)
+                    self.assertEqual(arguments[arguments.index('--FeatureExtraction.max_image_size') + 1], '3200')
+                    self.assertNotIn('--FeatureExtraction.use_gpu', arguments)
+                    raise failure
+                with patch.object(reconstruction, 'resources', return_value={'host': 2000}), \
+                     patch.object(reconstruction, 'native', side_effect=native):
+                    with self.assertRaises(NativeFailure) as raised:
+                        reconstruction.prepare()
+                    self.assertIs(raised.exception, failure)
+                self.assertEqual(reconstruction.process.host_budget_bytes, previous)
 
     def test_dense_launch_uses_canonical_adaptive_backend_and_explicit_allowances(self):
         from colmap_reconstruction.cli import Reconstruction, parse_args

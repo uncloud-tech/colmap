@@ -4,6 +4,7 @@
 
 #include "colmap/controllers/image_reader.h"
 #include "colmap/controllers/incremental_pipeline.h"
+#include "colmap/feature/extractor.h"
 #include "colmap/feature/sift.h"
 #include "colmap/mvs/patch_match_options.h"
 #if defined(COLMAP_MVS_ENABLED)
@@ -11,6 +12,9 @@
 #endif
 #include "colmap/util/file.h"
 #include "colmap/util/testing.h"
+
+#include <fstream>
+#include <limits>
 
 #include <gtest/gtest.h>
 
@@ -76,6 +80,51 @@ TEST(OptionManager, PatchMatchCoordinateSeed) {
   EXPECT_EQ(options.patch_match_stereo->random_seed, 7);
 }
 #endif
+
+TEST(OptionManager, ExtractionByteOptionsPreserveUint64AndProjectIni) {
+  const auto config_path = CreateTestDir() / "bytes.ini";
+  OptionManager options;
+  options.AddFeatureExtractionOptions();
+  const char* argv[] = {"colmap", "--FeatureExtraction.host_budget_bytes",
+                        "18446744073709551615",
+                        "--FeatureExtraction.policy_host_bytes", "9007199254740993",
+                        "--FeatureExtraction.reserve_host_bytes", "0",
+                        "--FeatureExtraction.use_gpu", "false"};
+  ASSERT_TRUE(options.Parse(9, const_cast<char**>(argv)));
+  EXPECT_EQ(options.feature_extraction->host_budget_bytes,
+            std::numeric_limits<uint64_t>::max());
+  EXPECT_EQ(options.feature_extraction->policy_host_bytes, 9007199254740993ULL);
+  EXPECT_EQ(options.feature_extraction->reserve_host_bytes, 0);
+  // Write must reflect typed edits after registration, not stale parser strings.
+  options.feature_extraction->reserve_host_bytes = 4294967297ULL;
+  options.Write(config_path);
+  OptionManager restored;
+  restored.AddFeatureExtractionOptions();
+  ASSERT_TRUE(restored.Read(config_path));
+  EXPECT_EQ(restored.feature_extraction->host_budget_bytes,
+            std::numeric_limits<uint64_t>::max());
+  EXPECT_EQ(restored.feature_extraction->policy_host_bytes, 9007199254740993ULL);
+  EXPECT_EQ(restored.feature_extraction->reserve_host_bytes, 4294967297ULL);
+}
+
+TEST(OptionManager, ExtractionByteOptionsRejectMalformedCliAndIni) {
+  const auto config_path = CreateTestDir() / "invalid-bytes.ini";
+  for (const std::string option : {"host_budget_bytes", "policy_host_bytes",
+                                   "reserve_host_bytes"}) {
+    for (const std::string value : {"-1", "+1", "01", "18446744073709551616",
+                                    "1.5", "1e3", "1x", ""}) {
+      SCOPED_TRACE(option + "=" + value);
+      OptionManager options;
+      options.AddFeatureExtractionOptions();
+      const std::string flag = "--FeatureExtraction." + option;
+      const char* argv[] = {"colmap", flag.c_str(), value.c_str()};
+      EXPECT_FALSE(options.Parse(3, const_cast<char**>(argv)));
+      std::ofstream(config_path) << "[FeatureExtraction]\n" << option << "="
+                                 << value << "\n";
+      EXPECT_FALSE(options.Read(config_path));
+    }
+  }
+}
 
 TEST(OptionManager, Reset) {
   OptionManager options;

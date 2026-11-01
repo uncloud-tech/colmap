@@ -6,6 +6,8 @@
 #include "colmap/util/file.h"
 #include "colmap/util/misc.h"
 
+#include <optional>
+
 namespace colmap {
 
 bool ImageReaderOptions::Check() const {
@@ -69,7 +71,8 @@ ImageReader::Status ImageReader::Next(Rig* rig,
                                       Image* image,
                                       PosePrior* pose_prior,
                                       Bitmap* bitmap,
-                                      Bitmap* mask) {
+                                      Bitmap* mask,
+                                      const std::function<void(int, int, int)>& admit_header) {
   THROW_CHECK_NOTNULL(camera);
   THROW_CHECK_NOTNULL(image);
   THROW_CHECK_NOTNULL(bitmap);
@@ -80,7 +83,8 @@ ImageReader::Status ImageReader::Next(Rig* rig,
   const std::string image_name = options_.image_names.at(image_index_ - 1);
   const std::filesystem::path image_path = options_.image_path / image_name;
 
-  DatabaseTransaction database_transaction(database_);
+  std::optional<DatabaseTransaction> database_transaction;
+  database_transaction.emplace(database_);
 
   //////////////////////////////////////////////////////////////////////////////
   // Set the image name.
@@ -110,7 +114,11 @@ ImageReader::Status ImageReader::Next(Rig* rig,
   // Read image.
   //////////////////////////////////////////////////////////////////////////////
 
-  if (!bitmap->Read(image_path, /*as_rgb=*/options_.as_rgb)) {
+  // Admission may wait for the writer to retire a payload. Never retain the
+  // transaction mutex while waiting: the writer needs it to make progress.
+  if (admit_header) database_transaction.reset();
+  if (!bitmap->Read(image_path, /*as_rgb=*/options_.as_rgb, false,
+                    0, 0, 0, admit_header)) {
     return Status::BITMAP_ERROR;
   }
 
@@ -147,6 +155,8 @@ ImageReader::Status ImageReader::Next(Rig* rig,
   //////////////////////////////////////////////////////////////////////////////
   // Check for well-formed data.
   //////////////////////////////////////////////////////////////////////////////
+
+  if (admit_header) database_transaction.emplace(database_);
 
   if (exists_image) {
     Camera current_camera = database_->ReadCamera(image->CameraId());

@@ -7,6 +7,7 @@
 #include "colmap/util/string.h"
 #include "colmap/util/types.h"
 
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -80,6 +81,10 @@ class BaseOptionManager {
   std::shared_ptr<std::filesystem::path> image_path;
 
  protected:
+  // Explicit byte allowance adapter: parse canonical decimal strings without
+  // enabling generic unsigned Boost options (which may accept negative input).
+  void AddDefaultByteOption(const std::string& name, uint64_t* option);
+
   template <typename T>
   void RegisterOption(const std::string& name, const T* option);
 
@@ -114,6 +119,8 @@ class BaseOptionManager {
   std::vector<std::pair<std::string, const std::string*>> options_string_;
   std::vector<std::pair<std::string, const std::filesystem::path*>>
       options_path_;
+
+  std::vector<std::pair<std::string, const uint64_t*>> options_bytes_;
 
   // Storage for enum options: string value and conversion callback.
   // Uses unique_ptr for pointer stability when the vector grows.

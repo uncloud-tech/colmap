@@ -64,71 +64,89 @@ void UpdateImageReaderOptionsFromCameraMode(ImageReaderOptions& options,
 }
 
 int RunFeatureExtractor(int argc, char** argv) {
-  std::filesystem::path image_list_path;
-  int camera_mode = -1;
-  std::string descriptor_normalization = "L1_ROOT";
+  try {
+    std::filesystem::path image_list_path;
+    int camera_mode = -1;
+    std::string descriptor_normalization = "L1_ROOT";
 
-  OptionManager options;
-  options.AddDatabaseOptions();
-  options.AddImageOptions();
-  options.AddDefaultOption("camera_mode", &camera_mode);
-  options.AddDefaultOption("image_list_path", &image_list_path);
-  options.AddDefaultOption(
-      "descriptor_normalization",
-      &descriptor_normalization,
-      "{" + VectorToCSV(SiftExtractionOptions::NormalizationStrings()) + "}");
-  options.AddFeatureExtractionOptions();
-  if (!options.Parse(argc, argv)) {
-    return EXIT_FAILURE;
-  }
-
-  ImageReaderOptions reader_options = *options.image_reader;
-  reader_options.image_path = *options.image_path;
-  reader_options.as_rgb = options.feature_extraction->RequiresRGB();
-
-  if (camera_mode >= 0) {
-    UpdateImageReaderOptionsFromCameraMode(reader_options,
-                                           (CameraMode)camera_mode);
-  }
-
-  // Accept lowercase values (e.g. from existing config files), as
-  // NormalizationFromString is case-sensitive.
-  StringToUpper(&descriptor_normalization);
-  options.feature_extraction->sift->normalization =
-      SiftExtractionOptions::NormalizationFromString(descriptor_normalization);
-
-  if (!image_list_path.empty()) {
-    reader_options.image_names = ReadTextFileLines(image_list_path);
-    if (reader_options.image_names.empty()) {
-      return EXIT_SUCCESS;
+    OptionManager options;
+    options.AddDatabaseOptions();
+    options.AddImageOptions();
+    options.AddDefaultOption("camera_mode", &camera_mode);
+    options.AddDefaultOption("image_list_path", &image_list_path);
+    options.AddDefaultOption(
+        "descriptor_normalization",
+        &descriptor_normalization,
+        "{" + VectorToCSV(SiftExtractionOptions::NormalizationStrings()) + "}");
+    options.AddFeatureExtractionOptions();
+    if (!options.Parse(argc, argv)) {
+      return EXIT_FAILURE;
     }
-  }
 
-  if (!ExistsCameraModelWithName(reader_options.camera_model)) {
-    LOG(ERROR) << "Camera model does not exist";
-  }
+    ImageReaderOptions reader_options = *options.image_reader;
+    reader_options.image_path = *options.image_path;
+    reader_options.as_rgb = options.feature_extraction->RequiresRGB();
 
-  if (!VerifyCameraParams(reader_options.camera_model,
-                          reader_options.camera_params)) {
+    if (camera_mode >= 0) {
+      UpdateImageReaderOptionsFromCameraMode(reader_options,
+                                             (CameraMode)camera_mode);
+    }
+
+    // Accept lowercase values (e.g. from existing config files), as
+    // NormalizationFromString is case-sensitive.
+    StringToUpper(&descriptor_normalization);
+    options.feature_extraction->sift->normalization =
+        SiftExtractionOptions::NormalizationFromString(
+            descriptor_normalization);
+
+    if (!image_list_path.empty()) {
+      reader_options.image_names = ReadTextFileLines(image_list_path);
+      if (reader_options.image_names.empty()) {
+        return EXIT_SUCCESS;
+      }
+    }
+
+    if (!ExistsCameraModelWithName(reader_options.camera_model)) {
+      LOG(ERROR) << "Camera model does not exist";
+    }
+
+    if (!VerifyCameraParams(reader_options.camera_model,
+                            reader_options.camera_params)) {
+      return EXIT_FAILURE;
+    }
+
+    std::unique_ptr<QApplication> app;
+    if (options.feature_extraction->RequiresOpenGL()) {
+      app = std::make_unique<QApplication>(argc, argv);
+    }
+
+    auto extraction_result = std::make_shared<FeatureExtractionResult>();
+    auto feature_extractor =
+        CreateFeatureExtractorController(*options.database_path,
+                                         reader_options,
+                                         *options.feature_extraction,
+                                         extraction_result);
+
+    if (app != nullptr) {
+      RunThreadWithOpenGLContext(feature_extractor.get());
+    } else {
+      feature_extractor->Start();
+      feature_extractor->Wait();
+    }
+
+    if (options.feature_extraction->host_budget_bytes) {
+      if (extraction_result->error)
+        std::rethrow_exception(extraction_result->error);
+      if (!extraction_result->success) return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
+  } catch (const std::exception& error) {
+    LOG(ERROR) << "Feature extraction failed: " << error.what();
+    return EXIT_FAILURE;
+  } catch (...) {
+    LOG(ERROR) << "Feature extraction failed with an unknown exception";
     return EXIT_FAILURE;
   }
-
-  std::unique_ptr<QApplication> app;
-  if (options.feature_extraction->RequiresOpenGL()) {
-    app = std::make_unique<QApplication>(argc, argv);
-  }
-
-  auto feature_extractor = CreateFeatureExtractorController(
-      *options.database_path, reader_options, *options.feature_extraction);
-
-  if (app != nullptr) {
-    RunThreadWithOpenGLContext(feature_extractor.get());
-  } else {
-    feature_extractor->Start();
-    feature_extractor->Wait();
-  }
-
-  return EXIT_SUCCESS;
 }
 
 int RunFeatureImporter(int argc, char** argv) {
