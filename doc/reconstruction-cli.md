@@ -34,11 +34,52 @@ fusion. Multiple sparse models refuse unless `--sparse-model NAME` or explicit
 lexicographic-name ties; mapper/model numbering is nondeterministic. At least two
 registered images and a nonempty point model are required, not a quality claim.
 
-Dense resolution defaults to full-resolution float32. Only an explicit
-`--max-image-size N` resizes undistortion; there is no automatic quality reduction.
-Feature extraction retains COLMAP's SIFT default maximum of 3200, independently
-of dense resolution. Samples/seed/source cap/cache/lookahead/tile/GPU are explicit
-CLI options (`--help`); existing native command defaults are unchanged.
+**Supported-input limitation: CUDA SIFT currently truncates input widths to a
+multiple of four. This frontend refuses affected inputs, rather than silently
+losing columns.** Effective width is encoded height for EXIF orientations 6/8
+(the native gravity rotation), otherwise encoded width. An odd height alone is
+not refused. Native support for other effective widths remains a delivery
+blocker; this is not general full-resolution photo-directory qualification.
+
+Before extraction, native `photo_directory_summary` recursively inspects headers
+in native filesystem-path discovery order. Empty inventories, corrupt or
+unknown-dimension photos and malformed inspection results refuse, not skip.
+Photo-only directories retain default native discovery and its order. When
+ordinary sidecars (`.xmp`, text files, etc.) are present, extraction instead uses
+`--image_list_path` containing exactly the inspected photos; sidecars are reported
+but never passed to the image decoder. This newly supported case uses the native
+image-list **UTF-8 byte string sort**, which can differ from filesystem-path
+ordering for nested names (e.g. `a/z.jpg` versus `a.jpg`). The selected inventory,
+effective order and excluded sidecars are recorded in
+`planning/extraction-inventory.json` and displayed before extraction.
+
+The list is UTF-8, one unchanged relative filename per LF-terminated line.
+Internal spaces and Unicode are preserved; `#` is not a comment. For sidecar
+filtering, filenames containing LF/NUL, invalid UTF-8, or leading/trailing ASCII
+space/tab/CR cannot be represented by the native line reader and explicitly
+refuse before extraction; no photo is renamed or silently skipped. Header
+inspection is not a decode/fit guarantee; keep inputs immutable throughout the
+invocation.
+
+Extraction uses an explicit positive maximum edge covering **all originals**,
+not SIFT's implicit 3200 fallback for nonpositive limits. GPU SIFT's normal first
+octave upsamples by 2; there is no extraction thumbnail or CPU retry. Unsupported
+GPU sizes/allocation failures refuse; there is no reduced retry.
+
+Dense maps remain float32. `--max-image-size N` retains its expert meaning: an
+optional edge cap on the **undistorted camera only**, never extraction. Default
+`-1` disables this resource resize; it does **not** promise original dimensions.
+Pinhole undistortion geometry (`blank_pixels=0`, `min_scale=0.2`, `max_scale=2`)
+can change dimensions independently of the cap. Stereo and mapped fusion both
+use `max_image_size=-1`, without another resize. Original/working dimensions and
+these semantics are displayed before extraction in `planning/resolution-intent.json`;
+`planning/photos.json` retains the native inventory. After SfM/undistortion,
+`planning/resolution-effective.json` and stderr report actual native dense image
+dimensions consumed by PHOTO/GEO and fusion. This is disclosure, **not** a
+complete plan/approval/reapproval workflow (still pending).
+
+Samples/seed/source cap/cache/lookahead/tile/GPU are explicit CLI options
+(`--help`); existing native command defaults are unchanged.
 
 The native typed dense-plan API resolves per-reference depth ranges, effective
 options (including PRNG), source order and complete PHOTO producer closure.
@@ -106,9 +147,14 @@ limits that phase cap by its own observed host/cgroup FREE before allocation.
 Before extraction the installed frontend passes a fresh observed host phase cap
 (lowered by a user cap), raw host policy and reserve to native extraction. The
 same phase cap scopes the direct-child RSS monitor; the prior monitor limit is
-restored on success or failure. Extraction still uses maximum image size **3200**,
-not the dense resize, with unchanged SIFT options and GPU selection/capability.
-There is no silent CPU fallback, feature-count clamp or quality reduction.
+restored on success or failure. Extraction uses the inspected positive original
+maximum edge, independently of the expert undistortion cap, with explicit GPU
+SIFT and first octave -1. Native compensated maximum-dimension checks reject
+backend clamping; CUDA SIFT's automatic memory-fit octave skipping is disabled
+by default. Allocation failures propagate through the bounded controller and
+drain workers, without a reduced-size or CPU retry. The multiple-of-four
+working-width restriction above prevents the backend's separate column
+truncation. There is no automatic feature-count change or quality reduction.
 
 Native `FeatureExtraction.host_budget_bytes` defaults to zero, retaining legacy
 behavior. Nonzero budgets support grayscale SIFT (CPU, covariant CPU or GPU) with
