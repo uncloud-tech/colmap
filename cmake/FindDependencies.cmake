@@ -371,6 +371,10 @@ if(CUDA_ENABLED)
             endmacro()
 
             declare_imported_cuda_target(cudart ${CUDA_LIBRARIES})
+            # FindCUDA names the driver library CUDA_CUDA_LIBRARY.
+            add_library(CUDA::cuda_driver INTERFACE IMPORTED)
+            target_include_directories(CUDA::cuda_driver INTERFACE ${CUDA_INCLUDE_DIRS})
+            target_link_libraries(CUDA::cuda_driver INTERFACE ${CUDA_CUDA_LIBRARY})
             declare_imported_cuda_target(curand ${CUDA_LIBRARIES})
 
             set(CUDAToolkit_VERSION "${CUDA_VERSION_STRING}")

@@ -41,7 +41,8 @@ struct FixedCohortDeviceObservation {
 };
 // Enumerate process-visible ordinals with the authoritative FREE observer.
 // Per-device failures remain visible; the calling CLI owns the absolute deadline.
-// Restores the calling thread's CUDA device context.
+// Restores the calling thread's exact CUDA context, including non-primary/null,
+// on success and exception exits (cleanup restoration failures are diagnosed).
 std::vector<FixedCohortDeviceObservation> ObserveFixedCohortDevices(
     const NativeRunDeadlineGuard& guard);
 // Selects/initializes the requested CUDA device and queries its free memory.

@@ -10,8 +10,11 @@
 #include "colmap/mvs/patch_match_cuda_owned.h"
 #include "colmap/mvs/patch_match_execution.h"
 
+#include <cuda.h>
+
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <fstream>
 #include <iomanip>
 #include <iterator>
@@ -67,22 +70,51 @@ FixedCohortCapacityObservation ObserveFixedCohortCapacities(int device) {
 std::vector<FixedCohortDeviceObservation> ObserveFixedCohortDevices(
     const NativeRunDeadlineGuard& guard) {
   guard.Check();
+  const auto driver_query = [](CUresult status) {
+    if (status == CUDA_SUCCESS) return;
+    const char* reason = nullptr;
+    (void)cuGetErrorString(status, &reason);
+    throw std::runtime_error(std::string("CUDA inventory context query/restore failed: ") +
+                             (reason ? reason : "unknown driver error"));
+  };
+  const auto initialized = cuInit(0);
+  if (initialized == CUDA_ERROR_NO_DEVICE) return {};
+  driver_query(initialized);
+  // Capture before any Runtime API call can select/create a primary context.
+  // The current context may be non-primary or null; an ordinal is insufficient.
+  CUcontext previous = nullptr;
+  driver_query(cuCtxGetCurrent(&previous));
+  struct RestoreContext {
+    CUcontext context;
+    bool restored = false;
+    CUresult Restore() {
+      const auto status = cuCtxSetCurrent(context);
+      restored = status == CUDA_SUCCESS;
+      return status;
+    }
+    ~RestoreContext() {
+      if (!restored) {
+        const auto status = Restore();
+        if (status != CUDA_SUCCESS)
+          std::fprintf(stderr,
+                       "CUDA inventory: context restoration failed during cleanup: %d\n",
+                       static_cast<int>(status));
+      }
+    }
+  } restore{previous};
   int count = 0;
   const auto status = cudaGetDeviceCount(&count);
-  if (status == cudaErrorNoDevice) return {};
+  if (status == cudaErrorNoDevice) {
+    driver_query(restore.Restore());
+    return {};
+  }
   if (status != cudaSuccess)
     throw std::runtime_error(std::string("CUDA visible inventory failed: ") +
                              cudaGetErrorString(status));
-  if (count == 0) return {};
-  int previous = 0;
-  const auto current = cudaGetDevice(&previous);
-  if (current != cudaSuccess)
-    throw std::runtime_error(std::string("CUDA current device query failed: ") +
-                             cudaGetErrorString(current));
-  struct RestoreDevice {
-    int device;
-    ~RestoreDevice() { cudaSetDevice(device); }
-  } restore{previous};
+  if (count == 0) {
+    driver_query(restore.Restore());
+    return {};
+  }
   std::vector<FixedCohortDeviceObservation> result;
   for (int device = 0; device < count; ++device) {
     guard.Check();
@@ -112,10 +144,7 @@ std::vector<FixedCohortDeviceObservation> ObserveFixedCohortDevices(
     guard.Check();
     result.push_back(std::move(observed));
   }
-  const auto restored = cudaSetDevice(previous);
-  if (restored != cudaSuccess)
-    throw std::runtime_error(std::string("CUDA device context restore failed: ") +
-                             cudaGetErrorString(restored));
+  driver_query(restore.Restore());
   return result;
 }
 

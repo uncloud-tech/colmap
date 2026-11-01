@@ -4,6 +4,8 @@
 #include "colmap/mvs/owned_fixed_cohort_validation.h"
 #include "colmap/mvs/patch_match_cuda_owned.h"
 
+#include <cuda.h>
+
 #include <cstring>
 #include <limits>
 
@@ -11,6 +13,45 @@
 
 namespace colmap::mvs::owned {
 namespace {
+TEST(FixedCohortDeviceInventory, RestoresExactNonPrimaryAndNullContexts) {
+  if (cuInit(0) != CUDA_SUCCESS)
+    GTEST_SKIP() << "CUDA driver required";
+  int count = 0;
+  ASSERT_EQ(cuDeviceGetCount(&count), CUDA_SUCCESS);
+  if (count == 0) GTEST_SKIP() << "visible CUDA device required";
+  CUcontext original = nullptr;
+  ASSERT_EQ(cuCtxGetCurrent(&original), CUDA_SUCCESS);
+  struct ContextCleanup {
+    CUcontext original;
+    CUcontext created = nullptr;
+    ~ContextCleanup() {
+      if (created != nullptr) {
+        EXPECT_EQ(cuCtxSetCurrent(created), CUDA_SUCCESS);
+        EXPECT_EQ(cuCtxDestroy(created), CUDA_SUCCESS);
+      }
+      EXPECT_EQ(cuCtxSetCurrent(original), CUDA_SUCCESS);
+    }
+  } cleanup{original};
+  CUdevice device;
+  ASSERT_EQ(cuDeviceGet(&device, 0), CUDA_SUCCESS);
+#if CUDA_VERSION >= 13000
+  ASSERT_EQ(cuCtxCreate(&cleanup.created, nullptr, 0, device), CUDA_SUCCESS);
+#else
+  ASSERT_EQ(cuCtxCreate(&cleanup.created, 0, device), CUDA_SUCCESS);
+#endif
+  NativeRunDeadlineGuard guard(NativeRunDeadline::FromBudget(std::chrono::seconds(30)));
+  const auto inventory = ObserveFixedCohortDevices(guard);
+  EXPECT_EQ(inventory.size(), static_cast<size_t>(count));
+  CUcontext current = nullptr;
+  ASSERT_EQ(cuCtxGetCurrent(&current), CUDA_SUCCESS);
+  EXPECT_EQ(current, cleanup.created);
+  ASSERT_EQ(cuCtxSetCurrent(nullptr), CUDA_SUCCESS);
+  const auto without_context = ObserveFixedCohortDevices(guard);
+  EXPECT_EQ(without_context.size(), static_cast<size_t>(count));
+  ASSERT_EQ(cuCtxGetCurrent(&current), CUDA_SUCCESS);
+  EXPECT_EQ(current, nullptr);
+}
+
 TEST(FixedCohortDeviceInventory, RestoresContextAndReportsVisibleOrdinals) {
   int count = 0;
   if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0)
