@@ -21,7 +21,7 @@ class FrontendTest(unittest.TestCase):
                     if cap is not None:
                         argv += ['--host-budget-bytes', str(cap)]
                     for name in ('loader-scratch-host', 'process-host', 'unknown-host',
-                                 'reserve-host', 'reserve-device'):
+                                 'process-device', 'unknown-device', 'reserve-host', 'reserve-device'):
                         argv += ['--' + name + '-bytes', '0']
                     reconstruction = Reconstruction(parse_args(argv), sys.executable)
                     reconstruction.assets.mkdir()
@@ -40,7 +40,7 @@ class FrontendTest(unittest.TestCase):
                             (root / 'sparse/0').mkdir()
                         if command == 'model_analyzer':
                             return json.dumps(dict(num_registered_images=2, num_points3D=1))
-                        if command == 'feature_extractor':
+                        if command in ('feature_extractor', 'exhaustive_matcher'):
                             self.assertEqual(reconstruction.process.host_budget_bytes, 1000)
                         elif command == 'image_undistorter':
                             self.assertEqual(reconstruction.process.host_budget_bytes, 1000)

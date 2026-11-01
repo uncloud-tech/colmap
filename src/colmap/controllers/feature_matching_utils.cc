@@ -8,6 +8,11 @@
 #include "colmap/util/cuda.h"
 #include "colmap/util/hash_containers.h"
 #include "colmap/util/misc.h"
+#if defined(COLMAP_MVS_ENABLED)
+#include "colmap/mvs/owned_fixed_cohort_validation.h"
+#endif
+
+#include <numeric>
 
 namespace colmap {
 
@@ -16,8 +21,10 @@ FeatureMatcherWorker::FeatureMatcherWorker(
     const TwoViewGeometryOptions& geometry_options,
     const std::shared_ptr<FeatureMatcherCache>& cache,
     JobQueue<Input>* input_queue,
-    JobQueue<Output>* output_queue)
-    : matching_options_(matching_options),
+    JobQueue<Output>* output_queue,
+    std::shared_ptr<MatchingFailure> failure)
+    : failure_(std::move(failure)),
+      matching_options_(matching_options),
       geometry_options_(geometry_options),
       cache_(cache),
       input_queue_(input_queue),
@@ -30,6 +37,19 @@ FeatureMatcherWorker::FeatureMatcherWorker(
 }
 
 void FeatureMatcherWorker::Run() {
+  if (!failure_) {
+    RunImpl();
+    return;
+  }
+  try {
+    RunImpl();
+  } catch (...) {
+    failure_->Fail(std::current_exception());
+    if (!setup_notified_) SignalInvalidSetup();
+  }
+}
+
+void FeatureMatcherWorker::RunImpl() {
   if (opengl_context_ != nullptr) {
     THROW_CHECK(opengl_context_->MakeCurrent());
   }
@@ -68,19 +88,24 @@ void FeatureMatcherWorker::Run() {
   if (matcher == nullptr) {
     LOG(ERROR) << "Failed to create feature matcher.";
     SignalInvalidSetup();
+    setup_notified_ = true;
     return;
   }
 
   SignalValidSetup();
+  setup_notified_ = true;
 
   while (true) {
     if (IsStopped()) {
+      if (failure_) throw std::runtime_error("matching worker cancelled");
       break;
     }
 
     auto input_job = input_queue_->Pop();
+    if (!input_job.IsValid() && failure_) break;
     if (input_job.IsValid()) {
       auto& data = input_job.Data();
+      if (failure_ && failure_->before_match) failure_->before_match();
 
       if (!cache_->ExistsDescriptors(data.image_id1) ||
           !cache_->ExistsDescriptors(data.image_id2)) {
@@ -146,8 +171,9 @@ class VerifierWorker : public Thread {
                  std::shared_ptr<FeatureMatcherCache> cache,
                  JobQueue<Input>* input_queue,
                  JobQueue<Output>* output_queue,
-                 const bool use_existing_relative_pose = false)
-      : options_(options),
+                 const bool use_existing_relative_pose = false,
+                 std::shared_ptr<MatchingFailure> failure = nullptr)
+      : failure_(std::move(failure)), options_(options),
         cache_(std::move(cache)),
         use_existing_relative_pose_(use_existing_relative_pose),
         input_queue_(input_queue),
@@ -157,12 +183,25 @@ class VerifierWorker : public Thread {
 
  protected:
   void Run() override {
+    if (!failure_) {
+      RunImpl();
+      return;
+    }
+    try {
+      RunImpl();
+    } catch (...) {
+      failure_->Fail(std::current_exception());
+    }
+  }
+  void RunImpl() {
     while (true) {
       if (IsStopped()) {
+        if (failure_) throw std::runtime_error("matching verifier cancelled");
         break;
       }
 
       auto input_job = input_queue_->Pop();
+      if (!input_job.IsValid() && failure_) break;
       if (input_job.IsValid()) {
         auto& data = input_job.Data();
 
@@ -209,6 +248,7 @@ class VerifierWorker : public Thread {
   }
 
  private:
+  std::shared_ptr<MatchingFailure> failure_;
   const TwoViewGeometryOptions options_;
   std::shared_ptr<FeatureMatcherCache> cache_;
   const bool use_existing_relative_pose_;
@@ -261,6 +301,22 @@ FeatureMatcherController::FeatureMatcherController(
   THROW_CHECK_EQ(geometry_options_.ransac_options.num_threads, 1)
       << "Parallel RANSAC is not supported inside multi-threaded matching";
 
+  if (matching_options_.host_budget_bytes) {
+    if (matching_options_.type != FeatureMatcherType::SIFT_BRUTEFORCE ||
+        matching_options_.guided_matching || matching_options_.rig_verification ||
+        geometry_options_.multiple_models)
+      throw std::invalid_argument("budgeted matching supports exhaustive non-guided/non-rig SIFT without multiple models only");
+    if (matching_options_.use_gpu && matching_options_.RequiresOpenGL())
+      throw std::invalid_argument("budgeted GPU matching requires native CUDA backend");
+#if !defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
+    if (matching_options_.use_gpu)
+      throw std::invalid_argument("budgeted GPU matching requires native CUDA backend");
+#endif
+    failure_ = std::make_shared<MatchingFailure>();
+    failure_->stop_queues = [this] { StopQueues(); };
+    resources_ = std::make_shared<MatchingResources>();
+  }
+
   const int num_threads = GetEffectiveNumThreads(matching_options_.num_threads);
   THROW_CHECK_GT(num_threads, 0);
 
@@ -292,7 +348,7 @@ FeatureMatcherController::FeatureMatcherController(
                                                  geometry_options_,
                                                  cache_,
                                                  &matcher_queue_,
-                                                 matcher_output_queue));
+                                                 matcher_output_queue, failure_));
     }
   } else {
     auto worker_matching_options = matching_options_;
@@ -307,7 +363,7 @@ FeatureMatcherController::FeatureMatcherController(
                                                  geometry_options_,
                                                  cache_,
                                                  &matcher_queue_,
-                                                 matcher_output_queue));
+                                                 matcher_output_queue, failure_));
     }
   }
 
@@ -316,7 +372,7 @@ FeatureMatcherController::FeatureMatcherController(
     // Redirect the verification output to final round of guided matching.
     for (int i = 0; i < num_threads; ++i) {
       verifiers_.emplace_back(std::make_unique<VerifierWorker>(
-          geometry_options_, cache_, &verifier_queue_, &guided_matcher_queue_));
+          geometry_options_, cache_, &verifier_queue_, &guided_matcher_queue_, false, failure_));
     }
 
     if (matching_options_.use_gpu) {
@@ -329,7 +385,7 @@ FeatureMatcherController::FeatureMatcherController(
                                                    geometry_options_,
                                                    cache_,
                                                    &guided_matcher_queue_,
-                                                   &output_queue_));
+                                                   &output_queue_, failure_));
       }
     } else {
       auto worker_matching_options = matching_options_;
@@ -342,18 +398,33 @@ FeatureMatcherController::FeatureMatcherController(
                                                    geometry_options_,
                                                    cache_,
                                                    &guided_matcher_queue_,
-                                                   &output_queue_));
+                                                   &output_queue_, failure_));
       }
     }
   } else if (!matching_options.skip_geometric_verification) {
     for (int i = 0; i < num_threads; ++i) {
       verifiers_.emplace_back(std::make_unique<VerifierWorker>(
-          geometry_options_, cache_, &verifier_queue_, &output_queue_));
+          geometry_options_, cache_, &verifier_queue_, &output_queue_, false, failure_));
     }
   }
 }
 
 FeatureMatcherController::~FeatureMatcherController() {
+  if (resources_) {
+    StopQueues();
+    for (auto& worker : matchers_) worker->Stop();
+    for (auto& worker : verifiers_) worker->Stop();
+    for (auto& worker : matchers_) worker->Wait();
+    for (auto& worker : verifiers_) worker->Wait();
+    matcher_queue_.Clear();
+    verifier_queue_.Clear();
+    guided_matcher_queue_.Clear();
+    output_queue_.Clear();
+    // Destroy worker-local indexes/CUDA buffers before their reservations.
+    matchers_.clear();
+    verifiers_.clear();
+    return;
+  }
   matcher_queue_.Wait();
   verifier_queue_.Wait();
   guided_matcher_queue_.Wait();
@@ -389,7 +460,106 @@ FeatureMatcherController::~FeatureMatcherController() {
   }
 }
 
+void FeatureMatcherController::StopQueues() {
+  matcher_queue_.Stop();
+  verifier_queue_.Stop();
+  guided_matcher_queue_.Stop();
+  output_queue_.Stop();
+}
+
+void FeatureMatcherController::InitializeBudget() {
+#if defined(COLMAP_MVS_ENABLED)
+  const auto host_capacity = std::min(matching_options_.host_budget_bytes,
+      mvs::owned::ObserveFixedCohortHostAvailable());
+  resources_->host = std::make_shared<MatchingLedger>(host_capacity,
+      matching_options_.policy_host_bytes, matching_options_.reserve_host_bytes);
+  cache_->AccessDatabase([&](Database& database) {
+    resources_->inventory = MatchingInventory::Read(database, matching_options_);
+  });
+  cache_->SetMatchingShapeValidator([resources = resources_](Database& database, image_t id) {
+    const auto actual = database.ReadMatchingFeatureShape(id);
+    const auto& frozen = resources->inventory.images.at(id);
+    if (actual.keypoint_rows != frozen.keypoint_rows || actual.keypoint_cols != frozen.keypoint_cols ||
+        actual.keypoint_bytes != frozen.keypoint_bytes || actual.descriptor_rows != frozen.descriptor_rows ||
+        actual.descriptor_cols != frozen.descriptor_cols || actual.descriptor_bytes != frozen.descriptor_bytes ||
+        actual.type != frozen.type)
+      throw std::runtime_error("matching DB feature shape changed after admission; workers must drain");
+  });
+  const auto persistent = resources_->inventory.HostPersistent(matching_options_, matchers_.size(), verifiers_.size());
+  resources_->persistent_host = resources_->host->TryAcquire(persistent);
+  LOG(INFO) << "Feature matching frozen logical host capacity: capacity_bytes=" << host_capacity
+            << " host_budget_bytes=" << matching_options_.host_budget_bytes
+            << " policy_host_bytes=" << matching_options_.policy_host_bytes
+            << " reserve_host_bytes=" << matching_options_.reserve_host_bytes
+            << " whole_db_cache_payload_bytes=" << resources_->inventory.cache_payload
+            << " index_payload_bytes=" << resources_->inventory.index_payload
+            << " persistent_known_bytes=" << persistent
+            << "; whole-DB reservation may over-refuse; FAISS/RANSAC/SQLite/allocator workspace UNKNOWN; physical fit UNKNOWN";
+  if (matching_options_.use_gpu) {
+    if (!matching_options_.device_budget_bytes)
+      throw std::invalid_argument("budgeted GPU matching requires observed device budget");
+    auto indices = CSVToVector<int>(matching_options_.gpu_index);
+    if (indices.size() == 1 && indices[0] == -1) {
+      indices.resize(GetNumCudaDevices());
+      std::iota(indices.begin(), indices.end(), 0);
+    }
+    FlatHashSet<int> seen;
+    for (const auto index : indices) {
+      if (index < 0 || !seen.insert(index).second)
+        throw std::invalid_argument("budgeted matching requires distinct native GPU ordinals");
+      const auto observation = mvs::owned::ObserveFixedCohortCapacities(index);
+      // Context creation can lower host FREE too. It can only LOWER the
+      // frozen host ceiling, never manufacture admission credit.
+      resources_->host->LowerCapacity(observation.available.host);
+      const auto capacity = std::min(matching_options_.device_budget_bytes, observation.available.device);
+      auto ledger = std::make_shared<MatchingLedger>(capacity,
+          matching_options_.policy_device_bytes, matching_options_.reserve_device_bytes);
+      const auto bytes = resources_->inventory.DevicePersistent(matching_options_);
+      resources_->persistent_devices.push_back(ledger->TryAcquire(bytes));
+      resources_->devices.push_back(ledger);
+      LOG(INFO) << "Feature matching frozen logical CUDA capacity: device=" << observation.device
+                << " uuid=" << observation.device_uuid << " capacity_bytes=" << capacity
+                << " device_budget_bytes=" << matching_options_.device_budget_bytes
+                << " policy_device_bytes=" << matching_options_.policy_device_bytes
+                << " reserve_device_bytes=" << matching_options_.reserve_device_bytes
+                << " persistent_known_bytes=" << bytes
+                << "; driver/allocator workspace UNKNOWN; physical fit UNKNOWN";
+    }
+  } else if (matching_options_.device_budget_bytes) {
+    throw std::invalid_argument("device matching budget specified for CPU backend");
+  }
+  LOG(INFO) << "Feature matching effective logical host capacity after backend observation: capacity_bytes="
+            << resources_->host->Capacity();
+#else
+  throw std::invalid_argument("budgeted matching requires native host observation (MVS build)");
+#endif
+}
+
+void FeatureMatcherController::WriteOne() {
+  if (stopped && stopped()) throw std::runtime_error("matching cancelled");
+  failure_->Rethrow();
+  auto job = output_queue_.Pop();
+  failure_->Rethrow();
+  if (!job.IsValid()) throw std::runtime_error("matching output cancelled");
+  auto& output = job.Data();
+  if (before_write) before_write();
+  const auto actual_results = MatchingMultiply(
+      MatchingAdd(output.matches.capacity(), output.two_view_geometry.inlier_matches.capacity()), sizeof(FeatureMatch));
+  // Known result capacity, not merely vector size. Any unanticipated capacity
+  // growth refuses immediately; never wait while workers retain input owners.
+  if (actual_results > output.reserved_result_bytes)
+    output.credit->Grow(actual_results - output.reserved_result_bytes);
+  if (output.matches.size() < static_cast<size_t>(geometry_options_.min_num_inliers))
+    output.matches = {};
+  cache_->WriteMatches(output.image_id1, output.image_id2, output.matches);
+  WriteVerifiedTwoViewGeometry(*cache_, output.image_id1, output.image_id2,
+                              std::move(output.two_view_geometry), geometry_options_.min_num_inliers);
+  --pending_;
+  // Job's payloads die BEFORE its ticket. No release at matcher completion.
+}
+
 bool FeatureMatcherController::Setup() {
+  if (resources_) InitializeBudget();
   for (auto& matcher : matchers_) {
     matcher->Start();
   }
@@ -404,6 +574,7 @@ bool FeatureMatcherController::Setup() {
 
   for (auto& matcher : matchers_) {
     if (!matcher->CheckValidSetup()) {
+      if (failure_) failure_->Rethrow();
       return false;
     }
   }
@@ -474,6 +645,23 @@ void FeatureMatcherController::Match(
       continue;
     }
 
+    std::shared_ptr<MatchingLedger::Ticket> credit;
+    if (resources_) {
+      if (stopped && stopped()) throw std::runtime_error("matching cancelled");
+      failure_->Rethrow();
+      const auto bytes = resources_->inventory.PairPayload(image_id1, image_id2, matching_options_);
+      while (!(credit = resources_->host->TryAcquire(bytes))) {
+        if (!pending_) throw std::runtime_error("matching logical singleton refused with persistent cache payload");
+        LOG(INFO) << "Feature matching admission backpressure: pending_pairs=" << pending_;
+        if (admission_wait) admission_wait();
+        WriteOne();
+      }
+      LOG(INFO) << "Feature matching admitted pair: image_id1=" << image_id1
+                << " image_id2=" << image_id2 << " known_payload_bytes=" << bytes
+                << " ledger_used_bytes=" << resources_->host->used.load()
+                << " ledger_peak_bytes=" << resources_->host->peak;
+    }
+
     num_outputs += 1;
 
     // If only one of the matches or inlier matches exist, we recompute them
@@ -485,6 +673,14 @@ void FeatureMatcherController::Match(
     }
 
     FeatureMatcherData data;
+    data.credit = std::move(credit);
+    if (resources_) {
+      auto count = matching_options_.use_gpu ? resources_->inventory.MatchLimit(matching_options_)
+          : resources_->inventory.images.at(image_id1).keypoint_rows;
+      const auto existing = resources_->inventory.stored_matches.find(pair_id);
+      if (existing != resources_->inventory.stored_matches.end()) count = std::max(count, existing->second);
+      data.reserved_result_bytes = MatchingMultiply(count, 2 * sizeof(FeatureMatch));
+    }
     data.image_id1 = image_id1;
     data.image_id2 = image_id2;
 
@@ -495,12 +691,18 @@ void FeatureMatcherController::Match(
     } else {
       THROW_CHECK(matcher_queue_.Push(std::move(data)));
     }
+    if (resources_) ++pending_;
   }
 
   //////////////////////////////////////////////////////////////////////////////
   // Write results to database
   //////////////////////////////////////////////////////////////////////////////
 
+  if (resources_) {
+    while (pending_) WriteOne();
+    failure_->Rethrow();
+    return;
+  }
   for (size_t i = 0; i < num_outputs; ++i) {
     auto output_job = output_queue_.Pop();
     THROW_CHECK(output_job.IsValid());

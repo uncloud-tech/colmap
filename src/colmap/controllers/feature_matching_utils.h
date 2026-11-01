@@ -3,6 +3,7 @@
 #pragma once
 
 #include "colmap/controllers/feature_matching.h"
+#include "colmap/controllers/matching_resource.h"
 #include "colmap/estimators/two_view_geometry.h"
 #include "colmap/feature/matcher.h"
 #include "colmap/util/opengl_utils.h"
@@ -14,6 +15,9 @@
 namespace colmap {
 
 struct FeatureMatcherData {
+  // First member is destroyed LAST, after matches and geometry payloads.
+  std::shared_ptr<MatchingLedger::Ticket> credit;
+  uint64_t reserved_result_bytes = 0;
   image_t image_id1 = kInvalidImageId;
   image_t image_id2 = kInvalidImageId;
   FeatureMatches matches;
@@ -29,10 +33,14 @@ class FeatureMatcherWorker : public Thread {
                        const TwoViewGeometryOptions& geometry_options,
                        const std::shared_ptr<FeatureMatcherCache>& cache,
                        JobQueue<Input>* input_queue,
-                       JobQueue<Output>* output_queue);
+                       JobQueue<Output>* output_queue,
+                       std::shared_ptr<MatchingFailure> failure = nullptr);
 
  private:
   void Run() override;
+  void RunImpl();
+  std::shared_ptr<MatchingFailure> failure_;
+  bool setup_notified_ = false;
 
   FeatureMatchingOptions matching_options_;
   TwoViewGeometryOptions geometry_options_;
@@ -62,7 +70,21 @@ class FeatureMatcherController {
   // Match one batch of multiple image pairs.
   void Match(const std::vector<std::pair<image_t, image_t>>& image_pairs);
 
+  std::shared_ptr<MatchingResources> Resources() const { return resources_; }
+  std::function<bool()> stopped;
+  std::function<void()> admission_wait;
+  std::function<void()> before_write;
+  void SetBeforeMatch(std::function<void()> callback) {
+    if (failure_) failure_->before_match = std::move(callback);
+  }
+
  private:
+  void StopQueues();
+  void WriteOne();
+  void InitializeBudget();
+  std::shared_ptr<MatchingFailure> failure_;
+  std::shared_ptr<MatchingResources> resources_;
+  size_t pending_ = 0;
   FeatureMatchingOptions matching_options_;
   TwoViewGeometryOptions geometry_options_;
   std::shared_ptr<FeatureMatcherCache> cache_;

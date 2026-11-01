@@ -858,6 +858,44 @@ class SqliteDatabase : public Database {
     return pose_priors;
   }
 
+  MatchingFeatureShape ReadMatchingFeatureShape(image_t image_id) const override {
+    // Read LENGTH, never materialize the feature BLOB during inventory.
+    MatchingFeatureShape shape;
+    for (const bool descriptors : {false, true}) {
+      sqlite3_stmt* stmt = nullptr;
+      const char* sql = descriptors
+          ? "SELECT rows, cols, length(data), type FROM descriptors WHERE image_id=?;"
+          : "SELECT rows, cols, length(data) FROM keypoints WHERE image_id=?;";
+      SQLITE3_CALL(sqlite3_prepare_v2(database_, sql, -1, &stmt, nullptr));
+      try {
+        SQLITE3_CALL(sqlite3_bind_int64(stmt, 1, image_id));
+        if (SQLITE3_CALL(sqlite3_step(stmt)) == SQLITE_ROW) {
+          uint64_t values[3];
+          for (int i = 0; i < 3; ++i) {
+            const auto value = sqlite3_column_int64(stmt, i);
+            if (value < 0) throw std::runtime_error("negative matching feature shape");
+            values[i] = static_cast<uint64_t>(value);
+          }
+          if (descriptors) {
+            shape.descriptor_rows = values[0];
+            shape.descriptor_cols = values[1];
+            shape.descriptor_bytes = values[2];
+            shape.type = static_cast<FeatureExtractorType>(sqlite3_column_int(stmt, 3));
+          } else {
+            shape.keypoint_rows = values[0];
+            shape.keypoint_cols = values[1];
+            shape.keypoint_bytes = values[2];
+          }
+        }
+      } catch (...) {
+        sqlite3_finalize(stmt);
+        throw;
+      }
+      SQLITE3_CALL(sqlite3_finalize(stmt));
+    }
+    return shape;
+  }
+
   FeatureKeypointsBlob ReadKeypointsBlob(
       const image_t image_id) const override {
     Sqlite3StmtContext context(sql_stmt_read_keypoints_);

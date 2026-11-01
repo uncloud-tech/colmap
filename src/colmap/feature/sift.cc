@@ -1482,6 +1482,8 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
         options_.sift->cross_check);
 
     if (num_matches < 0) {
+      if (options_.host_budget_bytes)
+        throw std::runtime_error("budgeted GPU feature matching failed; workers must drain");
       LOG(ERROR) << "Feature matching failed. This is probably caused by "
                     "insufficient GPU memory. Consider reducing the maximum "
                     "number of features and/or matches.";

@@ -18,6 +18,10 @@ void Database::Register(Factory factory) {
 
 Database::~Database() = default;
 
+Database::MatchingFeatureShape Database::ReadMatchingFeatureShape(image_t) const {
+  throw std::runtime_error("budgeted matching requires feature shape metadata");
+}
+
 std::shared_ptr<Database> Database::Open(const std::filesystem::path& path) {
   for (auto it = factories_.rbegin(); it != factories_.rend(); ++it) {
     try {

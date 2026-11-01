@@ -194,31 +194,44 @@ int RunFeatureImporter(int argc, char** argv) {
 }
 
 int RunExhaustiveMatcher(int argc, char** argv) {
-  OptionManager options;
-  options.AddDatabaseOptions();
-  options.AddExhaustivePairingOptions();
-  if (!options.Parse(argc, argv)) {
+  try {
+    OptionManager options;
+    options.AddDatabaseOptions();
+    options.AddExhaustivePairingOptions();
+    if (!options.Parse(argc, argv)) {
+      return EXIT_FAILURE;
+    }
+
+    std::unique_ptr<QApplication> app;
+    if (options.feature_matching->RequiresOpenGL()) {
+      app = std::make_unique<QApplication>(argc, argv);
+    }
+
+    auto result = std::make_shared<FeatureMatchingResult>();
+    auto matcher = CreateExhaustiveFeatureMatcher(*options.exhaustive_pairing,
+                                                  *options.feature_matching,
+                                                  *options.two_view_geometry,
+                                                  *options.database_path, result);
+
+    if (app != nullptr) {
+      RunThreadWithOpenGLContext(matcher.get());
+    } else {
+      matcher->Start();
+      matcher->Wait();
+    }
+
+    if (options.feature_matching->host_budget_bytes) {
+      if (result->error) std::rethrow_exception(result->error);
+      if (!result->success) return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
+  } catch (const std::exception& error) {
+    LOG(ERROR) << "Feature matching failed: " << error.what();
+    return EXIT_FAILURE;
+  } catch (...) {
+    LOG(ERROR) << "Feature matching failed with an unknown exception";
     return EXIT_FAILURE;
   }
-
-  std::unique_ptr<QApplication> app;
-  if (options.feature_matching->RequiresOpenGL()) {
-    app = std::make_unique<QApplication>(argc, argv);
-  }
-
-  auto matcher = CreateExhaustiveFeatureMatcher(*options.exhaustive_pairing,
-                                                *options.feature_matching,
-                                                *options.two_view_geometry,
-                                                *options.database_path);
-
-  if (app != nullptr) {
-    RunThreadWithOpenGLContext(matcher.get());
-  } else {
-    matcher->Start();
-    matcher->Wait();
-  }
-
-  return EXIT_SUCCESS;
 }
 
 int RunMatchesImporter(int argc, char** argv) {

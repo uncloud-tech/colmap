@@ -20,6 +20,7 @@ FeatureMatcherCache::FeatureMatcherCache(
       std::make_unique<ThreadSafeLRUCache<image_t, FeatureKeypoints>>(
           cache_size_, [this](const image_t image_id) {
             std::lock_guard<std::mutex> lock(database_mutex_);
+            if (matching_shape_validator_) matching_shape_validator_(*database_, image_id);
             return std::make_shared<FeatureKeypoints>(
                 database_->ReadKeypoints(image_id));
           });
@@ -28,6 +29,7 @@ FeatureMatcherCache::FeatureMatcherCache(
       std::make_unique<ThreadSafeLRUCache<image_t, FeatureDescriptors>>(
           cache_size_, [this](const image_t image_id) {
             std::lock_guard<std::mutex> lock(database_mutex_);
+            if (matching_shape_validator_) matching_shape_validator_(*database_, image_id);
             return std::make_shared<FeatureDescriptors>(
                 database_->ReadDescriptors(image_id));
           });

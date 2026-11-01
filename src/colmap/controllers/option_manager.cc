@@ -379,6 +379,18 @@ void OptionManager::AddFeatureMatchingOptions() {
       EnumHelpText(FeatureMatcherTypeStrings([](FeatureMatcherType type) {
         return type != FeatureMatcherType::UNDEFINED;
       })));
+  AddDefaultByteOption("FeatureMatching.host_budget_bytes",
+                       &feature_matching->host_budget_bytes);
+  AddDefaultByteOption("FeatureMatching.policy_host_bytes",
+                       &feature_matching->policy_host_bytes);
+  AddDefaultByteOption("FeatureMatching.reserve_host_bytes",
+                       &feature_matching->reserve_host_bytes);
+  AddDefaultByteOption("FeatureMatching.device_budget_bytes",
+                       &feature_matching->device_budget_bytes);
+  AddDefaultByteOption("FeatureMatching.policy_device_bytes",
+                       &feature_matching->policy_device_bytes);
+  AddDefaultByteOption("FeatureMatching.reserve_device_bytes",
+                       &feature_matching->reserve_device_bytes);
   AddDefaultOption("FeatureMatching.num_threads",
                    &feature_matching->num_threads);
   AddDefaultOption("FeatureMatching.use_gpu", &feature_matching->use_gpu);

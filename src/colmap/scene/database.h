@@ -143,6 +143,15 @@ class Database {
       bool is_deprecated_image_prior = true) const = 0;
   virtual std::vector<PosePrior> ReadAllPosePriors() const = 0;
 
+  struct MatchingFeatureShape {
+    uint64_t keypoint_rows = 0, keypoint_cols = 0, keypoint_bytes = 0;
+    uint64_t descriptor_rows = 0, descriptor_cols = 0, descriptor_bytes = 0;
+    FeatureExtractorType type = FeatureExtractorType::UNDEFINED;
+  };
+  // Metadata only: no feature BLOB decoding/allocation. Unsupported database
+  // implementations refuse budgeted matching, never guess descriptor dtype.
+  virtual MatchingFeatureShape ReadMatchingFeatureShape(image_t image_id) const;
+
   virtual FeatureKeypointsBlob ReadKeypointsBlob(image_t image_id) const = 0;
   virtual FeatureKeypoints ReadKeypoints(image_t image_id) const = 0;
   virtual FeatureDescriptors ReadDescriptors(image_t image_id) const = 0;
