@@ -24,6 +24,11 @@ if(MSVC)
 endif()
 
 COLMAP_ADD_TEST(
+    NAME mapping_ownership_test
+    SRCS mapping_ownership_test.cc
+    LINK_LIBS colmap_sfm
+)
+COLMAP_ADD_TEST(
     NAME global_mapper_test
     SRCS global_mapper_test.cc
     LINK_LIBS colmap_sfm

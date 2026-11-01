@@ -2,9 +2,11 @@
 
 #pragma once
 
+#include "colmap/scene/mapping_resource.h"
 #include "colmap/util/logging.h"
 #include "colmap/util/types.h"
 
+#include <utility>
 #include <vector>
 
 namespace colmap {
@@ -25,6 +27,20 @@ struct TrackElement {
 class Track {
  public:
   Track();
+  // Component-only opt-in, not a permanent object-to-ledger binding. Copy/move
+  // assignment replaces the destination's ledger policy with the source's,
+  // clearing it for an unbudgeted source. Copying such a source allocates without
+  // admission; subsequent growth also remains unbudgeted. Old destination storage
+  // is destroyed before its credits retire. Native mapping attachment is OFF;
+  // future attachment must audit/prevent unintended policy shedding rather than
+  // assume assignment retains the destination ledger.
+  // Mutable Elements() growth and externally allocated SetElements arguments
+  // are outside this interception boundary. Allocator excess is UNKNOWN.
+  explicit Track(std::shared_ptr<MappingLedger> ledger);
+  Track(const Track& other);
+  Track(Track&& other) noexcept = default;
+  Track& operator=(const Track& other);
+  Track& operator=(Track&& other) noexcept;
 
   // The number of track elements.
   inline size_t Length() const;
@@ -59,6 +75,12 @@ class Track {
   inline bool operator!=(const Track& other) const;
 
  private:
+  void Swap(Track& other) noexcept;
+  void ReplaceCapacity(size_t capacity);
+  void PrepareAppend(size_t count);
+
+  // Declaration order keeps credit alive until its vector has been destroyed.
+  std::shared_ptr<MappingLedger::Ticket> mapping_credit_;
   std::vector<TrackElement> elements_;
 };
 
@@ -84,7 +106,17 @@ const std::vector<TrackElement>& Track::Elements() const { return elements_; }
 std::vector<TrackElement>& Track::Elements() { return elements_; }
 
 void Track::SetElements(std::vector<TrackElement> elements) {
-  elements_ = std::move(elements);
+  if (!mapping_credit_) {
+    elements_ = std::move(elements);
+    return;
+  }
+  // The incoming vector was allocated by the caller (UNKNOWN). Prepare an
+  // independently owned replacement before changing this Track.
+  Track replacement(mapping_credit_->ledger);
+  replacement.Reserve(elements.size());
+  replacement.elements_.insert(
+      replacement.elements_.end(), elements.begin(), elements.end());
+  Swap(replacement);
 }
 
 // Access specific elements.
@@ -99,14 +131,24 @@ void Track::SetElement(const size_t idx, const TrackElement& element) {
 }
 
 void Track::AddElement(const TrackElement& element) {
-  elements_.push_back(element);
+  // element may refer into elements_, so preserve it across replacement.
+  const TrackElement value = element;
+  PrepareAppend(1);
+  elements_.push_back(value);
 }
 
 void Track::AddElement(const image_t image_id, const point2D_t point2D_idx) {
+  PrepareAppend(1);
   elements_.emplace_back(image_id, point2D_idx);
 }
 
 void Track::AddElements(const std::vector<TrackElement>& elements) {
+  if (mapping_credit_ && &elements == &elements_) {
+    const Track copy(*this);
+    AddElements(copy.elements_);
+    return;
+  }
+  PrepareAppend(elements.size());
   elements_.insert(elements_.end(), elements.begin(), elements.end());
 }
 
@@ -116,10 +158,20 @@ void Track::DeleteElement(const size_t idx) {
 }
 
 void Track::Reserve(const size_t num_elements) {
-  elements_.reserve(num_elements);
+  if (!mapping_credit_) {
+    elements_.reserve(num_elements);
+  } else if (num_elements > elements_.capacity()) {
+    ReplaceCapacity(num_elements);
+  }
 }
 
-void Track::Compress() { elements_.shrink_to_fit(); }
+void Track::Compress() {
+  if (!mapping_credit_) {
+    elements_.shrink_to_fit();
+  } else if (elements_.size() < elements_.capacity()) {
+    ReplaceCapacity(elements_.size());
+  }
+}
 
 bool Track::operator==(const Track& other) const {
   return elements_ == other.elements_;

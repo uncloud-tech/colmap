@@ -461,6 +461,8 @@ CLOSURE = (
     "src/colmap/retrieval/utils.h",
     "scripts/resident/generate_resident_allocation_fingerprint.py",
     # Initial CPU mapping DB/model payload, graph growth and lifetime owners.
+    # Track/reconstruction files also bind the opt-in ownership component and
+    # covered clone/append transactions; native Track attachment is deferred.
     "src/colmap/scene/mapping_resource.h",
     "src/colmap/controllers/incremental_pipeline.h",
     "src/colmap/controllers/incremental_pipeline.cc",

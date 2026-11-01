@@ -17,11 +17,28 @@
 #include <set>
 
 namespace colmap {
+namespace {
+
+std::shared_ptr<MappingLedger::Ticket> PrepareModelCopyCredit(
+    const Reconstruction& source) {
+  const auto ledger = source.MappingBudget();
+  if (!ledger) return nullptr;
+  uint64_t points = 0;
+  for (const auto& [id, image] : source.Images()) {
+    points = MappingAdd(points, image.NumPoints2D());
+  }
+  // The clone requests each Point2D vector's size, not the source capacity.
+  // Track copy constructors independently acquire their optional own credits.
+  return ledger->Acquire(MappingMultiply(points, sizeof(Point2D)));
+}
+
+}  // namespace
 
 Reconstruction::Reconstruction() : num_reg_images_(0), max_point3D_id_(0) {}
 
 Reconstruction::Reconstruction(const Reconstruction& other)
-    : rigs_(other.rigs_),
+    : mapping_credit_(PrepareModelCopyCredit(other)),
+      rigs_(other.rigs_),
       cameras_(other.cameras_),
       frames_(other.frames_),
       images_(other.images_),
@@ -43,26 +60,34 @@ Reconstruction::Reconstruction(const Reconstruction& other)
 
 Reconstruction& Reconstruction::operator=(const Reconstruction& other) {
   if (this != &other) {
-    rigs_ = other.rigs_;
-    cameras_ = other.cameras_;
-    frames_ = other.frames_;
-    images_ = other.images_;
-    points3D_ = other.points3D_;
-    reg_frame_ids_ = other.reg_frame_ids_;
-    num_reg_images_ = other.num_reg_images_;
-    max_point3D_id_ = other.max_point3D_id_;
-    for (auto& [_, frame] : frames_) {
-      frame.ResetRigPtr();
-      frame.SetRigPtr(&Rig(frame.RigId()));
-    }
-    for (auto& [_, image] : images_) {
-      image.ResetCameraPtr();
-      image.SetCameraPtr(&Camera(image.CameraId()));
-      image.ResetFramePtr();
-      image.SetFramePtr(&Frame(image.FrameId()));
-    }
+    // Finish all allocation and pointer rebinding before changing this model.
+    Reconstruction replacement(other);
+    Swap(replacement);
   }
   return *this;
+}
+
+void Reconstruction::Swap(Reconstruction& other) noexcept {
+  // Node-container swaps preserve element addresses. The replacement's already
+  // rebound image/frame pointers therefore remain valid after the commit.
+  // Require the actual configured backend to prove every container swap noexcept;
+  // generic std::swap(Reconstruction) would invoke allocating copies instead.
+  static_assert(noexcept(rigs_.swap(other.rigs_)));
+  static_assert(noexcept(cameras_.swap(other.cameras_)));
+  static_assert(noexcept(frames_.swap(other.frames_)));
+  static_assert(noexcept(images_.swap(other.images_)));
+  static_assert(noexcept(points3D_.swap(other.points3D_)));
+  static_assert(noexcept(reg_frame_ids_.swap(other.reg_frame_ids_)));
+  rigs_.swap(other.rigs_);
+  cameras_.swap(other.cameras_);
+  frames_.swap(other.frames_);
+  images_.swap(other.images_);
+  points3D_.swap(other.points3D_);
+  reg_frame_ids_.swap(other.reg_frame_ids_);
+  std::swap(num_reg_images_, other.num_reg_images_);
+  std::swap(max_point3D_id_, other.max_point3D_id_);
+  mapping_credit_.swap(other.mapping_credit_);
+  // replacement destroys old payloads before their old credits.
 }
 
 std::vector<image_t> Reconstruction::RegImageIds() const {
@@ -538,14 +563,17 @@ point3D_t Reconstruction::AddPoint3D(const Eigen::Vector3d& xyz,
 
 void Reconstruction::AddObservation(const point3D_t point3D_id,
                                     const TrackElement& track_el) {
-  class Image& image = Image(track_el.image_id);
-  THROW_CHECK(!image.Point2D(track_el.point2D_idx).HasPoint3D());
+  const TrackElement value = track_el;
+  class Image& image = Image(value.image_id);
+  THROW_CHECK(!image.Point2D(value.point2D_idx).HasPoint3D());
 
-  image.SetPoint3DForPoint2D(track_el.point2D_idx, point3D_id);
-  THROW_CHECK_LE(image.NumPoints3D(), image.NumPoints2D());
-
+  THROW_CHECK_NE(point3D_id, kInvalidPoint3DId);
+  THROW_CHECK_LT(image.NumPoints3D(), image.NumPoints2D());
   struct Point3D& point3D = Point3D(point3D_id);
-  point3D.track.AddElement(track_el);
+  // Complete admission AND potentially throwing vector allocation first. The
+  // validated image index/ID make the remaining link update allocation-free.
+  point3D.track.AddElement(value);
+  image.SetPoint3DForPoint2D(value.point2D_idx, point3D_id);
 }
 
 point3D_t Reconstruction::MergePoints3D(const point3D_t point3D_id1,
