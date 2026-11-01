@@ -74,6 +74,72 @@ class FrontendTest(unittest.TestCase):
                         self.assertEqual(reconstruction.resources()['host'], 2000)
                         reconstruction.native('optimized_dense_plan')
 
+    def test_sidecar_inventory_filters_extraction_without_reordering_photo_only(self):
+        import json
+        from unittest.mock import patch
+        from colmap_reconstruction.cli import Reconstruction, parse_args
+        from colmap_reconstruction.process import NativeFailure
+        selected = ['#camera.jpg', 'a/z.jpg', 'a.jpg', 'café photo.jpg']
+        for sidecars in ([], ['notes.txt', 'camera.xmp']):
+            with self.subTest(sidecars=sidecars), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                reconstruction = Reconstruction(parse_args(['--photos', str(root), '--workspace', str(root),
+                    '--loader-scratch-host-bytes', '0', '--process-host-bytes', '0',
+                    '--unknown-host-bytes', '0', '--reserve-host-bytes', '0']), sys.executable)
+                reconstruction.assets.mkdir()
+                reconstruction.identity = {'source_commit': 'a' * 40}
+                originals = {}
+                for name in selected + sidecars:
+                    path = root / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(('untouched synthetic fixture: ' + name).encode('utf-8'))
+                    originals[path] = path.read_bytes()
+                summary = photo_summary()
+                summary['photos'] = [dict(path=name, width=4004, height=3001, orientation=None) for name in selected]
+                summary['photo_count'] = 4
+                summary['non_image_files'] = sidecars
+                def native(command, *arguments, **kwargs):
+                    if command == 'photo_directory_summary':
+                        return json.dumps(summary)
+                    self.assertEqual(command, 'feature_extractor')
+                    if sidecars:
+                        self.assertIn('--image_list_path', arguments)
+                        path = Path(arguments[arguments.index('--image_list_path') + 1])
+                        self.assertEqual(path.read_bytes(), '#camera.jpg\na/z.jpg\na.jpg\ncafé photo.jpg\n'.encode('utf-8'))
+                    else:
+                        self.assertNotIn('--image_list_path', arguments)
+                    record = json.loads((reconstruction.assets / 'extraction-inventory.json').read_text())
+                    self.assertEqual(record['selected_photos'], selected)
+                    self.assertEqual(record['effective_order'],
+                        ['#camera.jpg', 'a.jpg', 'a/z.jpg', 'café photo.jpg'] if sidecars else selected)
+                    raise NativeFailure('extraction boundary')
+                with patch.object(reconstruction, 'native', side_effect=native), \
+                     patch.object(reconstruction, 'resources', return_value={'host': 2**30}):
+                    with self.assertRaisesRegex(NativeFailure, 'extraction boundary'):
+                        reconstruction.prepare()
+                self.assertEqual({path: path.read_bytes() for path in originals}, originals)
+
+    def test_sidecar_image_list_refuses_unrepresentable_names_before_extraction(self):
+        import json
+        from unittest.mock import patch
+        from colmap_reconstruction.cli import Reconstruction, parse_args
+        for name in (' leading.jpg', 'trailing.jpg ', '\tphoto.jpg', 'photo.jpg\r',
+                     'line\nbreak.jpg', 'nul\0.jpg', '\udcff.jpg'):
+            with self.subTest(name=repr(name)), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                reconstruction = Reconstruction(parse_args(['--photos', str(root), '--workspace', str(root)]), sys.executable)
+                reconstruction.assets.mkdir()
+                reconstruction.identity = {'source_commit': 'a' * 40}
+                summary = photo_summary()
+                summary['photos'][0]['path'] = name
+                summary['non_image_files'] = ['camera.xmp']
+                with patch.object(reconstruction, 'native', return_value=json.dumps(summary)) as native:
+                    with self.assertRaisesRegex(ValueError, 'cannot represent photo filename.*no rename/skip'):
+                        reconstruction.prepare()
+                self.assertEqual([call.args[0] for call in native.call_args_list], ['photo_directory_summary'])
+                self.assertFalse((root / 'database.db').exists())
+                self.assertFalse((reconstruction.assets / 'extraction-images.txt').exists())
+
     def test_extraction_budget_is_scoped_and_preserves_over_3200(self):
         from unittest.mock import patch
         from colmap_reconstruction.cli import Reconstruction, parse_args

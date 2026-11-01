@@ -265,6 +265,35 @@ class Reconstruction:
                 height=photo['width'] if swapped else photo['height']))
             paths.add(photo['path'])
         extraction_limit = max(max(photo['width'], photo['height']) for photo in photos)
+        selected = [photo['path'] for photo in photos]
+        self.extraction_image_list = []
+        effective_order = selected
+        ordering = 'native filesystem path discovery order'
+        if summary['non_image_files']:
+            for name in selected:
+                # ReadTextFileLines uses getline('\n') and trims exactly these
+                # four ASCII characters. It does NOT interpret '#' comments.
+                # Do not trim, escape, or rename a path into a different file.
+                try:
+                    name.encode('utf-8')
+                    representable = '\n' not in name and '\0' not in name and name == name.strip(' \n\r\t')
+                except UnicodeEncodeError:
+                    representable = False
+                if not representable:
+                    raise ValueError('native image list cannot represent photo filename '
+                                     + repr(name) + '; no rename/skip; originals unchanged')
+            image_list = self.assets / 'extraction-images.txt'
+            with image_list.open('xb') as stream:
+                stream.write(('\n'.join(selected) + '\n').encode('utf-8'))
+            self.extraction_image_list = ['--image_list_path', image_list]
+            # ImageReader sorts nonempty image_names as std::string, unlike
+            # default filesystem::path discovery. UTF-8 byte order matches it.
+            effective_order = sorted(selected, key=lambda name: name.encode('utf-8'))
+            ordering = 'native image-list UTF-8 byte string sort (may differ from discovery)'
+        inventory = dict(selected_photos=selected, effective_order=effective_order,
+                         ordering=ordering, excluded_non_image_files=summary['non_image_files'])
+        write_json(self.assets / 'extraction-inventory.json', inventory)
+        print('Extraction inventory: ' + json.dumps(inventory), file=sys.stderr)
         write_json(self.assets / 'photos.json', summary)
         resolution = dict(
             original=dict(semantics='encoded dimensions; originals unchanged', photos=photos),
@@ -290,7 +319,7 @@ class Reconstruction:
         previous_host_budget = self.process.host_budget_bytes
         self.process.host_budget_bytes = phase_capacity
         try:
-            self.native('feature_extractor', *common, '--image_path', a.photos,
+            self.native('feature_extractor', *common, '--image_path', a.photos, *self.extraction_image_list,
                 '--FeatureExtraction.max_image_size', str(extraction_limit),
                 '--FeatureExtraction.type', 'SIFT', '--FeatureExtraction.use_gpu', 'true',
                 '--SiftExtraction.first_octave', '-1', '--FeatureExtraction.gpu_index', a.gpu_index,

@@ -42,10 +42,24 @@ not refused. Native support for other effective widths remains a delivery
 blocker; this is not general full-resolution photo-directory qualification.
 
 Before extraction, native `photo_directory_summary` recursively inspects headers
-in the same native discovery order as extraction. Empty inventories, corrupt or
+in native filesystem-path discovery order. Empty inventories, corrupt or
 unknown-dimension photos and malformed inspection results refuse, not skip.
-Sidecars are reported separately. Header inspection is not a decode/fit guarantee;
-keep inputs immutable throughout the invocation.
+Photo-only directories retain default native discovery and its order. When
+ordinary sidecars (`.xmp`, text files, etc.) are present, extraction instead uses
+`--image_list_path` containing exactly the inspected photos; sidecars are reported
+but never passed to the image decoder. This newly supported case uses the native
+image-list **UTF-8 byte string sort**, which can differ from filesystem-path
+ordering for nested names (e.g. `a/z.jpg` versus `a.jpg`). The selected inventory,
+effective order and excluded sidecars are recorded in
+`planning/extraction-inventory.json` and displayed before extraction.
+
+The list is UTF-8, one unchanged relative filename per LF-terminated line.
+Internal spaces and Unicode are preserved; `#` is not a comment. For sidecar
+filtering, filenames containing LF/NUL, invalid UTF-8, or leading/trailing ASCII
+space/tab/CR cannot be represented by the native line reader and explicitly
+refuse before extraction; no photo is renamed or silently skipped. Header
+inspection is not a decode/fit guarantee; keep inputs immutable throughout the
+invocation.
 
 Extraction uses an explicit positive maximum edge covering **all originals**,
 not SIFT's implicit 3200 fallback for nonpositive limits. GPU SIFT's normal first
