@@ -239,10 +239,16 @@ backend, solver options, seed, threading, image selection, registration order,
 color extraction, track coverage or resolution is changed.
 
 Native `Mapper.host_budget_bytes=0` preserves unbudgeted behavior. Nonzero budgets
-support fresh SQLite-backed incremental mapping with CPU Ceres, including the
-existing multiple-model behavior. Explicit GPU BA, other BA backends, input-model
-continuation and preloaded-cache construction refuse before their unsupported
-materialization; there is no automatic fallback. Budgeted host observation needs
+support fresh SQLite-backed incremental mapping with CPU Ceres via `mapper` and
+`pose_prior_mapper`, including the existing multiple-model behavior. Nonzero
+budgets are unsupported by `hierarchical_mapper` and `point_triangulator`; both
+commands reject them immediately after option parsing, before loading a database
+or input model. Both incremental commands reject budgeted input-model continuation
+before loading the model (or updating pose-prior covariance). Fresh pose-prior
+mapping retains admission and controlled failure handling, with the existing
+main signal handler owning interruption. Explicit GPU BA, other BA backends,
+input-model continuation and preloaded-cache construction refuse before their
+unsupported materialization; there is no automatic fallback. Budgeted host observation needs
 a supported Linux/cgroup-v2 MVS build. `Mapper.policy_host_bytes` and
 `Mapper.reserve_host_bytes` use the existing strict byte-option parser; the
 frontend supplies policy automatically without new declared-byte requirements.

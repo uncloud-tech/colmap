@@ -467,6 +467,11 @@ int RunHierarchicalMapper(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
+  if (options.mapper->host_budget_bytes) {
+    LOG(ERROR) << "Mapper.host_budget_bytes is not supported by hierarchical_mapper";
+    return EXIT_FAILURE;
+  }
+
   if (!ExistsDir(output_path)) {
     LOG(ERROR) << "`output_path` is not a directory.";
     return EXIT_FAILURE;
@@ -521,45 +526,60 @@ int RunPosePriorMapper(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
+  if (options.mapper->host_budget_bytes && !input_path.empty()) {
+    LOG(ERROR) << "budgeted mapping does not support input_path continuation";
+    return EXIT_FAILURE;
+  }
+
   if (!ExistsDir(output_path)) {
     LOG(ERROR) << "`output_path` is not a directory.";
     return EXIT_FAILURE;
   }
 
-  if (overwrite_priors_covariance) {
-    const Eigen::Matrix3d covariance =
-        Eigen::Vector3d(
-            prior_position_std_x, prior_position_std_y, prior_position_std_z)
-            .cwiseAbs2()
-            .asDiagonal();
-    UpdateDatabasePosePriorsCovariance(*options.database_path, covariance);
-  }
+  const auto run = [&]() -> int {
+    if (overwrite_priors_covariance) {
+      const Eigen::Matrix3d covariance =
+          Eigen::Vector3d(
+              prior_position_std_x, prior_position_std_y, prior_position_std_z)
+              .cwiseAbs2()
+              .asDiagonal();
+      UpdateDatabasePosePriorsCovariance(*options.database_path, covariance);
+    }
 
-  auto reconstruction_manager = std::make_shared<ReconstructionManager>();
-  if (input_path != "") {
-    if (!ExistsDir(input_path)) {
-      LOG(ERROR) << "`input_path` is not a directory.";
+    auto reconstruction_manager = std::make_shared<ReconstructionManager>();
+    if (input_path != "") {
+      if (!ExistsDir(input_path)) {
+        LOG(ERROR) << "`input_path` is not a directory.";
+        return EXIT_FAILURE;
+      }
+      reconstruction_manager->Read(input_path);
+    }
+
+    if (!RunIncrementalMapperImpl(*options.database_path,
+                                  *options.image_path,
+                                  output_path,
+                                  options.mapper,
+                                  reconstruction_manager)) {
       return EXIT_FAILURE;
     }
-    reconstruction_manager->Read(input_path);
-  }
 
-  if (!RunIncrementalMapperImpl(*options.database_path,
-                                *options.image_path,
-                                output_path,
-                                options.mapper,
-                                reconstruction_manager)) {
+    if (input_path.empty()) {
+      for (size_t i = 0; i < reconstruction_manager->Size(); ++i) {
+        const auto reconstruction_path = output_path / std::to_string(i);
+        options.Write(reconstruction_path / "project.ini");
+      }
+    }
+
+    return EXIT_SUCCESS;
+  };
+  if (!options.mapper->host_budget_bytes) return run();
+  try {
+    return run();
+  } catch (const std::exception& error) {
+    LOG(ERROR) << "Mapping failed; owned payloads retired, no success flush: "
+               << error.what();
     return EXIT_FAILURE;
   }
-
-  if (input_path.empty()) {
-    for (size_t i = 0; i < reconstruction_manager->Size(); ++i) {
-      const auto reconstruction_path = output_path / std::to_string(i);
-      options.Write(reconstruction_path / "project.ini");
-    }
-  }
-
-  return EXIT_SUCCESS;
 }
 
 int RunPointFiltering(int argc, char** argv) {
@@ -618,6 +638,11 @@ int RunPointTriangulator(int argc, char** argv) {
                            "(fixing the principal point)");
   options.AddMapperOptions();
   if (!options.Parse(argc, argv)) {
+    return EXIT_FAILURE;
+  }
+
+  if (options.mapper->host_budget_bytes) {
+    LOG(ERROR) << "Mapper.host_budget_bytes is not supported by point_triangulator";
     return EXIT_FAILURE;
   }
 

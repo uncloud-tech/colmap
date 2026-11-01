@@ -46,6 +46,7 @@ class MappingCliTest(unittest.TestCase):
         import resource
 
         def bound_address_space():
+            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
             cap = 8 * 1024**3
             resource.setrlimit(resource.RLIMIT_AS, (cap, cap))
 
@@ -72,6 +73,85 @@ class MappingCliTest(unittest.TestCase):
             result = self.run_command(self.command(path) + extra)
             self.assertEqual(result.returncode, 1, result.stdout)
             self.assertEqual(list((self.root / 'sparse').iterdir()), [])
+
+    def input_model(self):
+        model = self.root / 'input'
+        model.mkdir()
+        (model / 'cameras.txt').write_text('1 SIMPLE_PINHOLE 100 100 50 50 50\n')
+        (model / 'images.txt').write_text(
+            '1 1 0 0 0 0 0 0 1 1.jpg\n50 50 -1\n'
+            '2 1 0 0 0 1 0 0 1 2.jpg\n50 50 -1\n')
+        (model / 'points3D.txt').write_text('')
+        return model
+
+    def test_unsupported_command_budgets_refuse_before_loading(self):
+        path = self.fixture()
+        model = self.input_model()
+        before = path.read_bytes()
+        for name in ('hierarchical_mapper', 'point_triangulator', 'pose_prior_mapper'):
+            with self.subTest(command=name):
+                command = self.command(path)
+                command[1] = name
+                if name != 'hierarchical_mapper':
+                    command += ['--input_path', str(model)]
+                if name == 'pose_prior_mapper':
+                    command += ['--overwrite_priors_covariance', 'true']
+                result = self.run_command(command)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                diagnostic = (b'budgeted mapping does not support input_path continuation'
+                              if name == 'pose_prior_mapper' else
+                              b'Mapper.host_budget_bytes is not supported by ' + name.encode())
+                self.assertIn(diagnostic, result.stdout)
+                self.assertNotIn(b'Loading database', result.stdout)
+                self.assertNotIn(b'Loading model', result.stdout)
+                self.assertNotIn(b'Setting up database pose priors', result.stdout)
+                self.assertEqual(path.read_bytes(), before)
+                self.assertEqual(list((self.root / 'sparse').iterdir()), [])
+
+    def test_fresh_pose_prior_budget_failures_are_controlled(self):
+        path = self.fixture()
+        for budget, extra, diagnostic in (
+                (1, [], b'mapping logical host'),
+                (64 * 1024**2, ['--Mapper.ba_use_gpu', 'true'],
+                 b'budgeted mapping supports fresh CPU Ceres mapping only')):
+            with self.subTest(budget=budget, extra=extra):
+                command = self.command(path, budget) + extra
+                command[1] = 'pose_prior_mapper'
+                result = self.run_command(command)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(diagnostic, result.stdout)
+                self.assertIn(b'owned payloads retired, no success flush', result.stdout)
+                self.assertEqual(list((self.root / 'sparse').iterdir()), [])
+
+    def test_fresh_pose_prior_budget_reaches_mapper_like_legacy(self):
+        path = self.fixture()
+        for budget in (0, 64 * 1024**2):
+            with self.subTest(budget=budget):
+                command = self.command(path, budget)
+                command[1] = 'pose_prior_mapper'
+                result = self.run_command(command)
+                # No pair matches: an ordinary no-model result, not blanket
+                # rejection of fresh pose-prior admission.
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(b'No images with matches', result.stdout)
+                self.assertIn(b'Failed to create any sparse model', result.stdout)
+                self.assertNotIn(b'no success flush', result.stdout)
+                self.assertEqual(b'logical admission: capacity_bytes=' in result.stdout, bool(budget))
+
+    def test_unsupported_commands_zero_budget_keeps_path_validation(self):
+        path = self.fixture()
+        model = self.input_model()
+        for name in ('hierarchical_mapper', 'point_triangulator'):
+            with self.subTest(command=name):
+                command = self.command(path, 0)
+                command[1] = name
+                command[command.index('--output_path') + 1] = str(self.root / 'missing-output')
+                if name == 'point_triangulator':
+                    command += ['--input_path', str(model)]
+                result = self.run_command(command)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(b'`output_path` is not a directory', result.stdout)
+                self.assertNotIn(b'host_budget_bytes is not supported', result.stdout)
 
     def test_loader_refusal_and_corrupt_shapes_never_publish(self):
         path = self.fixture()
@@ -108,8 +188,16 @@ class MappingCliTest(unittest.TestCase):
         self.assertEqual(list((self.root / 'sparse').iterdir()), [])
 
     def test_main_sole_signal_owner_returns_130_during_loader(self):
+        self.check_loader_signal('mapper')
+
+    def test_fresh_pose_prior_main_sole_signal_owner_returns_130(self):
+        self.check_loader_signal('pose_prior_mapper')
+
+    def check_loader_signal(self, name):
         path = self.fixture(count=10000)
-        process = subprocess.Popen(self.command(path), stdin=subprocess.DEVNULL,
+        command = self.command(path)
+        command[1] = name
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
         captured = bytearray()
         try:

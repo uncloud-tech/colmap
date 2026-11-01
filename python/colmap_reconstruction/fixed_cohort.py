@@ -31,7 +31,7 @@ import subprocess
 
 from .model import _add, _mul, current_owned_shape_minimum, exact_int
 
-_FIXED_COHORT_FINGERPRINT = '877f6a9fd56088aec736bad6791f60df172793c4fe4ba479f764969338739d61'
+_FIXED_COHORT_FINGERPRINT = 'd7ed4eb819453f02cd7a709a7f62d1d0252e33c95ab284a1214259a94647c362'
 _PROFILE = 'fresh-fixed-cohort/current-owned-shape-lower-bound-v1/unqualified'
 _ROOT = Path(__file__).resolve().parents[2]
 
