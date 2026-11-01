@@ -70,6 +70,10 @@ EXTRACTION_ALLOCATION_SOURCES = (
 
 
 MATCHING_ALLOCATION_SOURCES = (
+    "src/colmap/scene/database_blob.h",
+    "src/colmap/scene/database.h",
+    "src/colmap/scene/database.cc",
+    "src/colmap/scene/database_sqlite.cc",
     "src/colmap/controllers/matching_resource.h",
     "src/colmap/controllers/feature_matching.h",
     "src/colmap/controllers/feature_matching.cc",

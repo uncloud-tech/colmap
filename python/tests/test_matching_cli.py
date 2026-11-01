@@ -95,6 +95,42 @@ class MatchingCliTest(unittest.TestCase):
                     if blob is not None:
                         self.assertTrue(all(math.isfinite(value[0]) for value in struct.iter_unpack('<d', blob)))
 
+    def test_malformed_full_width_stored_match_metadata_refuses_and_drains(self):
+        # Even a regression must not be allowed to request the original 32 GiB
+        # matrix. Runtime executes this CPU-only seam with a bounded address
+        # space; the expected error must be metadata refusal, not bad_alloc.
+        import resource
+
+        def bounded_address_space():
+            cap = 8 * 1024**3
+            resource.setrlimit(resource.RLIMIT_AS, (cap, cap))
+
+        cases = ((4294967297, 2, b'\0' * 8, 'unsupported database matrix dimensions'),
+                 (9223372036854775807, 2, b'', 'unsupported database matrix dimensions'),
+                 (1, 3, b'\0' * 12, 'shape.cols'),
+                 (-1, 2, b'', 'unsupported database matrix dimensions'),
+                 (1, -2, b'', 'unsupported database matrix dimensions'),
+                 (2, 2, b'\0' * 8, 'shape/BLOB length mismatch'),
+                 (1.5, 2, b'\0' * 8, 'SQLITE_INTEGER'),
+                 (1, 2, '12345678', 'sqlite3_column_int'))
+        for index, (rows, cols, blob, error) in enumerate(cases):
+            with self.subTest(rows=rows, cols=cols, blob_type=type(blob).__name__):
+                path = self.fixture(f'malformed-matches-{index}.db')
+                with sqlite3.connect(path) as db:
+                    db.execute('INSERT INTO matches(pair_id,rows,cols,data) VALUES(?,?,?,?)',
+                               (2147483647 + 2, rows, cols, blob))
+                result = subprocess.run(self.command(path, 64 * 1024**2),
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=90,
+                    preexec_fn=bounded_address_space)
+                output = result.stdout.decode(errors='replace')
+                self.assertEqual(result.returncode, 1, output)
+                self.assertIn(error, output)
+                self.assertIn('workers drained: live_host_bytes=0 live_device_bytes=0 success=0', output)
+                with sqlite3.connect(path) as db:
+                    self.assertEqual(db.execute('SELECT rows,cols,data FROM matches').fetchall(),
+                                     [(rows, cols, blob)])
+                    self.assertEqual(db.execute('SELECT count(*) FROM two_view_geometries').fetchone()[0], 0)
+
     def test_singleton_unsupported_and_strict_cli_status(self):
         for label, extra, phrase in (
                 ('singleton', [], 'singleton refused'),

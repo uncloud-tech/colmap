@@ -66,9 +66,14 @@ class FeatureMatcherCache {
   size_t MaxNumKeypoints();
 
   // Set before workers start. The budgeted exhaustive inventory freezes shapes;
-  // validate under the existing DB mutex before allocating every feature load.
+  // Validate and load under the DB mutex AND one database snapshot.
   void SetMatchingShapeValidator(std::function<void(Database&, image_t)> validate) {
     matching_shape_validator_ = std::move(validate);
+  }
+
+  void SetMatchingMatchValidator(
+      std::function<void(Database&, image_t, image_t)> validate) {
+    matching_match_validator_ = std::move(validate);
   }
 
  private:
@@ -93,6 +98,7 @@ class FeatureMatcherCache {
   ThreadSafeLRUCache<image_t, FeatureDescriptorIndex> descriptor_index_cache_;
   std::optional<size_t> max_num_keypoints_;
   std::function<void(Database&, image_t)> matching_shape_validator_;
+  std::function<void(Database&, image_t, image_t)> matching_match_validator_;
 };
 
 }  // namespace colmap

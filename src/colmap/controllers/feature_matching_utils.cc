@@ -474,6 +474,7 @@ void FeatureMatcherController::InitializeBudget() {
   resources_->host = std::make_shared<MatchingLedger>(host_capacity,
       matching_options_.policy_host_bytes, matching_options_.reserve_host_bytes);
   cache_->AccessDatabase([&](Database& database) {
+    DatabaseTransaction snapshot(&database);
     resources_->inventory = MatchingInventory::Read(database, matching_options_);
   });
   cache_->SetMatchingShapeValidator([resources = resources_](Database& database, image_t id) {
@@ -485,6 +486,19 @@ void FeatureMatcherController::InitializeBudget() {
         actual.type != frozen.type)
       throw std::runtime_error("matching DB feature shape changed after admission; workers must drain");
   });
+  cache_->SetMatchingMatchValidator(
+      [resources = resources_](Database& database, image_t a, image_t b) {
+        const auto actual = database.ReadMatchingMatchCount(a, b);
+        const auto found =
+            resources->inventory.stored_matches.find(ImagePairToPairId(a, b));
+        const auto admitted = found == resources->inventory.stored_matches.end()
+                                  ? 0
+                                  : found->second;
+        if (actual > admitted)
+          throw std::runtime_error(
+              "matching DB match shape changed after admission; workers must "
+              "drain");
+      });
   const auto persistent = resources_->inventory.HostPersistent(matching_options_, matchers_.size(), verifiers_.size());
   resources_->persistent_host = resources_->host->TryAcquire(persistent);
   LOG(INFO) << "Feature matching frozen logical host capacity: capacity_bytes=" << host_capacity

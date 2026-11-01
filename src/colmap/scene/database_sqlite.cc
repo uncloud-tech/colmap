@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "colmap/scene/database.h"
+#include "colmap/scene/database_blob.h"
 #include "colmap/util/endian.h"
 #include "colmap/util/string.h"
 #include "colmap/util/version.h"
 
 #include <sstream>
+#include <type_traits>
 
 #include <sqlite3.h>
 
@@ -147,6 +149,38 @@ MatrixType ReadStaticMatrixBlob(sqlite3_stmt* sql_stmt,
   return matrix;
 }
 
+// The same full-width checks serve LENGTH-only inventory and consumed BLOBs.
+// A stepped SQLite statement pins the values until reset, including allocation.
+struct DatabaseBlobShape {
+  int64_t rows, cols;
+  uint64_t bytes;
+};
+
+DatabaseBlobShape ReadDatabaseBlobShape(sqlite3_stmt* stmt,
+                                        int col,
+                                        bool metadata_only,
+                                        uint64_t scalar_bytes,
+                                        uint64_t max_index) {
+  THROW_CHECK_EQ(sqlite3_column_type(stmt, col), SQLITE_INTEGER);
+  THROW_CHECK_EQ(sqlite3_column_type(stmt, col + 1), SQLITE_INTEGER);
+  const auto rows = sqlite3_column_int64(stmt, col);
+  const auto cols = sqlite3_column_int64(stmt, col + 1);
+  int64_t bytes;
+  if (metadata_only) {
+    THROW_CHECK(sqlite3_column_int(stmt, col + 3));
+    const int type = sqlite3_column_type(stmt, col + 2);
+    THROW_CHECK(type == SQLITE_INTEGER || type == SQLITE_NULL);
+    bytes = sqlite3_column_int64(stmt, col + 2);
+  } else {
+    const int type = sqlite3_column_type(stmt, col + 2);
+    THROW_CHECK(type == SQLITE_BLOB || type == SQLITE_NULL);
+    bytes = sqlite3_column_bytes(stmt, col + 2);
+  }
+  THROW_CHECK_GE(bytes, 0);
+  ValidateDatabaseBlobShape(rows, cols, bytes, scalar_bytes, max_index);
+  return {rows, cols, static_cast<uint64_t>(bytes)};
+}
+
 template <typename MatrixType>
 MatrixType ReadDynamicMatrixBlob(sqlite3_stmt* sql_stmt,
                                  const int rc,
@@ -156,19 +190,26 @@ MatrixType ReadDynamicMatrixBlob(sqlite3_stmt* sql_stmt,
   MatrixType matrix;
 
   if (rc == SQLITE_ROW) {
-    const size_t rows =
-        static_cast<size_t>(sqlite3_column_int64(sql_stmt, col + 0));
-    const size_t cols =
-        static_cast<size_t>(sqlite3_column_int64(sql_stmt, col + 1));
-
-    THROW_CHECK_GE(rows, 0);
-    THROW_CHECK_GE(cols, 0);
-    matrix = MatrixType(rows, cols);
-
-    const size_t num_bytes =
-        static_cast<size_t>(sqlite3_column_bytes(sql_stmt, col + 2));
-    THROW_CHECK_EQ(matrix.size() * sizeof(typename MatrixType::Scalar),
-                   num_bytes);
+    const auto shape = ReadDatabaseBlobShape(
+        sql_stmt,
+        col,
+        false,
+        sizeof(typename MatrixType::Scalar),
+        std::numeric_limits<typename MatrixType::Index>::max());
+    if constexpr (MatrixType::RowsAtCompileTime != Eigen::Dynamic) {
+      THROW_CHECK_EQ(shape.rows, MatrixType::RowsAtCompileTime);
+    }
+    if constexpr (MatrixType::ColsAtCompileTime != Eigen::Dynamic) {
+      THROW_CHECK_EQ(shape.cols, MatrixType::ColsAtCompileTime);
+    }
+    if constexpr (std::is_same_v<MatrixType, FeatureKeypointsBlob>) {
+      if (shape.rows > 0)
+        THROW_CHECK(shape.cols == 2 || shape.cols == 4 || shape.cols == 6);
+    }
+    // No resize/allocation occurs until shape, representation and byte length
+    // from this exact consumed row have all been checked.
+    matrix = MatrixType(shape.rows, shape.cols);
+    const size_t num_bytes = shape.bytes;
 
     if (num_bytes > 0) {
       std::memcpy(reinterpret_cast<char*>(matrix.data()),
@@ -863,24 +904,36 @@ class SqliteDatabase : public Database {
     MatchingFeatureShape shape;
     for (const bool descriptors : {false, true}) {
       sqlite3_stmt* stmt = nullptr;
-      const char* sql = descriptors
-          ? "SELECT rows, cols, length(data), type FROM descriptors WHERE image_id=?;"
-          : "SELECT rows, cols, length(data) FROM keypoints WHERE image_id=?;";
+      const char* sql =
+          descriptors
+              ? "SELECT rows, cols, length(data), typeof(data) IN "
+                "('blob','null'), type FROM descriptors WHERE image_id=?;"
+              : "SELECT rows, cols, length(data), typeof(data) IN "
+                "('blob','null') FROM keypoints WHERE image_id=?;";
       SQLITE3_CALL(sqlite3_prepare_v2(database_, sql, -1, &stmt, nullptr));
       try {
         SQLITE3_CALL(sqlite3_bind_int64(stmt, 1, image_id));
         if (SQLITE3_CALL(sqlite3_step(stmt)) == SQLITE_ROW) {
-          uint64_t values[3];
-          for (int i = 0; i < 3; ++i) {
-            const auto value = sqlite3_column_int64(stmt, i);
-            if (value < 0) throw std::runtime_error("negative matching feature shape");
-            values[i] = static_cast<uint64_t>(value);
-          }
+          const auto checked = ReadDatabaseBlobShape(
+              stmt,
+              0,
+              true,
+              descriptors ? sizeof(uint8_t) : sizeof(float),
+              std::numeric_limits<int>::max());
+          const uint64_t values[] = {static_cast<uint64_t>(checked.rows),
+                                     static_cast<uint64_t>(checked.cols),
+                                     checked.bytes};
           if (descriptors) {
             shape.descriptor_rows = values[0];
             shape.descriptor_cols = values[1];
             shape.descriptor_bytes = values[2];
-            shape.type = static_cast<FeatureExtractorType>(sqlite3_column_int(stmt, 3));
+            if (sqlite3_column_type(stmt, 4) != SQLITE_NULL) {
+              THROW_CHECK_EQ(sqlite3_column_type(stmt, 4), SQLITE_INTEGER);
+              const auto type = sqlite3_column_int64(stmt, 4);
+              THROW_CHECK_GE(type, std::numeric_limits<int>::min());
+              THROW_CHECK_LE(type, std::numeric_limits<int>::max());
+              shape.type = static_cast<FeatureExtractorType>(type);
+            }
           } else {
             shape.keypoint_rows = values[0];
             shape.keypoint_cols = values[1];
@@ -1002,12 +1055,45 @@ class SqliteDatabase : public Database {
       const image_pair_t pair_id = static_cast<image_pair_t>(
           sqlite3_column_int64(sql_stmt_read_num_matches_, 0));
 
-      const int rows =
-          static_cast<int>(sqlite3_column_int64(sql_stmt_read_num_matches_, 1));
-      num_matches.emplace_back(pair_id, rows);
+      const auto shape = ReadDatabaseBlobShape(sql_stmt_read_num_matches_,
+                                               1,
+                                               true,
+                                               sizeof(point2D_t),
+                                               std::numeric_limits<int>::max());
+      THROW_CHECK_EQ(shape.cols, 2);
+      if (shape.rows > 0)
+        num_matches.emplace_back(pair_id, static_cast<int>(shape.rows));
     }
 
     return num_matches;
+  }
+
+  uint64_t ReadMatchingMatchCount(image_t image_id1,
+                                  image_t image_id2) const override {
+    sqlite3_stmt* stmt = nullptr;
+    SQLITE3_CALL(sqlite3_prepare_v2(
+        database_,
+        "SELECT rows, cols, length(data), typeof(data) IN ('blob','null') "
+        "FROM matches WHERE pair_id=?;",
+        -1,
+        &stmt,
+        nullptr));
+    uint64_t rows = 0;
+    try {
+      SQLITE3_CALL(
+          sqlite3_bind_int64(stmt, 1, ImagePairToPairId(image_id1, image_id2)));
+      if (SQLITE3_CALL(sqlite3_step(stmt)) == SQLITE_ROW) {
+        const auto shape = ReadDatabaseBlobShape(
+            stmt, 0, true, sizeof(point2D_t), std::numeric_limits<int>::max());
+        THROW_CHECK_EQ(shape.cols, 2);
+        rows = shape.rows;
+      }
+    } catch (...) {
+      sqlite3_finalize(stmt);
+      throw;
+    }
+    SQLITE3_CALL(sqlite3_finalize(stmt));
+    return rows;
   }
 
   TwoViewGeometry ReadTwoViewGeometry(const image_t image_id1,
@@ -1899,8 +1985,10 @@ class SqliteDatabase : public Database {
                      &sql_stmt_read_matches_);
     prepare_sql_stmt("SELECT * FROM matches WHERE rows > 0;",
                      &sql_stmt_read_matches_all_);
-    prepare_sql_stmt("SELECT pair_id, rows FROM matches WHERE rows > 0;",
-                     &sql_stmt_read_num_matches_);
+    prepare_sql_stmt(
+        "SELECT pair_id, rows, cols, length(data), "
+        "typeof(data) IN ('blob','null') FROM matches;",
+        &sql_stmt_read_num_matches_);
     prepare_sql_stmt(
         "SELECT rows, cols, data, config, F, E, H, qvec, tvec, camera1, "
         "camera2 FROM two_view_geometries WHERE pair_id = ?;",

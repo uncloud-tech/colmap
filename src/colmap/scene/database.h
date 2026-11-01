@@ -152,6 +152,10 @@ class Database {
   // implementations refuse budgeted matching, never guess descriptor dtype.
   virtual MatchingFeatureShape ReadMatchingFeatureShape(image_t image_id) const;
 
+  // Validated full-width stored-match metadata, without loading the BLOB.
+  virtual uint64_t ReadMatchingMatchCount(image_t image_id1,
+                                          image_t image_id2) const;
+
   virtual FeatureKeypointsBlob ReadKeypointsBlob(image_t image_id) const = 0;
   virtual FeatureKeypoints ReadKeypoints(image_t image_id) const = 0;
   virtual FeatureDescriptors ReadDescriptors(image_t image_id) const = 0;

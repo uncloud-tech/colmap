@@ -20,7 +20,14 @@ FeatureMatcherCache::FeatureMatcherCache(
       std::make_unique<ThreadSafeLRUCache<image_t, FeatureKeypoints>>(
           cache_size_, [this](const image_t image_id) {
             std::lock_guard<std::mutex> lock(database_mutex_);
-            if (matching_shape_validator_) matching_shape_validator_(*database_, image_id);
+            // Keep metadata revalidation and the consumed BLOB in one SQLite
+            // snapshot; the process-local mutex alone cannot exclude writers
+            // using another database connection.
+            std::unique_ptr<DatabaseTransaction> snapshot;
+            if (matching_shape_validator_) {
+              snapshot = std::make_unique<DatabaseTransaction>(database_.get());
+              matching_shape_validator_(*database_, image_id);
+            }
             return std::make_shared<FeatureKeypoints>(
                 database_->ReadKeypoints(image_id));
           });
@@ -29,7 +36,14 @@ FeatureMatcherCache::FeatureMatcherCache(
       std::make_unique<ThreadSafeLRUCache<image_t, FeatureDescriptors>>(
           cache_size_, [this](const image_t image_id) {
             std::lock_guard<std::mutex> lock(database_mutex_);
-            if (matching_shape_validator_) matching_shape_validator_(*database_, image_id);
+            // Keep metadata revalidation and the consumed BLOB in one SQLite
+            // snapshot; the process-local mutex alone cannot exclude writers
+            // using another database connection.
+            std::unique_ptr<DatabaseTransaction> snapshot;
+            if (matching_shape_validator_) {
+              snapshot = std::make_unique<DatabaseTransaction>(database_.get());
+              matching_shape_validator_(*database_, image_id);
+            }
             return std::make_shared<FeatureDescriptors>(
                 database_->ReadDescriptors(image_id));
           });
@@ -94,6 +108,11 @@ std::shared_ptr<FeatureDescriptors> FeatureMatcherCache::GetDescriptors(
 FeatureMatches FeatureMatcherCache::GetMatches(const image_t image_id1,
                                                const image_t image_id2) {
   std::lock_guard<std::mutex> lock(database_mutex_);
+  std::unique_ptr<DatabaseTransaction> snapshot;
+  if (matching_match_validator_) {
+    snapshot = std::make_unique<DatabaseTransaction>(database_.get());
+    matching_match_validator_(*database_, image_id1, image_id2);
+  }
   return database_->ReadMatches(image_id1, image_id2);
 }
 

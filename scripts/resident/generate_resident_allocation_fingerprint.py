@@ -289,6 +289,7 @@ CLOSURE = (
     "src/colmap/scene/database.h",
     "src/colmap/scene/database.cc",
     "src/colmap/scene/database_sqlite.cc",
+    "src/colmap/scene/database_blob.h",
     "src/colmap/exe/feature.cc",
     "src/colmap/util/cuda.h",
     "src/colmap/util/cuda.cc",
