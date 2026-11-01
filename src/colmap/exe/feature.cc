@@ -118,8 +118,9 @@ int RunFeatureExtractor(int argc, char** argv) {
     app = std::make_unique<QApplication>(argc, argv);
   }
 
+  auto extraction_result = std::make_shared<FeatureExtractionResult>();
   auto feature_extractor = CreateFeatureExtractorController(
-      *options.database_path, reader_options, *options.feature_extraction);
+      *options.database_path, reader_options, *options.feature_extraction, extraction_result);
 
   if (app != nullptr) {
     RunThreadWithOpenGLContext(feature_extractor.get());
@@ -128,6 +129,10 @@ int RunFeatureExtractor(int argc, char** argv) {
     feature_extractor->Wait();
   }
 
+  if (options.feature_extraction->host_budget_bytes) {
+    if (extraction_result->error) std::rethrow_exception(extraction_result->error);
+    if (!extraction_result->success) return EXIT_FAILURE;
+  }
   return EXIT_SUCCESS;
 }
 

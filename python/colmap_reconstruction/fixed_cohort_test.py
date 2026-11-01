@@ -224,7 +224,21 @@ class RefusalAndLifetimeTest(unittest.TestCase):
                         'src/colmap/scene/camera.cc',
                         'src/colmap/sensor/models/pinhole.h',
                         'src/colmap/sensor/bitmap.cc',
-                        'src/colmap/exe/image.cc'):
+                        'src/colmap/exe/image.cc',
+                        'src/colmap/controllers/extraction_resource.h',
+                        'src/colmap/controllers/feature_extraction.cc',
+                        'src/colmap/controllers/image_reader.cc',
+                        'src/colmap/feature/extractor.cc',
+                        'src/colmap/feature/sift.cc',
+                        'src/colmap/feature/types.h',
+                        'src/colmap/feature/utils.cc',
+                        'src/colmap/scene/database_sqlite.cc',
+                        'src/thirdparty/VLFeat/sift.c',
+                        'src/thirdparty/VLFeat/covdet.c',
+                        'src/thirdparty/SiftGPU/SiftPyramid.cpp',
+                        'src/thirdparty/SiftGPU/PyramidCU.cpp',
+                        'src/thirdparty/SiftGPU/ProgramCU.cu',
+                        'src/colmap/exe/feature.cc'):
             with self.subTest(changed=changed), tempfile.TemporaryDirectory(
                     prefix='cohort-source-', dir=self.root) as directory:
                 root = Path(directory)
@@ -385,7 +399,7 @@ class WorkspaceFixtureBindingTest(unittest.TestCase):
         self.assertIn('MakeWorkspaceFixture', header)
         self.assertIn('b.max_active_owners = 1', header)
         self.assertIn('b.max_active_owners = 2', header)
-        self.assertIn(tool['cpp']('90ffab1675dd924a86a947c454bbceb6de066bfa8f91eac5ad61a02fd043b351'), header)
+        self.assertIn(tool['cpp']('018b43584a2f9cd0a496375027aa893afc6455a5b5e32d3988bb253b9b6a2f6c'), header)
         self.assertIn('b.caller_inputs = {12288ULL,0ULL}', header)
         self.assertIn('b.host_outputs = {393216ULL,0ULL}', header)
         self.assertIn('b.snapshots = {0ULL,196608ULL}', header)

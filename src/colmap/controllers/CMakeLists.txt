@@ -11,6 +11,7 @@ COLMAP_ADD_LIBRARY(
         single_view_calibration.h single_view_calibration.cc
         hierarchical_pipeline.h hierarchical_pipeline.cc
         feature_extraction.h feature_extraction.cc
+        extraction_resource.h
         feature_matching.h feature_matching.cc
         feature_matching_utils.h feature_matching_utils.cc
         matcher_cache.h matcher_cache.cc
@@ -140,5 +141,11 @@ COLMAP_ADD_TEST(
 COLMAP_ADD_TEST(
     NAME reconstruction_input_summary_test
     SRCS reconstruction_input_summary_test.cc
+    LINK_LIBS colmap_controllers
+)
+
+COLMAP_ADD_TEST(
+    NAME extraction_resource_test
+    SRCS extraction_resource_test.cc
     LINK_LIBS colmap_controllers
 )

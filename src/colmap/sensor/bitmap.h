@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -109,7 +110,8 @@ class Bitmap {
             bool linearize_colorspace = false,
             int expected_width = 0,
             int expected_height = 0,
-            int expected_file_channels = 0);
+            int expected_file_channels = 0,
+            const std::function<void(int, int, int)>& admit_header = {});
 
   // Write bitmap to file at given path. Defaults to converting to sRGB
   // colorspace for file storage.
@@ -130,7 +132,8 @@ class Bitmap {
   // within the bound are left unchanged. Returns the scale factor that was
   // applied (1 if no rescaling was necessary).
   double Thumbnail(int max_image_size,
-                   RescaleFilter filter = RescaleFilter::kBilinear);
+                   RescaleFilter filter = RescaleFilter::kBilinear,
+                   bool preserve_single_pixel = false);
 
   // Rotate image by k * 90 degrees counter-clockwise.
   void Rot90(int k);

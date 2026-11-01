@@ -217,9 +217,18 @@ class Reconstruction:
     def prepare(self):
         a = self.args
         common = ['--database_path', self.workspace / 'database.db']
-        self.native('feature_extractor', *common, '--image_path', a.photos,
-            '--FeatureExtraction.max_image_size', '3200', '--FeatureExtraction.gpu_index', a.gpu_index,
-            '--FeatureExtraction.num_threads', a.threads)
+        phase_capacity = self.resources()['host']
+        previous_host_budget = self.process.host_budget_bytes
+        self.process.host_budget_bytes = phase_capacity
+        try:
+            self.native('feature_extractor', *common, '--image_path', a.photos,
+                '--FeatureExtraction.max_image_size', '3200', '--FeatureExtraction.gpu_index', a.gpu_index,
+                '--FeatureExtraction.num_threads', a.threads,
+                '--FeatureExtraction.host_budget_bytes', phase_capacity,
+                '--FeatureExtraction.policy_host_bytes', a.loader_scratch_host_bytes + a.process_host_bytes + a.unknown_host_bytes,
+                '--FeatureExtraction.reserve_host_bytes', a.reserve_host_bytes)
+        finally:
+            self.process.host_budget_bytes = previous_host_budget
         self.resources()
         self.native('exhaustive_matcher', *common, '--FeatureMatching.gpu_index', a.gpu_index,
             '--FeatureMatching.num_threads', a.threads)

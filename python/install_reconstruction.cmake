@@ -30,6 +30,11 @@ if(TESTS_ENABLED AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
             "${Python3_EXECUTABLE}" -m unittest
             colmap_reconstruction.reconstruction_test test_reconstruction)
     if(MVS_ENABLED)
+        add_test(NAME reconstruction/extraction_cli_test
+            COMMAND "${CMAKE_COMMAND}" -E env
+                "COLMAP_TEST_EXECUTABLE=$<TARGET_FILE:colmap_main>"
+                "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/python/tests/test_extraction_cli.py")
         add_test(NAME reconstruction/undistortion_cli_test
             COMMAND "${CMAKE_COMMAND}" -E env
                 "COLMAP_TEST_EXECUTABLE=$<TARGET_FILE:colmap_main>"

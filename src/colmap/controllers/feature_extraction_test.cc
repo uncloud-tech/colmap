@@ -24,6 +24,109 @@ Bitmap CreateTestBitmap() {
   return bitmap;
 }
 
+#if defined(COLMAP_MVS_ENABLED)
+TEST(CreateFeatureExtractorController, BudgetedHeterogeneousMatchesLegacy) {
+  const auto root = CreateTestDir();
+  const auto photos = root / "photos";
+  CreateDirIfNotExists(photos);
+  ASSERT_TRUE(CreateTestBitmap().Write(photos / "a.png"));
+  Bitmap small(1, 7, true);
+  small.Fill(BitmapColor<uint8_t>(40, 80, 120));
+  ASSERT_TRUE(small.Write(photos / "b.png"));
+  ImageReaderOptions reader;
+  reader.image_path = photos;
+  FeatureExtractionOptions options;
+  options.use_gpu = false;
+  options.num_threads = 2;
+  options.max_image_size = 64;
+  auto control = CreateFeatureExtractorController(root / "control.db", reader, options);
+  control->Start();
+  control->Wait();
+  options.host_budget_bytes = 32 * 1024 * 1024;
+  auto result = std::make_shared<FeatureExtractionResult>();
+  auto candidate = CreateFeatureExtractorController(root / "candidate.db", reader, options, result);
+  candidate->Start();
+  candidate->Wait();
+  ASSERT_TRUE(result->success);
+  ASSERT_FALSE(result->error);
+  auto a = Database::Open(root / "control.db");
+  auto b = Database::Open(root / "candidate.db");
+  ASSERT_EQ(a->ReadAllImages().size(), 2);
+  ASSERT_EQ(b->ReadAllImages().size(), 2);
+  for (const auto& image : a->ReadAllImages()) {
+    const auto other = b->ReadImageWithName(image.Name()).value();
+    EXPECT_EQ(a->ReadKeypoints(image.ImageId()), b->ReadKeypoints(other.ImageId()));
+    const auto desc_a = a->ReadDescriptors(image.ImageId());
+    const auto desc_b = b->ReadDescriptors(other.ImageId());
+    ASSERT_EQ(desc_a.data.rows(), desc_b.data.rows());
+    EXPECT_TRUE((desc_a.data.array() == desc_b.data.array()).all());
+  }
+}
+TEST(CreateFeatureExtractorController, BudgetedSingletonGrowthAndDecodeFailuresDrain) {
+  for (const uint64_t cap : {uint64_t{1}, uint64_t{51500}, uint64_t{32 * 1024 * 1024}}) {
+    const auto root = CreateTestDir();
+    const auto photos = root / "photos";
+    CreateDirIfNotExists(photos);
+    if (cap == 32 * 1024 * 1024) {
+      ASSERT_TRUE(CreateTestBitmap().Write(photos / "a.png"));
+      std::ofstream(photos / "z.png") << "not an image";
+    } else {
+      ASSERT_TRUE(CreateTestBitmap().Write(photos / "a.png"));
+    }
+    ImageReaderOptions reader;
+    reader.image_path = photos;
+    FeatureExtractionOptions options;
+    options.use_gpu = false;
+    options.num_threads = 2;
+    options.host_budget_bytes = cap;
+    auto result = std::make_shared<FeatureExtractionResult>();
+    auto controller = CreateFeatureExtractorController(root / "db", reader, options, result);
+    controller->Start();
+    controller->Wait();
+    EXPECT_FALSE(result->success);
+    EXPECT_TRUE(result->error);
+    auto db = Database::Open(root / "db");
+    if (cap == 32 * 1024 * 1024)
+      EXPECT_LE(db->ReadAllImages().size(), 1);  // Honest partial DB allowed.
+    else
+      EXPECT_TRUE(db->ReadAllImages().empty());
+  }
+}
+TEST(CreateFeatureExtractorController, BudgetedUnsupportedModesRefuse) {
+  const auto root = CreateTestDir();
+  ImageReaderOptions reader;
+  reader.image_path = root;
+  reader.mask_path = root;
+  FeatureExtractionOptions options;
+  options.use_gpu = false;
+  options.host_budget_bytes = 1024 * 1024;
+  EXPECT_THROW(CreateFeatureExtractorController(root / "db", reader, options), std::invalid_argument);
+  reader.mask_path.clear();
+  options.type = FeatureExtractorType::ALIKED_N16ROT;
+  EXPECT_THROW(CreateFeatureExtractorController(root / "db", reader, options), std::invalid_argument);
+}
+#endif
+
+TEST(ExtractionBitmap, SameHeaderAdmissionPrecedesPixelAllocation) {
+  const auto root = CreateTestDir();
+  Bitmap rgb(7, 1, true);
+  rgb.Fill(BitmapColor<uint8_t>(10, 20, 30));
+  ASSERT_TRUE(rgb.Write(root / "rgb.png"));
+  Bitmap bitmap;
+  bool admitted = false;
+  EXPECT_THROW(bitmap.Read(root / "rgb.png", false, false, 0, 0, 0,
+      [&](int w, int h, int channels) {
+        EXPECT_EQ(w, 7);
+        EXPECT_EQ(h, 1);
+        EXPECT_EQ(channels, 3);
+        EXPECT_TRUE(bitmap.IsEmpty());
+        admitted = true;
+        throw std::runtime_error("refuse before pixels");
+      }), std::runtime_error);
+  EXPECT_TRUE(admitted);
+  EXPECT_TRUE(bitmap.IsEmpty());
+}
+
 TEST(CreateFeatureExtractorController, Nominal) {
   const auto test_dir = CreateTestDir();
   const auto database_path = test_dir / "database.db";

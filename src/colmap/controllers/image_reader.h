@@ -84,7 +84,8 @@ class ImageReader {
               Image* image,
               PosePrior* pose_prior,
               Bitmap* bitmap,
-              Bitmap* mask);
+              Bitmap* mask,
+              const std::function<void(int, int, int)>& admit_header = {});
   size_t NextIndex() const;
   size_t NumImages() const;
 

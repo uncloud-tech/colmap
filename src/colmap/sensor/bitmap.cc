@@ -375,7 +375,8 @@ bool Bitmap::Read(const std::filesystem::path& path,
                   const bool linearize_colorspace,
                   const int expected_width,
                   const int expected_height,
-                  const int expected_file_channels) {
+                  const int expected_file_channels,
+                  const std::function<void(int, int, int)>& admit_header) {
   if (!ExistsFile(path)) {
     VLOG(3) << "Failed to read bitmap, because file does not exist";
     return false;
@@ -412,6 +413,13 @@ bool Bitmap::Read(const std::filesystem::path& path,
     THROW_CHECK_GE(image_spec.nchannels, 1);
     THROW_CHECK_LE(image_spec.nchannels, 4);
     THROW_CHECK(!linearize_colorspace);
+  }
+  if (admit_header) {
+    THROW_CHECK(image_spec.format == OIIO::TypeDesc::UINT8);
+    THROW_CHECK_EQ(image_spec.depth, 1);
+    THROW_CHECK(!image_spec.deep);
+    THROW_CHECK(!linearize_colorspace);
+    admit_header(image_spec.width, image_spec.height, image_spec.nchannels);
   }
   width_ = image_spec.width;
   height_ = image_spec.height;
@@ -565,7 +573,8 @@ void Bitmap::Rescale(const int new_width,
   SetImageData(new_width, new_height, std::move(new_data));
 }
 
-double Bitmap::Thumbnail(const int max_image_size, RescaleFilter filter) {
+double Bitmap::Thumbnail(const int max_image_size, RescaleFilter filter,
+                         bool preserve_single_pixel) {
   THROW_CHECK_GT(max_image_size, 0);
   if (width_ <= max_image_size && height_ <= max_image_size) {
     return 1.0;
@@ -573,8 +582,8 @@ double Bitmap::Thumbnail(const int max_image_size, RescaleFilter filter) {
   // Fit the down-sampled version exactly into the max dimensions.
   const double scale =
       static_cast<double>(max_image_size) / std::max(width_, height_);
-  Rescale(static_cast<int>(std::round(width_ * scale)),
-          static_cast<int>(std::round(height_ * scale)),
+  Rescale(std::max(preserve_single_pixel ? 1 : 0, static_cast<int>(std::round(width_ * scale))),
+          std::max(preserve_single_pixel ? 1 : 0, static_cast<int>(std::round(height_ * scale))),
           filter);
   return scale;
 }

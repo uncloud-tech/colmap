@@ -265,6 +265,70 @@ CLOSURE = (
     "src/colmap/exe/image.cc",
     # Main owns the signal state used to cancel and drain admitted workers.
     "src/colmap/exe/colmap.cc",
+    # Feature extraction: header admission, queue payload ownership, checked
+    # SIFT scratch/output growth, writer serialization and backend allocation
+    # implementations. Library workspace is policy UNKNOWN, not a certified
+    # bound; binding its source is NOT a physical memory model.
+    "src/colmap/controllers/feature_extraction.h",
+    "src/colmap/controllers/feature_extraction.cc",
+    "src/colmap/controllers/extraction_resource.h",
+    "src/colmap/controllers/image_reader.h",
+    "src/colmap/controllers/image_reader.cc",
+    "src/colmap/controllers/option_manager.h",
+    "src/colmap/controllers/option_manager.cc",
+    "src/colmap/feature/extractor.h",
+    "src/colmap/feature/extractor.cc",
+    "src/colmap/feature/sift.h",
+    "src/colmap/feature/sift.cc",
+    "src/colmap/feature/types.h",
+    "src/colmap/feature/types.cc",
+    "src/colmap/feature/utils.h",
+    "src/colmap/feature/utils.cc",
+    "src/colmap/scene/database.h",
+    "src/colmap/scene/database.cc",
+    "src/colmap/scene/database_sqlite.cc",
+    "src/colmap/exe/feature.cc",
+    "src/colmap/util/cuda.h",
+    "src/colmap/util/cuda.cc",
+    "src/colmap/util/opengl_utils.h",
+    "src/colmap/util/opengl_utils.cc",
+    "src/thirdparty/VLFeat/sift.h",
+    "src/thirdparty/VLFeat/sift.c",
+    "src/thirdparty/VLFeat/covdet.h",
+    "src/thirdparty/VLFeat/covdet.c",
+    "src/thirdparty/VLFeat/scalespace.h",
+    "src/thirdparty/VLFeat/scalespace.c",
+    "src/thirdparty/VLFeat/mathop.h",
+    "src/thirdparty/VLFeat/mathop.c",
+    "src/thirdparty/VLFeat/host.h",
+    "src/thirdparty/VLFeat/host.c",
+    "src/thirdparty/VLFeat/random.h",
+    "src/thirdparty/VLFeat/random.c",
+    "src/thirdparty/VLFeat/stringop.h",
+    "src/thirdparty/VLFeat/stringop.c",
+    "src/thirdparty/SiftGPU/FrameBufferObject.h",
+    "src/thirdparty/SiftGPU/FrameBufferObject.cpp",
+    "src/thirdparty/SiftGPU/GlobalUtil.h",
+    "src/thirdparty/SiftGPU/GlobalUtil.cpp",
+    "src/thirdparty/SiftGPU/GLTexImage.h",
+    "src/thirdparty/SiftGPU/GLTexImage.cpp",
+    "src/thirdparty/SiftGPU/ProgramGLSL.h",
+    "src/thirdparty/SiftGPU/ProgramGLSL.cpp",
+    "src/thirdparty/SiftGPU/ProgramGPU.h",
+    "src/thirdparty/SiftGPU/PyramidGL.h",
+    "src/thirdparty/SiftGPU/PyramidGL.cpp",
+    "src/thirdparty/SiftGPU/ShaderMan.h",
+    "src/thirdparty/SiftGPU/ShaderMan.cpp",
+    "src/thirdparty/SiftGPU/SiftGPU.h",
+    "src/thirdparty/SiftGPU/SiftGPU.cpp",
+    "src/thirdparty/SiftGPU/SiftPyramid.h",
+    "src/thirdparty/SiftGPU/SiftPyramid.cpp",
+    "src/thirdparty/SiftGPU/CuTexImage.h",
+    "src/thirdparty/SiftGPU/CuTexImage.cpp",
+    "src/thirdparty/SiftGPU/ProgramCU.cu",
+    "src/thirdparty/SiftGPU/ProgramCU.h",
+    "src/thirdparty/SiftGPU/PyramidCU.h",
+    "src/thirdparty/SiftGPU/PyramidCU.cpp",
     "scripts/resident/generate_resident_allocation_fingerprint.py",
 )
 
@@ -286,7 +350,7 @@ def check_entry(name: str) -> None:
             "closure entries must be repo-relative forward-slash paths: "
             f"{name!r}"
         )
-    if not name.endswith((".h", ".c", ".cc", ".cu", ".py")):
+    if not name.endswith((".h", ".c", ".cc", ".cpp", ".cu", ".py")):
         raise SystemExit(
             f"closure entries must be source or generator files: {name!r}"
         )

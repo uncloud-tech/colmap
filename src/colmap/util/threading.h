@@ -439,6 +439,8 @@ void JobQueue<T>::Clear() {
   std::unique_lock<std::mutex> lock(mutex_);
   std::queue<T> empty_jobs;
   std::swap(jobs_, empty_jobs);
+  empty_condition_.notify_all();
+  pop_condition_.notify_all();
 }
 
 }  // namespace colmap

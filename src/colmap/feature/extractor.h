@@ -5,6 +5,7 @@
 #include "colmap/feature/types.h"
 #include "colmap/sensor/bitmap.h"
 
+#include <functional>
 #include <memory>
 
 namespace colmap {
@@ -38,6 +39,17 @@ struct FeatureExtractionOptions : public FeatureExtractionTypeOptions {
   // If max_image_size is non-positive, the appropriate size is selected
   // automatically based on the extractor type.
   int max_image_size = -1;
+
+  // Optional logical host budget; zero preserves legacy behavior. Unknown
+  // decoder/library/device workspace is policy, NOT a physical-fit guarantee.
+  uint64_t host_budget_bytes = 0;
+  uint64_t policy_host_bytes = 0;
+  uint64_t reserve_host_bytes = 0;
+
+  // Internal worker callback. Charges before owned allocation; never waits.
+  // Conservative scratch credits retire with the image, after the writer.
+  std::function<void(uint64_t)> reserve_host_payload;
+  void ReserveHostPayload(uint64_t count, uint64_t element_size = 1) const;
 
   // Number of threads for feature extraction.
   int num_threads = -1;

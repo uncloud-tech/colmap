@@ -107,6 +107,25 @@ FeatureDescriptorsData TransformVLFeatToUBCFeatureDescriptors(
   return ubc_descriptors;
 }
 
+// Bounded mode uses explicit requested capacities. Charge the complete new
+// allocation BEFORE reserve while the old allocation remains live. Credits
+// intentionally retain retired scratch until writer retirement (conservative).
+// Allocator bookkeeping/rounding and library internals remain policy.
+template <typename T>
+void ReserveSiftVector(const FeatureExtractionOptions& options,
+                       std::vector<T>* values, size_t required) {
+  if (!options.reserve_host_payload || required <= values->capacity()) return;
+  if (values->capacity()) {
+    if (values->capacity() > std::numeric_limits<size_t>::max() / 2)
+      throw std::overflow_error("SIFT vector capacity overflow");
+    required = std::max(required, values->capacity() * 2);
+  }
+  options.ReserveHostPayload(required, sizeof(T));
+  values->reserve(required);
+  if (values->capacity() > required)
+    options.ReserveHostPayload(values->capacity() - required, sizeof(T));
+}
+
 class SiftCPUFeatureExtractor : public FeatureExtractor {
  public:
   using VlSiftType = std::unique_ptr<VlSiftFilt, void (*)(VlSiftFilt*)>;
@@ -157,6 +176,8 @@ class SiftCPUFeatureExtractor : public FeatureExtractor {
     while (true) {
       if (first_octave) {
         const std::vector<uint8_t>& data_uint8 = bitmap.RowMajorData();
+        if (!options_.host_budget_bytes)
+          options_.ReserveHostPayload(data_uint8.size(), sizeof(float));
         std::vector<float> data_float(data_uint8.size());
         for (size_t i = 0; i < data_uint8.size(); ++i) {
           data_float[i] = static_cast<float>(data_uint8[i]) / 255.0f;
@@ -184,6 +205,7 @@ class SiftCPUFeatureExtractor : public FeatureExtractor {
       // Extract features with different orientations per DOG level.
       size_t level_idx = 0;
       int prev_level = -1;
+      options_.ReserveHostPayload(kSiftDescriptorDim, sizeof(float) + sizeof(uint8_t));
       FeatureDescriptorsFloatData desc(1, kSiftDescriptorDim);
       for (int i = 0; i < num_keypoints; ++i) {
         if (vl_keypoints[i].is != prev_level) {
@@ -191,6 +213,7 @@ class SiftCPUFeatureExtractor : public FeatureExtractor {
             // Resize containers of previous DOG level.
             level_keypoints.back().resize(level_idx);
             if (descriptors != nullptr) {
+              options_.ReserveHostPayload(level_idx, kSiftDescriptorDim);
               level_descriptors.back().conservativeResize(level_idx,
                                                           kSiftDescriptorDim);
             }
@@ -198,6 +221,22 @@ class SiftCPUFeatureExtractor : public FeatureExtractor {
 
           // Add containers for new DOG level.
           level_idx = 0;
+          if (options_.reserve_host_payload) {
+            THROW_CHECK_LE(num_keypoints, std::numeric_limits<int>::max() /
+                                          options_.sift->max_num_orientations);
+            ReserveSiftVector(options_, &level_num_features, level_num_features.size() + 1);
+            ReserveSiftVector(options_, &level_keypoints, level_keypoints.size() + 1);
+            if (level_descriptors.size() == level_descriptors.capacity()) {
+              // Eigen matrix move/copy behavior is toolchain dependent. Cover
+              // a possible deep-copy relocation before growing the outer vector.
+              for (const auto& level : level_descriptors)
+                options_.ReserveHostPayload(level.size());
+            }
+            ReserveSiftVector(options_, &level_descriptors, level_descriptors.size() + 1);
+            options_.ReserveHostPayload(
+                static_cast<uint64_t>(options_.sift->max_num_orientations) * num_keypoints,
+                sizeof(FeatureKeypoint) + (descriptors ? kSiftDescriptorDim : 0));
+          }
           level_num_features.push_back(0);
           level_keypoints.emplace_back(options_.sift->max_num_orientations *
                                        num_keypoints);
@@ -258,6 +297,7 @@ class SiftCPUFeatureExtractor : public FeatureExtractor {
       // Resize containers for last DOG level in octave.
       level_keypoints.back().resize(level_idx);
       if (descriptors != nullptr) {
+        options_.ReserveHostPayload(level_idx, kSiftDescriptorDim);
         level_descriptors.back().conservativeResize(level_idx,
                                                     kSiftDescriptorDim);
       }
@@ -268,6 +308,15 @@ class SiftCPUFeatureExtractor : public FeatureExtractor {
     int num_features = 0;
     int num_features_with_orientations = 0;
     for (int i = level_keypoints.size() - 1; i >= 0; --i) {
+      if (options_.reserve_host_payload) {
+        THROW_CHECK_LE(
+            level_num_features[i],
+            static_cast<size_t>(std::numeric_limits<int>::max() - num_features));
+        THROW_CHECK_LE(
+            level_keypoints[i].size(),
+            static_cast<size_t>(std::numeric_limits<int>::max() -
+                                num_features_with_orientations));
+      }
       num_features += level_num_features[i];
       num_features_with_orientations += level_keypoints[i].size();
       if (num_features > options_.sift->max_num_features) {
@@ -279,6 +328,7 @@ class SiftCPUFeatureExtractor : public FeatureExtractor {
     // Extract the features to be kept.
     {
       size_t k = 0;
+      ReserveSiftVector(options_, keypoints, num_features_with_orientations);
       keypoints->resize(num_features_with_orientations);
       for (size_t i = first_level_to_keep; i < level_keypoints.size(); ++i) {
         for (size_t j = 0; j < level_keypoints[i].size(); ++j) {
@@ -291,6 +341,8 @@ class SiftCPUFeatureExtractor : public FeatureExtractor {
     // Compute the descriptors for the detected keypoints.
     if (descriptors != nullptr) {
       size_t k = 0;
+      // Output plus the subsequent VLFeat->UBC transform's separate matrix.
+      options_.ReserveHostPayload(num_features_with_orientations, 2 * kSiftDescriptorDim);
       descriptors->data.resize(num_features_with_orientations,
                                kSiftDescriptorDim);
       for (size_t i = first_level_to_keep; i < level_keypoints.size(); ++i) {
@@ -352,6 +404,8 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
 
     {
       const std::vector<uint8_t>& data_uint8 = bitmap.RowMajorData();
+      if (!options_.host_budget_bytes)
+        options_.ReserveHostPayload(data_uint8.size(), sizeof(float));
       std::vector<float> data_float(data_uint8.size());
       for (size_t i = 0; i < data_uint8.size(); ++i) {
         data_float[i] = static_cast<float>(data_uint8[i]) / 255.0f;
@@ -399,6 +453,7 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
       keypoint.a12 = features[i].frame.a12;
       keypoint.a21 = features[i].frame.a21;
       keypoint.a22 = features[i].frame.a22;
+      ReserveSiftVector(options_, keypoints, keypoints->size() + 1);
       keypoints->push_back(keypoint);
 
       const int octave_scale_idx =
@@ -415,6 +470,7 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
 
     // Compute the descriptors for the detected keypoints.
     if (descriptors != nullptr) {
+      options_.ReserveHostPayload(keypoints->size(), 2 * kSiftDescriptorDim);
       descriptors->data.resize(keypoints->size(), kSiftDescriptorDim);
 
       const size_t kPatchResolution = 15;
@@ -425,6 +481,8 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
       const double kSigma =
           kPatchRelativeExtent / (3.0 * (4 + 1) / 2) / kPatchStep;
 
+      options_.ReserveHostPayload(3 * kPatchSide * kPatchSide, sizeof(float));
+      options_.ReserveHostPayload(kSiftDescriptorDim);
       std::vector<float> patch(kPatchSide * kPatchSide);
       std::vector<float> patchXY(2 * kPatchSide * kPatchSide);
 
@@ -439,6 +497,8 @@ class CovariantSiftCPUFeatureExtractor : public FeatureExtractor {
         dsp_num_scales = options_.sift->dsp_num_scales;
       }
 
+      options_.ReserveHostPayload(static_cast<uint64_t>(dsp_num_scales) + 1,
+                                  kSiftDescriptorDim * sizeof(float));
       FeatureDescriptorsFloatData descriptor(1, kSiftDescriptorDim);
       FeatureDescriptorsFloatData scaled_descriptors(dsp_num_scales,
                                                      kSiftDescriptorDim);
@@ -676,21 +736,29 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
 
     const size_t num_features = static_cast<size_t>(sift_gpu_.GetFeatureNum());
 
-    keypoints_buffer_.resize(num_features);
+    // A bounded job must not release credits while a worker retains capacity.
+    // Keep legacy reuse unchanged; bounded download storage is truly job-local.
+    std::vector<SiftKeypoint> job_keypoints;
+    auto& download_keypoints = options_.reserve_host_payload ? job_keypoints : keypoints_buffer_;
+    ReserveSiftVector(options_, &download_keypoints, num_features);
+    options_.ReserveHostPayload(
+        num_features, kSiftDescriptorDim * (sizeof(float) + sizeof(uint8_t)));
+    ReserveSiftVector(options_, keypoints, num_features);
+    download_keypoints.resize(num_features);
 
     FeatureDescriptorsFloatData descriptors_float(num_features,
                                                   kSiftDescriptorDim);
 
     // Download the extracted keypoints and descriptors.
-    sift_gpu_.GetFeatureVector(keypoints_buffer_.data(),
+    sift_gpu_.GetFeatureVector(download_keypoints.data(),
                                descriptors_float.data());
 
     keypoints->resize(num_features);
     for (size_t i = 0; i < num_features; ++i) {
-      (*keypoints)[i] = FeatureKeypoint(keypoints_buffer_[i].x,
-                                        keypoints_buffer_[i].y,
-                                        keypoints_buffer_[i].s,
-                                        keypoints_buffer_[i].o);
+      (*keypoints)[i] = FeatureKeypoint(download_keypoints[i].x,
+                                        download_keypoints[i].y,
+                                        download_keypoints[i].s,
+                                        download_keypoints[i].o);
     }
 
     // Save and normalize the descriptors.
