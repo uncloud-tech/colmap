@@ -148,6 +148,124 @@ TEST(MappingTrackOwnership, UnbudgetedAssignmentKeepsLegacyCapacityReuse) {
   EXPECT_EQ(ledger->Used(), 0);
 }
 
+TEST(MappingTrackOwnership, CrossLedgerCopyAndMoveConserveOwners) {
+  auto source_ledger = std::make_shared<MappingLedger>(4096, 0, 0);
+  auto destination_ledger = std::make_shared<MappingLedger>(4096, 0, 0);
+  {
+    Track source(source_ledger);
+    source.Reserve(4);
+    source.AddElement(1, 0);
+    source.AddElement(1, 1);
+    {
+      Track destination(destination_ledger);
+      destination.Reserve(8);
+      destination.AddElement(2, 0);
+      EXPECT_EQ(source_ledger->Used(), 4 * sizeof(TrackElement));
+      EXPECT_EQ(destination_ledger->Used(), 8 * sizeof(TrackElement));
+      destination = source;
+      EXPECT_EQ(destination, source);
+      EXPECT_EQ(source_ledger->Used(), 6 * sizeof(TrackElement));
+      EXPECT_EQ(destination_ledger->Used(), 0);
+      {
+        FailAllocation fail(0);
+        destination = std::move(source);
+      }
+      EXPECT_EQ(destination.Length(), 2);
+      EXPECT_EQ(destination.Element(0), TrackElement(1, 0));
+      EXPECT_EQ(destination.Element(1), TrackElement(1, 1));
+      EXPECT_EQ(source_ledger->Used(), 4 * sizeof(TrackElement));
+      EXPECT_EQ(destination_ledger->Used(), 0);
+    }
+    EXPECT_EQ(source_ledger->Used(), 0);
+  }
+  EXPECT_EQ(source_ledger->Used(), 0);
+  EXPECT_EQ(destination_ledger->Used(), 0);
+}
+
+TEST(MappingTrackOwnership, CrossLedgerRefusalPreservesBothOwners) {
+  // Source storage fits, but a second independent copy on that ledger cannot.
+  auto source_ledger = std::make_shared<MappingLedger>(17, 0, 0);
+  auto destination_ledger = std::make_shared<MappingLedger>(4096, 0, 0);
+  {
+    Track source(source_ledger);
+    source.Reserve(2);
+    source.AddElement(1, 0);
+    source.AddElement(1, 1);
+    Track destination(destination_ledger);
+    destination.Reserve(4);
+    destination.AddElement(2, 3);
+    const auto* source_storage = source.Elements().data();
+    const auto* destination_storage = destination.Elements().data();
+    EXPECT_THROW(destination = source, std::runtime_error);
+    EXPECT_EQ(source.Length(), 2);
+    EXPECT_EQ(source.Element(0), TrackElement(1, 0));
+    EXPECT_EQ(source.Element(1), TrackElement(1, 1));
+    EXPECT_EQ(destination.Length(), 1);
+    EXPECT_EQ(destination.Element(0), TrackElement(2, 3));
+    EXPECT_EQ(source.Elements().data(), source_storage);
+    EXPECT_EQ(destination.Elements().data(), destination_storage);
+    EXPECT_EQ(source_ledger->Used(), 2 * sizeof(TrackElement));
+    EXPECT_EQ(destination_ledger->Used(), 4 * sizeof(TrackElement));
+    // Move needs no new admission even though source's ledger is saturated.
+    {
+      FailAllocation fail(0);
+      destination = std::move(source);
+    }
+    EXPECT_EQ(destination.Elements().data(), source_storage);
+    EXPECT_EQ(destination.Length(), 2);
+    EXPECT_EQ(source_ledger->Used(), 2 * sizeof(TrackElement));
+    EXPECT_EQ(destination_ledger->Used(), 0);
+  }
+  EXPECT_EQ(source_ledger->Used(), 0);
+  EXPECT_EQ(destination_ledger->Used(), 0);
+}
+
+TEST(MappingTrackOwnership, UnbudgetedSourceAssignmentRetiresDestinationCredit) {
+  auto ledger = std::make_shared<MappingLedger>(4096, 0, 0);
+  Track source;
+  source.AddElement(1, 0);
+  source.AddElement(1, 1);
+  Track destination(ledger);
+  destination.Reserve(4);
+  destination.AddElement(2, 3);
+  const auto* original_storage = destination.Elements().data();
+  int failures = 0;
+  bool succeeded = false;
+  for (int index = 0; index < 32 && !succeeded; ++index) {
+    try {
+      FailAllocation fail(index);
+      destination = source;
+      succeeded = true;
+    } catch (const std::bad_alloc&) {
+      ++failures;
+    }
+    EXPECT_EQ(source.Length(), 2);
+    EXPECT_EQ(source.Element(0), TrackElement(1, 0));
+    EXPECT_EQ(source.Element(1), TrackElement(1, 1));
+    if (!succeeded) {
+      EXPECT_EQ(destination.Length(), 1);
+      EXPECT_EQ(destination.Element(0), TrackElement(2, 3));
+      EXPECT_EQ(destination.Elements().data(), original_storage);
+      EXPECT_EQ(ledger->Used(), 4 * sizeof(TrackElement));
+    }
+  }
+  ASSERT_TRUE(succeeded);
+  EXPECT_GE(failures, 1);
+  EXPECT_EQ(destination, source);
+  EXPECT_EQ(ledger->Used(), 0);
+  Track move_destination(ledger);
+  move_destination.Reserve(4);
+  move_destination.AddElement(4, 5);
+  const auto* source_storage = source.Elements().data();
+  {
+    FailAllocation fail(0);
+    move_destination = std::move(source);
+  }
+  EXPECT_EQ(move_destination, destination);
+  EXPECT_EQ(move_destination.Elements().data(), source_storage);
+  EXPECT_EQ(ledger->Used(), 0);
+}
+
 TEST(MappingTrackOwnership, GrowthOverlapRefusesWithoutChangingTrack) {
   // Final 24 bytes fit, but old 16 + replacement 24 do not (one 3% margin).
   auto ledger = std::make_shared<MappingLedger>(33, 0, 0);
@@ -456,6 +574,64 @@ TEST(MappingModelOwnership, AllocationFailuresRollBackCloneAndAssignment) {
   ASSERT_TRUE(succeeded);
   EXPECT_GT(failures, 2);
   ExpectSameModel(destination, *fixture.model);
+}
+
+TEST(MappingModelOwnership, AllocationFailureRetainsBudgetedDestinationOwner) {
+  OwnedModel source;
+  OwnedModel destination;
+  const auto before_snapshot = destination.ledger->Used();
+  auto original = std::make_unique<Reconstruction>(*destination.model);
+  const auto snapshot_credit = destination.ledger->Used() - before_snapshot;
+  const auto old_used = destination.ledger->Used();
+  const auto source_used = source.ledger->Used();
+  const auto image_id = destination.model->Images().begin()->first;
+  const auto& old_image = destination.model->Image(image_id);
+  const auto* image_address = &old_image;
+  const auto* frame_address = old_image.FramePtr();
+  const auto* camera_address = old_image.CameraPtr();
+  const auto* rig_address = frame_address->RigPtr();
+  const auto point_id = destination.model->Points3D().begin()->first;
+  const auto* point_address = &destination.model->Point3D(point_id);
+  const auto* track_storage = point_address->track.Elements().data();
+  int failures = 0;
+  bool succeeded = false;
+  for (int index = 0; index < 512 && !succeeded; ++index) {
+    try {
+      FailAllocation fail(index);
+      *destination.model = *source.model;
+      succeeded = true;
+    } catch (const std::bad_alloc&) {
+      ++failures;
+    }
+    if (!succeeded) {
+      ExpectSameModel(*destination.model, *original);
+      EXPECT_EQ(destination.model->MappingBudget(), destination.ledger);
+      EXPECT_EQ(destination.ledger->Used(), old_used);
+      EXPECT_EQ(source.ledger->Used(), source_used);
+      EXPECT_EQ(&destination.model->Image(image_id), image_address);
+      EXPECT_EQ(destination.model->Image(image_id).FramePtr(), frame_address);
+      EXPECT_EQ(destination.model->Image(image_id).CameraPtr(), camera_address);
+      EXPECT_EQ(destination.model->Image(image_id).FramePtr()->RigPtr(),
+                rig_address);
+      EXPECT_EQ(&destination.model->Point3D(point_id), point_address);
+      EXPECT_EQ(destination.model->Point3D(point_id).track.Elements().data(),
+                track_storage);
+    }
+    ExpectBoundPointers(*destination.model);
+    ExpectBoundPointers(*source.model);
+  }
+  ASSERT_TRUE(succeeded);
+  EXPECT_GT(failures, 2);
+  EXPECT_EQ(destination.model->MappingBudget(), source.ledger);
+  ExpectSameModel(*destination.model, *source.model);
+  EXPECT_GT(source.ledger->Used(), source_used);
+  destination.cache.reset();
+  destination.database.reset();
+  EXPECT_EQ(destination.ledger->Used(), snapshot_credit);
+  original.reset();
+  EXPECT_EQ(destination.ledger->Used(), 0);
+  destination.model.reset();
+  EXPECT_EQ(source.ledger->Used(), source_used);
 }
 
 TEST(MappingObservationOwnership, RefusalBeforeImageLinkKeepsStatistics) {
