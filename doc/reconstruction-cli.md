@@ -12,6 +12,39 @@ Supported experimental invocation (no internal byte declarations required):
 colmap-reconstruct --experimental-local --photos /data/photos --workspace /data/new-run
 ```
 
+Before any reconstruction or requested-workspace creation, this inspects inputs,
+queries the selected native GPU/resources and displays the effective pipeline,
+resolution semantics, options, output path and conservative policy. On a terminal,
+type **yes** to approve; **no**, Enter or EOF refuses without reconstruction.
+`--experimental-local` consents only to engineering estimates, **not** to running.
+
+```sh
+# Inspect only; never create the requested workspace/DB/sparse/maps:
+colmap-reconstruct --experimental-local --plan-only --photos /data/photos --workspace /data/new-run
+# Explicit noninteractive plan approval (piped answers are not accepted):
+colmap-reconstruct --experimental-local --yes --photos /data/photos --workspace /data/new-run
+```
+
+Preview queries use an owned temporary directory, cleaned on completion,
+rejection, failure, timeout or handled cancellation. The workspace and temporary
+query directory must be outside the photo tree. A CPU-only build or unavailable
+CUDA device query reports **plan unavailable**, not a runnable GPU plan or CPU
+fallback. Native query diagnostics are printed before temporary logs are removed.
+
+Approval binds executable SHA256, input bytes/inventory/resolved targets and
+selected options. Changed inputs/executable refuse before workspace creation;
+rerun to review and approve a fresh plan. GPU UUID is checked at existing native
+resource boundaries. Inputs must remain immutable throughout execution: this is
+not a sandbox or protection against concurrent hostile writes. FREE is a racy
+snapshot, not reserved capacity; it is reobserved at native boundaries without
+asking again for insignificant fluctuations. Insufficient capacity refuses,
+without changing quality or falling back. Runtime and whole-pipeline physical
+fit remain **UNKNOWN**. Actual post-SfM geometry, depths, source graph and remaining
+native dense options resolve later under the displayed contract, not a fabricated
+final dense plan before SfM. Native CPU model/CUDA name/total/SM are not exported
+by this query and are explicitly UNKNOWN; selected threads/GPU are not inferred
+optimal hardware settings.
+
 This selects `experimental-stereo-v1` conservative allowances for its supported
 native allocation binding. This is **not** whole-pipeline physical-fit or
 arbitrary-scene qualification. Unsupported/stale bindings explain the refusal;
@@ -75,8 +108,8 @@ use `max_image_size=-1`, without another resize. Original/working dimensions and
 these semantics are displayed before extraction in `planning/resolution-intent.json`;
 `planning/photos.json` retains the native inventory. After SfM/undistortion,
 `planning/resolution-effective.json` and stderr report actual native dense image
-dimensions consumed by PHOTO/GEO and fusion. This is disclosure, **not** a
-complete plan/approval/reapproval workflow (still pending).
+dimensions consumed by PHOTO/GEO and fusion. This later geometric resolution is
+anticipated in the approved preview; it is not an unrequested resource resize.
 
 Samples/seed/source cap/cache/lookahead/tile/GPU are explicit CLI options
 (`--help`); existing native command defaults are unchanged.

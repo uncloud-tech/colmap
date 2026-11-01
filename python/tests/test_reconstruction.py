@@ -23,6 +23,7 @@ class ReconstructionTest(unittest.TestCase):
         # Some CI hosts mount /tmp noexec; use an executable sibling directory.
         with tempfile.TemporaryDirectory(dir=root.parent) as directory:
             temp = Path(directory)
+            (temp / 'photos').mkdir()
             # Install rules are generated without configuring/building pycolmap.
             configured = subprocess.run(['cmake', '-S', str(root / 'python/tests/cmake_fixture'),
                 '-B', str(temp / 'build'), '-DPRODUCT_ROOT=' + str(root),
@@ -37,7 +38,7 @@ class ReconstructionTest(unittest.TestCase):
             self.assertIn('--workspace', result.stdout)
             if os.geteuid() == 0:
                 refused = subprocess.run([str(temp / 'prefix/bin/colmap-reconstruct'),
-                    '--experimental-local', '--photos', str(temp), '--workspace', str(temp / 'root-refused'),
+                    '--experimental-local', '--yes', '--photos', str(temp / 'photos'), '--workspace', str(temp / 'root-refused'),
                     *allowances()], cwd=temp, env=env, capture_output=True)
                 self.assertNotEqual(refused.returncode, 0)
                 self.assertFalse((temp / 'root-refused').exists())
@@ -59,7 +60,7 @@ class ReconstructionTest(unittest.TestCase):
                         'undistort-input': 'UNDISTORT_INPUT', 'undistort-worker': 'UNDISTORT_WORKER',
                         'undistort-unsupported': 'UNDISTORT_UNSUPPORTED'}[scenario]] = '1'
                 result = subprocess.run([str(temp / 'prefix/bin/colmap-reconstruct'),
-                    '--experimental-local', '--photos', str(temp), '--workspace', str(workspace),
+                    '--experimental-local', '--yes', '--photos', str(temp / 'photos'), '--workspace', str(workspace),
                     *(allowances() if scenario != 'defaults' else [])],
                     cwd=temp, env=scenario_env, capture_output=True, text=True)
                 if scenario in ('good', 'defaults'):
@@ -101,9 +102,12 @@ class ReconstructionTest(unittest.TestCase):
                 else:
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertFalse((workspace / 'result.json').exists())
+                if not workspace.exists():
+                    self.assertEqual(scenario, 'resources')
+                    continue  # Preview refusal must not create a workspace/failure record.
                 before = calls.read_bytes()
                 again = subprocess.run([str(temp / 'prefix/bin/colmap-reconstruct'),
-                    '--experimental-local', '--photos', str(temp), '--workspace', str(workspace),
+                    '--experimental-local', '--yes', '--photos', str(temp / 'photos'), '--workspace', str(workspace),
                     *allowances()], cwd=temp, env=scenario_env, capture_output=True)
                 self.assertNotEqual(again.returncode, 0)
                 self.assertEqual(calls.read_bytes(), before)
@@ -126,7 +130,7 @@ class ReconstructionTest(unittest.TestCase):
                 calls = root / 'calls.jsonl'
                 from unittest.mock import patch
                 with patch.dict(os.environ, {'FAKE_' + stage: '1', 'FAKE_CALLS': str(calls)}):
-                    status = main(['--experimental-local', '--photos', str(photos),
+                    status = main(['--experimental-local', '--yes', '--photos', str(photos),
                         '--workspace', str(root / 'output'), '--colmap', str(native), *allowances()])
                 self.assertEqual(status, 2)
                 self.assertEqual(original.read_bytes(), b'original fixture untouched')
@@ -162,6 +166,7 @@ class ReconstructionTest(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory(dir=root.parent) as directory:
             temp = Path(directory)
+            (temp / 'photos').mkdir()
             native = temp / 'colmap'
             shutil.copy(Path(__file__).with_name('fake_native.py'), native)
             native.chmod(0o755)
@@ -169,7 +174,7 @@ class ReconstructionTest(unittest.TestCase):
             calls = temp / 'calls.jsonl'
             env = dict(os.environ, PYTHONPATH=str(root / 'python'), FAKE_CALLS=str(calls))
             result = subprocess.run([sys.executable, '-m', 'colmap_reconstruction.cli',
-                '--colmap', str(native), '--experimental-local', '--photos', str(temp),
+                '--colmap', str(native), '--experimental-local', '--yes', '--photos', str(temp / 'photos'),
                 '--workspace', str(workspace), '--process-host-bytes', '123',
                 '--loader-scratch-host-bytes', '0',
                 '--host-budget-bytes', str(12 * 1024**3),
@@ -203,11 +208,12 @@ class ReconstructionTest(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == 'linux' and os.geteuid() != 0,
                          'Experimental local execution requires non-root Linux')
-    def test_wrong_shaped_native_json_records_failure_without_traceback(self) -> None:
+    def test_wrong_shaped_native_json_refuses_without_output_or_traceback(self) -> None:
         import shutil
         root = Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory(dir=root.parent) as directory:
             temp = Path(directory)
+            (temp / 'photos').mkdir()
             native = temp / 'colmap'
             shutil.copy(Path(__file__).with_name('fake_native.py'), native)
             native.chmod(0o755)
@@ -219,14 +225,12 @@ class ReconstructionTest(unittest.TestCase):
                     env = dict(os.environ, PYTHONPATH=str(root / 'python'),
                                FAKE_IDENTITY_JSON=json.dumps(identity))
                     result = subprocess.run([sys.executable, '-m', 'colmap_reconstruction.cli',
-                        '--colmap', str(native), '--experimental-local', '--photos', str(temp),
+                        '--colmap', str(native), '--experimental-local', '--yes', '--photos', str(temp / 'photos'),
                         '--workspace', str(workspace), *allowances()],
                         cwd=temp, env=env, capture_output=True, text=True)
                     self.assertEqual(result.returncode, 2, result.stderr)
-                    failure = json.loads((workspace / 'failure.json').read_text())
-                    self.assertEqual(failure['status'], 'failed')
-                    self.assertTrue(failure['reason'])
-                    self.assertIn('Reconstruction refused/failed: ' + failure['reason'], result.stderr)
+                    self.assertFalse(workspace.exists())
+                    self.assertIn('Reconstruction refused/failed:', result.stderr)
                     self.assertNotIn('Traceback', result.stderr)
                     self.assertFalse((workspace / 'result.json').exists())
 
@@ -237,6 +241,7 @@ class ReconstructionTest(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory(dir=root.parent) as directory:
             temp = Path(directory)
+            (temp / 'photos').mkdir()
             native = temp / 'colmap'
             shutil.copy(Path(__file__).with_name('fake_native.py'), native)
             native.chmod(0o755)
@@ -260,7 +265,7 @@ class ReconstructionTest(unittest.TestCase):
                     calls = temp / ('calls-%d.jsonl' % index)
                     env = dict(os.environ, PYTHONPATH=str(root / 'python'), FAKE_CALLS=str(calls), **extra_env)
                     result = subprocess.run([sys.executable, '-m', 'colmap_reconstruction.cli',
-                        '--colmap', str(native), '--experimental-local', '--photos', str(temp),
+                        '--colmap', str(native), '--experimental-local', '--yes', '--photos', str(temp / 'photos'),
                         '--workspace', str(workspace), *overrides],
                         cwd=temp, env=env, capture_output=True, text=True)
                     self.assertEqual(result.returncode, 2, result.stderr)
@@ -285,6 +290,7 @@ class ReconstructionTest(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory(dir=root.parent) as directory:
             temp = Path(directory)
+            (temp / 'photos').mkdir()
             native = temp / 'colmap'
             shutil.copy(Path(__file__).with_name('fake_native.py'), native)
             native.chmod(0o755)
@@ -299,7 +305,7 @@ class ReconstructionTest(unittest.TestCase):
                     calls = temp / (name + '.jsonl')
                     env = dict(os.environ, PYTHONPATH=str(root / 'python'), FAKE_CALLS=str(calls), **extra_env)
                     result = subprocess.run([sys.executable, '-m', 'colmap_reconstruction.cli',
-                        '--colmap', str(native), '--experimental-local', '--photos', str(temp),
+                        '--colmap', str(native), '--experimental-local', '--yes', '--photos', str(temp / 'photos'),
                         '--workspace', str(workspace), *overrides],
                         cwd=temp, env=env, capture_output=True, text=True)
                     if name == 'no-fit':
@@ -430,7 +436,7 @@ while True:
         with tempfile.TemporaryDirectory() as directory:
             photos = Path(directory) / 'photos'
             photos.mkdir()
-            args = ['--experimental-local', '--photos', str(photos),
+            args = ['--experimental-local', '--yes', '--photos', str(photos),
                     '--workspace', str(Path(directory) / 'new'),
                     '--host-budget-bytes', '1000', '--device-budget-bytes', '1000'] + allowances()
             self.assertEqual(main(args + ['--require-hard-memory-cap']), 2)
@@ -447,12 +453,13 @@ while True:
         import shutil
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[2].parent) as directory:
             temp = Path(directory)
+            (temp / 'photos').mkdir()
             native = temp / 'colmap'
             shutil.copy(Path(__file__).with_name('fake_native.py'), native)
             native.chmod(0o755)
             workspace = temp / 'output'
             workspace.mkdir()
-            args = ['--photos', str(temp), '--workspace', str(workspace),
+            args = ['--photos', str(temp / 'photos'), '--workspace', str(workspace),
                     '--host-budget-bytes', str(2**30), '--device-budget-bytes', str(2**30)] + allowances()
             if selection is not None:
                 args += ['--sparse-model', selection]

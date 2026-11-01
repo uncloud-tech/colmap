@@ -14,6 +14,8 @@ class MatchingAdmissionTest(unittest.TestCase):
         for previous, fail_matching in ((None, True), (12345, True), (None, False), (12345, False)):
             with self.subTest(previous=previous, fail_matching=fail_matching), tempfile.TemporaryDirectory() as directory:
                 reconstruction = Reconstruction.__new__(Reconstruction)
+                reconstruction.extraction_limit = 4004
+                reconstruction.extraction_image_list = []
                 reconstruction.workspace = Path(directory)
                 reconstruction.process = SimpleNamespace(host_budget_bytes=previous)
                 reconstruction.args = SimpleNamespace(photos=Path(directory), gpu_index='0', threads=2,
