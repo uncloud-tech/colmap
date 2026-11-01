@@ -111,7 +111,7 @@ class MatchingCliTest(unittest.TestCase):
                  (-1, 2, b'', 'unsupported database matrix dimensions'),
                  (1, -2, b'', 'unsupported database matrix dimensions'),
                  (2, 2, b'\0' * 8, 'shape/BLOB length mismatch'),
-                 (1.5, 2, b'\0' * 8, 'SQLITE_INTEGER'),
+                 (1.5, 2, b'\0' * 8, 'sqlite3_column_type'),
                  (1, 2, '12345678', 'sqlite3_column_int'))
         for index, (rows, cols, blob, error) in enumerate(cases):
             with self.subTest(rows=rows, cols=cols, blob_type=type(blob).__name__):
