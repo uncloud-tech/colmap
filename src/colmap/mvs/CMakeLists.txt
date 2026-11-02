@@ -643,14 +643,10 @@ endif()
 
 # Dependency-free topology/argument packing regression, including CUDA-off builds.
 if(TESTS_ENABLED)
-    add_executable(multi_gpu_phase_plan_cpu_test
-        multi_gpu_phase_plan.cc multi_gpu_phase_plan_test.cc)
-    target_include_directories(multi_gpu_phase_plan_cpu_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
-    target_compile_features(multi_gpu_phase_plan_cpu_test PRIVATE cxx_std_17)
-    target_compile_options(multi_gpu_phase_plan_cpu_test PRIVATE
-        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-UNDEBUG>
-        $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>)
-    add_test(NAME mvs/multi_gpu_phase_plan_test COMMAND multi_gpu_phase_plan_cpu_test)
+    COLMAP_ADD_TEST(
+        NAME multi_gpu_phase_plan_test
+        SRCS multi_gpu_phase_plan.cc multi_gpu_phase_plan_test.cc
+    )
     add_executable(owned_fixed_cohort_budget_test owned_fixed_cohort_budget_test.cc)
     target_include_directories(owned_fixed_cohort_budget_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
     target_compile_features(owned_fixed_cohort_budget_test PRIVATE cxx_std_17)
