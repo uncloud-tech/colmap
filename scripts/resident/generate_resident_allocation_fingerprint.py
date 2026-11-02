@@ -144,6 +144,7 @@ CLOSURE = (
     "src/colmap/mvs/owned_fixed_cohort_pipeline.h",
     "src/colmap/mvs/owned_fixed_cohort_pipeline.cu",
     "src/colmap/mvs/owned_fixed_cohort_validation.h",
+    "src/colmap/mvs/owned_inventory_cuda_driver.h",
     "src/colmap/mvs/owned_fixed_cohort_validation.cc",
     "src/colmap/mvs/owned_fixed_cohort_workspace.h",
     "src/colmap/mvs/owned_fixed_cohort_workspace.cc",

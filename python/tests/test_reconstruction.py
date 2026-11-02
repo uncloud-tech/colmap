@@ -67,8 +67,11 @@ class ReconstructionTest(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     report = json.loads((workspace / 'result.json').read_text())
                     self.assertEqual(report['backend'], 'experimental_fixed_cohort')
+                    self.assertEqual(report['device_selection']['ordinal'], 0)
+                    self.assertEqual(report['device_selection']['device_uuid'], 'GPU-synthetic')
+                    self.assertEqual(report['device_inventory'][0]['name'], 'Synthetic CUDA')
                     commands = [command for command, arguments in map(json.loads, calls.read_text().splitlines())
-                                if command != 'reconstruction_info' or not arguments]
+                                if command != 'reconstruction_info' or '--gpu_index' not in arguments]
                     if scenario == 'defaults':
                         policy = report['resource_policy']
                         self.assertEqual(policy['version'], 'experimental-stereo-v1')

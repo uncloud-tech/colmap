@@ -50,11 +50,15 @@ int RunReconstructionInfo(int argc, char** argv) {
         {"allocation_fingerprint",
          Json(std::string(mvs::kResidentAllocationFingerprint))}};
     if (argc != 1) {
-      if (argc != 5 || std::string(argv[1]) != "--gpu_index" ||
-          std::string(argv[3]) != "--deadline_seconds")
+      const bool inventory = argc == 3 &&
+                             std::string(argv[1]) == "--deadline_seconds";
+      if (!inventory &&
+          (argc != 5 || std::string(argv[1]) != "--gpu_index" ||
+           std::string(argv[3]) != "--deadline_seconds"))
         throw std::invalid_argument(
             "reconstruction_info accepts no arguments or "
-            "--gpu_index N --deadline_seconds N");
+            "--deadline_seconds N (visible inventory) or "
+            "--gpu_index N --deadline_seconds N (exact device)");
       const auto integer = [](const char* text) {
         int value;
         const auto end = text + std::char_traits<char>::length(text);
@@ -63,19 +67,41 @@ int RunReconstructionInfo(int argc, char** argv) {
           throw std::invalid_argument("invalid resource observation integer");
         return value;
       };
-      const int device = integer(argv[2]), seconds = integer(argv[4]);
+      const int seconds = integer(argv[inventory ? 2 : 4]);
       const auto deadline = mvs::NativeRunDeadline::FromBudget(
           std::chrono::seconds(seconds));
       mvs::NativeRunDeadlineGuard guard(deadline);
       // Same native FREE host/cgroup and CUDA observer as fixed-cohort
       // admission. This is only a pre-stage reserve sanity check, NOT an
       // SfM/fusion memory model, reservation or inferred process credit.
-      const auto observed = mvs::owned::ObserveFixedCohortCapacities(device);
-      fields.emplace_back("available_host_bytes",
-                          Json(std::to_string(observed.available.host)));
-      fields.emplace_back("available_device_bytes",
-                          Json(std::to_string(observed.available.device)));
-      fields.emplace_back("device_uuid", Json(observed.device_uuid));
+      if (inventory) {
+        std::vector<Json> devices;
+        for (const auto& device : mvs::owned::ObserveFixedCohortDevices(guard)) {
+          const auto& capacity = device.capacity;
+          devices.push_back(Json::Object({
+              {"ordinal", Json(capacity.device)},
+              {"device_uuid", Json(capacity.device_uuid)},
+              {"name", Json(capacity.device_name)},
+              {"compute_capability_major", Json(capacity.compute_capability_major)},
+              {"compute_capability_minor", Json(capacity.compute_capability_minor)},
+              {"total_device_bytes", Json(std::to_string(capacity.device_total))},
+              {"available_device_bytes",
+               device.usable ? Json(std::to_string(capacity.available.device))
+                             : Json()},
+              {"usable", Json(device.usable)},
+              {"reason", Json(device.reason)}}));
+        }
+        fields.emplace_back("device_inventory", Json::Array(devices));
+      } else {
+        const int device = integer(argv[2]);
+        const auto observed = mvs::owned::ObserveFixedCohortCapacities(device);
+        fields.emplace_back("available_host_bytes",
+                            Json(std::to_string(observed.available.host)));
+        fields.emplace_back("available_device_bytes",
+                            Json(std::to_string(observed.available.device)));
+        fields.emplace_back("device_uuid", Json(observed.device_uuid));
+        fields.emplace_back("device_ordinal", Json(observed.device));
+      }
       guard.Check();
     }
     std::cout << Json::Object(fields).Dump() << '\n';

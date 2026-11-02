@@ -10,8 +10,11 @@
 #include "colmap/mvs/patch_match_cuda_owned.h"
 #include "colmap/mvs/patch_match_execution.h"
 
+#include "colmap/mvs/owned_inventory_cuda_driver.h"
+
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <fstream>
 #include <iomanip>
 #include <iterator>
@@ -53,12 +56,101 @@ FixedCohortCapacityObservation ObserveFixedCohortCapacities(int device) {
   result.device_total = total;
   result.device = device;
   result.device_name = properties.name;
+  result.compute_capability_major = properties.major;
+  result.compute_capability_minor = properties.minor;
   std::ostringstream uuid;
   uuid << std::hex << std::setfill('0');
   for (const auto byte : properties.uuid.bytes)
     uuid << std::setw(2)
          << static_cast<unsigned int>(static_cast<unsigned char>(byte));
   result.device_uuid = uuid.str();
+  return result;
+}
+
+std::vector<FixedCohortDeviceObservation> ObserveFixedCohortDevices(
+    const NativeRunDeadlineGuard& guard) {
+  guard.Check();
+  InventoryCudaDriver driver;
+  const auto init = driver.Lookup<decltype(&cuInit)>("cuInit");
+  const auto get_current = driver.Lookup<decltype(&cuCtxGetCurrent)>("cuCtxGetCurrent");
+  const auto set_current = driver.Lookup<decltype(&cuCtxSetCurrent)>("cuCtxSetCurrent");
+  const auto error_string = driver.Lookup<decltype(&cuGetErrorString)>("cuGetErrorString");
+  const auto driver_query = [error_string](CUresult status) {
+    if (status == CUDA_SUCCESS) return;
+    const char* reason = nullptr;
+    (void)error_string(status, &reason);
+    throw std::runtime_error(std::string("CUDA inventory context query/restore failed: ") +
+                             (reason ? reason : "unknown driver error"));
+  };
+  const auto initialized = init(0);
+  if (initialized == CUDA_ERROR_NO_DEVICE) return {};
+  driver_query(initialized);
+  // Capture before any Runtime API call can select/create a primary context.
+  // The current context may be non-primary or null; an ordinal is insufficient.
+  CUcontext previous = nullptr;
+  driver_query(get_current(&previous));
+  struct RestoreContext {
+    CUcontext context;
+    decltype(set_current) set;
+    bool restored = false;
+    CUresult Restore() {
+      const auto status = set(context);
+      restored = status == CUDA_SUCCESS;
+      return status;
+    }
+    ~RestoreContext() {
+      if (!restored) {
+        const auto status = Restore();
+        if (status != CUDA_SUCCESS)
+          std::fprintf(stderr,
+                       "CUDA inventory: context restoration failed during cleanup: %d\n",
+                       static_cast<int>(status));
+      }
+    }
+  } restore{previous, set_current};
+  int count = 0;
+  const auto status = cudaGetDeviceCount(&count);
+  if (status == cudaErrorNoDevice) {
+    driver_query(restore.Restore());
+    return {};
+  }
+  if (status != cudaSuccess)
+    throw std::runtime_error(std::string("CUDA visible inventory failed: ") +
+                             cudaGetErrorString(status));
+  if (count == 0) {
+    driver_query(restore.Restore());
+    return {};
+  }
+  std::vector<FixedCohortDeviceObservation> result;
+  for (int device = 0; device < count; ++device) {
+    guard.Check();
+    FixedCohortDeviceObservation observed;
+    observed.capacity.device = device;
+    // Retain metadata even when context/free-memory observation fails.
+    cudaDeviceProp properties{};
+    if (cudaGetDeviceProperties(&properties, device) == cudaSuccess) {
+      observed.capacity.device_name = properties.name;
+      observed.capacity.device_total = properties.totalGlobalMem;
+      observed.capacity.compute_capability_major = properties.major;
+      observed.capacity.compute_capability_minor = properties.minor;
+      std::ostringstream uuid;
+      uuid << std::hex << std::setfill('0');
+      for (const auto byte : properties.uuid.bytes)
+        uuid << std::setw(2)
+             << static_cast<unsigned int>(static_cast<unsigned char>(byte));
+      observed.capacity.device_uuid = uuid.str();
+    }
+    try {
+      observed.capacity = ObserveFixedCohortCapacities(device);
+      observed.usable = true;
+    } catch (const std::exception& error) {
+      observed.reason = error.what();
+      (void)cudaGetLastError();
+    }
+    guard.Check();
+    result.push_back(std::move(observed));
+  }
+  driver_query(restore.Restore());
   return result;
 }
 
