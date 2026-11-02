@@ -632,6 +632,7 @@ def bind_multi_gpu_plan(plan, graph, devices):
             raise ValueError('multi-GPU approved device identity changed')
         mapping = {}
         for group in groups:
+            previous_job = -1
             for cohort in group['cohorts']:
                 jobs = cohort['jobs']
                 if (not jobs or jobs != sorted(jobs) or type(cohort['active_owners']) is not int
@@ -640,6 +641,9 @@ def bind_multi_gpu_plan(plan, graph, devices):
                 for job in jobs:
                     if type(job) is not int or not 0 <= job < len(expected) or job in mapping:
                         raise ValueError('multi-GPU duplicate/invalid output writer')
+                    if job <= previous_job:
+                        raise ValueError('multi-GPU group input order changed across cohorts')
+                    previous_job = job
                     mapping[job] = str(group['ordinal'])
         if len(mapping) != len(expected):
             raise ValueError('multi-GPU incomplete reference coverage')

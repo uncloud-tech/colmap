@@ -56,6 +56,10 @@ FixedCohortResult RunMultiGpuFixedCohortPhotoGeo(
     const std::atomic<bool>* cancel = nullptr,
     // Diagnostic event seam; throwing cancels/drains the whole device set.
     // begin/output identify global jobs; joined uses device=-1/job=max(size_t).
+    // bank_ready reports one completed PHOTO bank construction/upload (payload
+    // bytes are that cohort's bank_raw.device, not predicted cross-cohort reuse).
+    // cohort_drained follows owner join AND bank destruction. Both cohort
+    // events identify the cohort by its first global job; no timing claim.
     std::function<void(bool, int, size_t, const char*)> observer = {});
 
 }  // namespace colmap::mvs::owned

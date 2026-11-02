@@ -158,6 +158,7 @@ FixedCohortResult RunMultiGpuFixedCohortPhotoGeo(
           workers.Check();
           check();
           bank = std::make_shared<ResidentGrayscaleBank>(host, device);
+          if (observer) observer(false, device, cohort.jobs.front(), "bank_ready");
         }
         const auto run = [&](size_t owner) {
           try {
@@ -225,7 +226,10 @@ FixedCohortResult RunMultiGpuFixedCohortPhotoGeo(
         RunRollingOwners(coordinator, run, [](size_t, const char*) {},
                          workers.OwnerThreadFactory());
         workers.Check();
-        // Solver owners joined; bank destroyed before next cohort allocation.
+        // Solver owners joined. Publish retirement only after the bank's
+        // actual destruction, never on cancellation's partial drain path.
+        bank.reset();
+        if (observer) observer(geo, device, cohort.jobs.front(), "cohort_drained");
       }
     }, MultiGpuWorkers::ThreadFactory{}, check);
     check();

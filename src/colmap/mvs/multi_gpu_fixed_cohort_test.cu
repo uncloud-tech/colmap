@@ -23,7 +23,7 @@ struct Fixture {
   std::vector<PhasePlanDevice> devices;
 };
 
-Fixture MakeFixture() {
+Fixture MakeFixture(size_t clusters = 1) {
   Fixture f;
   // Reference 2 sees only adjacent cameras. At Z=4, a 0.125 baseline
   // gives at most 1.791 degrees: no true plane point can pass the unchanged
@@ -35,13 +35,14 @@ Fixture MakeFixture() {
   static_assert(64 * kCameraBaseline / 4 == kPlaneDisparity);
   const float K[9] = {64, 0, 32, 0, 64, 24, 0, 0, 1};
   const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
-  for (int i = 0; i < 4; ++i) {
+  for (size_t i = 0; i < 4 * clusters; ++i) {
+    const int camera = i % 4;
     const int width = i % 2 ? 60 : 64, height = i % 2 ? 44 : 48;
-    const float T[3] = {-kCameraBaseline * i, 0, 0};
+    const float T[3] = {-kCameraBaseline * camera, 0, 0};
     f.images.emplace_back("plane-" + std::to_string(i), width, height, K, R, T);
     Bitmap bitmap(width, height, false);
     for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) {
-      uint32_t value = x + kPlaneDisparity * i + y * 101;
+      uint32_t value = x + kPlaneDisparity * camera + y * 101;
       value = (value ^ 61u) ^ (value >> 16);
       value *= 9u;
       value ^= value >> 4;
@@ -53,12 +54,16 @@ Fixture MakeFixture() {
     f.images.back().SetBitmap(std::move(bitmap));
     f.shapes.push_back({static_cast<uint64_t>(width), static_cast<uint64_t>(height)});
   }
-  const std::vector<int> order{3, 0, 2, 1};
+  std::vector<int> order;
+  for (size_t c = 0; c < clusters; ++c)
+    for (int camera : {3, 0, 2, 1}) order.push_back(4 * c + camera);
   std::vector<FixedCohortJobShape> jobs;
   for (size_t i = 0; i < order.size(); ++i) {
     FixedCohortReference ref;
     ref.reference_image_idx = order[i];
-    ref.photo_sources = {order[(i + 1) % 4], order[(i + 2) % 4], order[(i + 1) % 4]};
+    const size_t base = i / 4 * 4;
+    ref.photo_sources = {order[base + (i + 1) % 4], order[base + (i + 2) % 4],
+                         order[base + (i + 1) % 4]};
     ref.geo_sources = ref.photo_sources;
     auto& options = ref.photo_options;
     options.gpu_index = "0";
@@ -183,6 +188,137 @@ TEST(MultiGpuFixedCohort, TwoDevicePhotoGeoExactUniqueWritersAndBarrier) {
     }
     EXPECT_GT(valid, 0) << "all-filtered maps are not useful reconstruction proof";
   }
+}
+
+// The 16 independent copies retain the corrected plane, ordered duplicates,
+// filter=3 degrees, and original numerical options. More input identities, not
+// larger/resized images or changed arithmetic, force bank turnover.
+MultiGpuFixedCohortPlan TightCohortPlan(const Fixture& f) {
+  const auto full = PlanMultiGpuFixedCohort(f.shapes, f.refs, f.budget,
+                                           f.devices, 1ull << 30, 1);
+  uint64_t private_device = 0;
+  for (const auto& group : full.phases[1].groups)
+    for (const auto& cohort : group.cohorts)
+      private_device = std::max(private_device, cohort.private_peak_raw.device);
+  auto devices = f.devices;
+  for (auto& device : devices)
+    device.capacity_bytes = CheckedAdd(
+        MarginBytes(CheckedAdd(f.budget.process.device + f.budget.unknown.device,
+                               private_device)), f.budget.headroom_reserve.device);
+  return PlanMultiGpuFixedCohort(f.shapes, f.refs, f.budget, devices, 1ull << 30, 1);
+}
+
+TEST(MultiGpuFixedCohort, SequentialAdmittedBanksMatchSingleAndFullBankControls) {
+  int count = 0;
+  if (cudaGetDeviceCount(&count) != cudaSuccess || count < 2)
+    GTEST_SKIP() << "requires two actual visible CUDA devices";
+  cudaDeviceProp a{}, b{};
+  ASSERT_EQ(cudaGetDeviceProperties(&a, 0), cudaSuccess);
+  ASSERT_EQ(cudaGetDeviceProperties(&b, 1), cudaSuccess);
+  if (a.major != 8 || (a.minor != 6 && a.minor != 9) ||
+      a.major != b.major || a.minor != b.minor)
+    GTEST_SKIP() << "requires identical qualified sm86/89 devices";
+  auto f = MakeFixture(16);
+  const auto full = PlanMultiGpuFixedCohort(f.shapes, f.refs, f.budget,
+                                           f.devices, 1ull << 30, 1);
+  const auto tight = TightCohortPlan(f);
+  for (size_t d = 0; d < 2; ++d) {
+    ASSERT_EQ(full.phases[0].groups[d].cohorts.size(), 1);
+    ASSERT_GT(tight.phases[0].groups[d].cohorts.size(), 1);
+    // Full resident working set cannot fit THIS GPU's cap, independently of
+    // the other device or the ample invocation-wide host allowance.
+    EXPECT_GT(CheckedAdd(MarginBytes(full.phases[0].groups[d].peak_raw.device),
+                         tight.phases[0].groups[d].device.reserve_bytes),
+              tight.phases[0].groups[d].device.capacity_bytes);
+  }
+  std::atomic<bool> bank_live[2]{};
+  std::atomic<size_t> builds[2]{}, drains[2][2]{};
+  std::atomic<uint64_t> uploaded[2]{};
+  std::atomic<int> begins[2][64]{}, outputs[2][64]{};
+  std::atomic<bool> photo_joined{false};
+  const auto result = RunMultiGpuFixedCohortPhotoGeo(f.images, f.refs, f.budget, tight,
+      NativeRunDeadline::FromBudget(std::chrono::seconds(300)), 32, nullptr,
+      [&](bool geo, int device, size_t job, const char* event) {
+        const std::string name(event);
+        if (name == "joined") {
+          for (size_t d = 0; d < 2; ++d) {
+            EXPECT_FALSE(bank_live[d].load());
+            EXPECT_EQ(drains[geo][d].load(), tight.phases[geo].groups[d].cohorts.size());
+          }
+          if (!geo) photo_joined = true;
+          return;
+        }
+        if (name == "bank_ready") {
+          EXPECT_FALSE(geo);
+          EXPECT_FALSE(bank_live[device].exchange(true));
+          ++builds[device];
+          for (const auto& cohort : tight.phases[0].groups[device].cohorts)
+            if (cohort.jobs.front() == job) uploaded[device] += cohort.bank_raw.device;
+        } else if (name == "cohort_drained") {
+          if (!geo) EXPECT_TRUE(bank_live[device].exchange(false));
+          const auto& cohort = tight.phases[geo].groups[device].cohorts.at(drains[geo][device]++);
+          EXPECT_EQ(job, cohort.jobs.front());
+          for (size_t member : cohort.jobs) EXPECT_EQ(outputs[geo][member].load(), 1);
+        } else if (name == "begin") {
+          if (!geo) EXPECT_TRUE(bank_live[device].load());
+          else EXPECT_TRUE(photo_joined.load());
+          ++begins[geo][job];
+        } else if (name == "output") ++outputs[geo][job];
+      });
+  for (size_t d = 0; d < 2; ++d) {
+    uint64_t expected_upload = 0;
+    for (const auto& cohort : tight.phases[0].groups[d].cohorts)
+      expected_upload += cohort.bank_raw.device;
+    EXPECT_EQ(builds[d].load(), tight.phases[0].groups[d].cohorts.size());
+    EXPECT_EQ(uploaded[d].load(), expected_upload);
+    std::cout << "CohortTurnover device=" << d << " actual_bank_builds=" << builds[d]
+              << " actual_upload_payload_bytes=" << uploaded[d] << std::endl;
+  }
+  const auto control = RunMultiGpuFixedCohortPhotoGeo(f.images, f.refs, f.budget, full,
+      NativeRunDeadline::FromBudget(std::chrono::seconds(300)), 32);
+  const auto single = RunFixedCohortPhotoGeo(f.images, f.refs, f.budget,
+      {1ull << 30, 256ull << 20}, NativeRunDeadline::FromBudget(std::chrono::seconds(300)),
+      PairDispatch::kSerial);
+  for (size_t job = 0; job < f.refs.size(); ++job) {
+    SCOPED_TRACE(job);
+    for (bool geo : {false, true}) {
+      EXPECT_EQ(begins[geo][job].load(), 1);
+      EXPECT_EQ(outputs[geo][job].load(), 1);
+    }
+    ExpectBits(single.photo[job], result.photo[job]);
+    ExpectBits(single.geo[job], result.geo[job]);
+    ExpectBits(control.photo[job], result.photo[job]);
+    ExpectBits(control.geo[job], result.geo[job]);
+    EXPECT_GT(PositiveDepthCount(result.geo[job]), 0);
+  }
+}
+
+TEST(MultiGpuFixedCohort, CancellationAtCohortRetirementStopsNewBanksAndDrains) {
+  int count = 0;
+  if (cudaGetDeviceCount(&count) != cudaSuccess || count < 2)
+    GTEST_SKIP() << "requires two actual visible CUDA devices";
+  auto f = MakeFixture(16);
+  const auto plan = TightCohortPlan(f);
+  for (bool request_cancel : {false, true}) {
+    std::atomic<bool> cancelled{false}, triggered{false};
+    std::atomic<size_t> builds[2]{};
+    EXPECT_THROW(RunMultiGpuFixedCohortPhotoGeo(f.images, f.refs, f.budget, plan,
+        NativeRunDeadline::FromBudget(std::chrono::seconds(300)), 32, &cancelled,
+        [&](bool geo, int device, size_t, const char* event) {
+          EXPECT_FALSE(geo);  // No GEO may consume a partially produced exchange.
+          if (std::string(event) == "bank_ready") ++builds[device];
+          if (device == 0 && std::string(event) == "cohort_drained" && !triggered.exchange(true)) {
+            if (request_cancel) cancelled = true;
+            else throw std::runtime_error("injected cohort retirement failure");
+          }
+        }), std::runtime_error);
+    EXPECT_TRUE(triggered.load());
+    EXPECT_EQ(builds[0].load(), 1);  // No second bank on the cancelling device.
+  }
+  // A fresh invocation succeeds after failed workers and banks have drained;
+  // no process-global cancellation latch or retained owner survives the call.
+  EXPECT_NO_THROW(RunMultiGpuFixedCohortPhotoGeo(f.images, f.refs, f.budget, plan,
+      NativeRunDeadline::FromBudget(std::chrono::seconds(300)), 32));
 }
 
 TEST(MultiGpuFixedCohort, ObserverFailureAndCancellationDrainAllDevicesWithoutResult) {

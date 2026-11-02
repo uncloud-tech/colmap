@@ -46,6 +46,64 @@ TEST(MultiGpuPhasePlan, AssignmentAndAffinity) {
   ASSERT_TRUE(again.groups[0].cohorts[0].jobs == p.groups[0].cohorts[0].jobs);
   ASSERT_TRUE(again.groups[1].cohorts[0].jobs == p.groups[1].cohorts[0].jobs);
 }
+TEST(MultiGpuPhasePlan, OverlapRichAffinityVersusBalancedSameOrderedWork) {
+  auto r = Fixture();
+  r.images = {{"a", 64, 48}, {"b", 64, 48}, {"c", 64, 48},
+              {"d", 64, 48}, {"e", 64, 48}, {"f", 64, 48}};
+  for (auto& device : r.devices) {
+    device.capacity_bytes = 100000;
+    device.host_share_raw = 100000;
+  }
+  r.host_capacity_bytes = 300000;
+  r.jobs.clear();
+  // Both schedules execute these exact jobs in input-relative order; each
+  // job reads an overlapping pair plus an ordered duplicate, not a new seed.
+  const std::vector<size_t> clusters{0, 3, 3, 0, 0, 3, 3, 0, 0, 3, 3, 0};
+  for (size_t i = 0; i < clusters.size(); ++i) {
+    const size_t base = clusters[i];
+    r.jobs.push_back({100 + i, (base + i % 3),
+                      {base + i % 3, base + (i + 1) % 3, base + i % 3},
+                      {30, 40}, 100});
+  }
+  const auto original = r.jobs;
+  const auto plan = BuildMultiGpuPhasePlan(r);
+  std::vector<std::vector<size_t>> balanced(2), affinity(2);
+  for (size_t i = 0; i < r.jobs.size(); ++i) balanced[i % 2].push_back(100 + i);
+  uint64_t planned_upload = 0;
+  for (size_t d = 0; d < 2; ++d) {
+    ASSERT_EQ(plan.groups[d].cohorts.size(), 1);
+    affinity[d] = plan.groups[d].cohorts[0].jobs;
+    EXPECT_EQ(plan.groups[d].assigned_work, 600);
+    EXPECT_EQ(affinity[d].size(), balanced[d].size());
+    EXPECT_TRUE(std::is_sorted(affinity[d].begin(), affinity[d].end()));
+    planned_upload += plan.groups[d].cohorts[0].bank_raw.device;
+  }
+  const auto union_bytes = [&](const auto& groups) {
+    uint64_t bytes = 0;
+    for (const auto& jobs : groups) {
+      std::vector<size_t> sources;
+      for (size_t id : jobs) {
+        const auto& job = original.at(id - 100);
+        sources.insert(sources.end(), job.sources.begin(), job.sources.end());
+      }
+      std::sort(sources.begin(), sources.end());
+      sources.erase(std::unique(sources.begin(), sources.end()), sources.end());
+      bytes += sources.size() * 64 * 48;
+    }
+    return bytes;
+  };
+  // Literal independent source unions: 3 layers/GPU vs 6 layers/GPU.
+  EXPECT_EQ(union_bytes(affinity), 18432);
+  EXPECT_EQ(planned_upload, 18432);
+  EXPECT_EQ(union_bytes(balanced), 36864);
+  for (size_t i = 0; i < r.jobs.size(); ++i) {
+    EXPECT_EQ(r.jobs[i].id, original[i].id);
+    EXPECT_EQ(r.jobs[i].reference, original[i].reference);
+    EXPECT_EQ(r.jobs[i].sources, original[i].sources);
+    EXPECT_EQ(r.jobs[i].work, original[i].work);
+  }
+  // These are predicted upload bytes and balanced work, not runtime evidence.
+}
 TEST(MultiGpuPhasePlan, AffinityDoesNotStarveUsefulDevices) {
   auto r = Fixture();
   r.jobs.resize(2);
@@ -81,6 +139,68 @@ TEST(MultiGpuPhasePlan, IndependentGeometryAndIdleDevices) {
   const auto all = BuildMultiGpuPhasePlan(r);
   ASSERT_TRUE((all.groups[0].cohorts[0].jobs == std::vector<size_t>{91, 62}));
   ASSERT_TRUE((all.groups[1].cohorts[0].jobs == std::vector<size_t>{17, 4}));
+}
+TEST(MultiGpuPhasePlan, NativeShapedBanksTurnOverUnderSeparateDeviceAndHostCaps) {
+  PhasePlanRequest r;
+  r.active_owners_ceiling = 1;
+  r.host_capacity_bytes = 1ull << 30;
+  r.common_host_raw = 6214656;  // 34 * 16 * (2*64*48 + 2*60*44).
+  r.devices = {{0, "first", 256ull << 20, 1ull << 20, 1ull << 29,
+                {32ull << 20, 32ull << 20}},
+               {1, "second", 256ull << 20, 1ull << 20, 1ull << 29,
+                {32ull << 20, 32ull << 20}}};
+  for (size_t i = 0; i < 64; ++i)
+    r.images.push_back({"image-" + std::to_string(i), i % 2 ? 60u : 64u,
+                        i % 2 ? 44u : 48u});
+  const size_t order[] = {3, 0, 2, 1};
+  for (size_t i = 0; i < 64; ++i) {
+    const size_t base = i / 4 * 4;
+    const size_t ref = base + order[i % 4];
+    // Independently worked native logical minima for three ordered sources.
+    r.jobs.push_back({i, ref,
+        {base + order[(i + 1) % 4], base + order[(i + 2) % 4], base + order[(i + 1) % 4]},
+        ref % 2 ? PhasePlanCharge{72576, 316940} : PhasePlanCharge{82944, 367484},
+        ref % 2 ? 10560u : 12288u});
+  }
+  const auto full = BuildMultiGpuPhasePlan(r);
+  for (bool host_limited : {false, true}) {
+    auto limited = r;
+    for (auto& device : limited.devices) {
+      if (host_limited) {
+        // Enough host for the GEO singleton (119808), but not the full
+        // PHOTO source union plus its private owner. VRAM stays ample.
+        device.host_share_raw = (32ull << 20) + 119808;
+      } else {
+        // ceil(1.03 * (32MiB + 450428 GEO private)) + 1MiB reserve.
+        device.capacity_bytes = 36073582;
+      }
+    }
+    const auto plan = BuildMultiGpuPhasePlan(limited);
+    uint64_t total_work = 0;
+    std::vector<size_t> all_jobs;
+    for (size_t d = 0; d < 2; ++d) {
+      SCOPED_TRACE(host_limited);
+      ASSERT_GT(plan.groups[d].cohorts.size(), 1);
+      ASSERT_EQ(full.groups[d].cohorts.size(), 1);
+      std::vector<size_t> assigned;
+      for (const auto& cohort : plan.groups[d].cohorts) {
+        EXPECT_EQ(cohort.active_owners, 1);
+        assigned.insert(assigned.end(), cohort.jobs.begin(), cohort.jobs.end());
+      }
+      EXPECT_TRUE(std::is_sorted(assigned.begin(), assigned.end()));
+      total_work += plan.groups[d].assigned_work;
+      all_jobs.insert(all_jobs.end(), assigned.begin(), assigned.end());
+      if (host_limited)
+        EXPECT_GT(full.groups[d].peak_raw.host, limited.devices[d].host_share_raw);
+      else
+        EXPECT_GT(full.groups[d].peak_raw.device, 34004860);
+    }
+    EXPECT_EQ(total_work, 731136);
+    std::sort(all_jobs.begin(), all_jobs.end());
+    ASSERT_EQ(all_jobs.size(), 64);
+    for (size_t i = 0; i < all_jobs.size(); ++i) EXPECT_EQ(all_jobs[i], i);
+    EXPECT_LE(plan.host_peak_raw, limited.host_capacity_bytes);
+  }
 }
 TEST(MultiGpuPhasePlan, CohortDrainingAndOwnerAdmission) {
   auto r = Fixture();

@@ -47,6 +47,27 @@ class MultiGpuBindingTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     bind_multi_gpu_plan(plan, graph, devices)
 
+    def test_cohort_turnover_preserves_group_input_order(self):
+        from colmap_reconstruction.cli import bind_multi_gpu_plan
+        devices, graph, plan = self.fixture()
+        for phase in graph['phases'].values():
+            phase['jobs'] += copy.deepcopy(phase['jobs'])
+        plan['scientific_inputs'] += copy.deepcopy(plan['scientific_inputs'])
+        for phase in plan['phases']:
+            for index, group in enumerate(phase['groups']):
+                group['cohorts'].append(dict(jobs=[index + 2], active_owners=1))
+        original = copy.deepcopy(graph)
+        assignments = bind_multi_gpu_plan(plan, graph, devices)
+        self.assertEqual(assignments['photo'], {0: '0', 2: '0', 1: '2', 3: '2'})
+        self.assertEqual(graph, original)
+        # Individually ordered cohorts are insufficient: a device must not run
+        # later input jobs before its earlier cohort's jobs.
+        for phase_index in (0, 1):
+            changed = copy.deepcopy(plan)
+            changed['phases'][phase_index]['groups'][0]['cohorts'].reverse()
+            with self.subTest(phase=phase_index), self.assertRaises(ValueError):
+                bind_multi_gpu_plan(changed, graph, devices)
+
     def test_dense_arguments_bind_approved_devices_and_frozen_host_cap(self):
         import sys
         import tempfile
