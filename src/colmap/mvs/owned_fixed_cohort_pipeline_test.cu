@@ -76,7 +76,18 @@ void CheckExactNonPrimaryAndNullContexts(int device_ordinal) {
   ASSERT_EQ(get_device(&device, device_ordinal), CUDA_SUCCESS);
   ASSERT_EQ(create(&cleanup.created, 0, device), CUDA_SUCCESS);
   if (device_ordinal == 1) {
-    const auto get_context_device = driver.Lookup<decltype(&cuCtxGetDevice)>("cuCtxGetDevice");
+    // CUDA 13 also provides a two-argument v2 ABI; retain the current-context
+    // one-argument ABI explicitly (PFN_cuCtxGetDevice_v2000).
+    using GetContextDevice = CUresult (CUDAAPI*)(CUdevice*);
+    void* get_context_device_address = nullptr;
+#if CUDART_VERSION >= 12050
+    ASSERT_EQ(cudaGetDriverEntryPointByVersion("cuCtxGetDevice", &get_context_device_address, 2000, 0),
+              cudaSuccess);
+#elif defined(__linux__)
+    get_context_device_address = dlsym(create_library.handle, "cuCtxGetDevice");
+#endif
+    ASSERT_NE(get_context_device_address, nullptr);
+    const auto get_context_device = reinterpret_cast<GetContextDevice>(get_context_device_address);
     CUdevice context_device;
     ASSERT_EQ(get_context_device(&context_device), CUDA_SUCCESS);
     EXPECT_EQ(context_device, device);
