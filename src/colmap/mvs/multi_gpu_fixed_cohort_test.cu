@@ -25,15 +25,23 @@ struct Fixture {
 
 Fixture MakeFixture() {
   Fixture f;
+  // Reference 2 sees only adjacent cameras. At Z=4, a 0.125 baseline
+  // gives at most 1.791 degrees: no true plane point can pass the unchanged
+  // 3-degree triangulation filter. A 0.25 baseline gives 3.576 degrees on
+  // each principal ray. Keep the rendered texture tied to the same geometry:
+  // f=64, Z=4 => disparity = f * baseline / Z = 4 pixels per camera.
+  constexpr float kCameraBaseline = 0.25f;
+  constexpr int kPlaneDisparity = 4;
+  static_assert(64 * kCameraBaseline / 4 == kPlaneDisparity);
   const float K[9] = {64, 0, 32, 0, 64, 24, 0, 0, 1};
   const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
   for (int i = 0; i < 4; ++i) {
     const int width = i % 2 ? 60 : 64, height = i % 2 ? 44 : 48;
-    const float T[3] = {-0.125f * i, 0, 0};
+    const float T[3] = {-kCameraBaseline * i, 0, 0};
     f.images.emplace_back("plane-" + std::to_string(i), width, height, K, R, T);
     Bitmap bitmap(width, height, false);
     for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) {
-      uint32_t value = x + 2 * i + y * 101;
+      uint32_t value = x + kPlaneDisparity * i + y * 101;
       value = (value ^ 61u) ^ (value >> 16);
       value *= 9u;
       value ^= value >> 4;
