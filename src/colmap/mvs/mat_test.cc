@@ -11,6 +11,7 @@
 #include <cstring>
 #include <exception>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -56,6 +57,74 @@ std::string FloatPayload(const size_t count) {
     }
   }
   return payload;
+}
+
+TEST_F(MatReadTest, WritesExactFloatBitsAndPlanarLayouts) {
+  // Independent wire oracle, including signed zero, finite normal/subnormal,
+  // infinities, and distinct quiet/signaling NaN payloads. Never assign these
+  // representations through floating-point arithmetic.
+  for (const size_t depth : {1, 3}) {
+    const std::string payload = FloatPayload(5 * 2 * depth);
+    Mat<float> mat(5, 2, depth);
+    for (size_t i = 0; i < mat.GetData().size(); ++i) {
+      uint32_t bits = 0;
+      for (size_t byte = 0; byte < sizeof(float); ++byte)
+        bits |= static_cast<uint32_t>(static_cast<unsigned char>(payload[i * 4 + byte]))
+                << (8 * byte);
+      std::memcpy(mat.GetPtr() + i, &bits, sizeof(bits));
+    }
+    mat.Write(path_);
+    std::ifstream file(path_, std::ios::binary);
+    const std::string bytes((std::istreambuf_iterator<char>(file)),
+                            std::istreambuf_iterator<char>());
+    EXPECT_EQ(bytes, "5&2&" + std::to_string(depth) + "&" + payload);
+    Mat<float> restored;
+    restored.Read(path_);
+    EXPECT_EQ(restored.GetWidth(), 5);
+    EXPECT_EQ(restored.GetHeight(), 2);
+    EXPECT_EQ(restored.GetDepth(), depth);
+    EXPECT_EQ(std::memcmp(restored.GetPtr(), mat.GetPtr(), mat.GetNumBytes()), 0);
+  }
+}
+
+TEST_F(MatReadTest, WriteChunkBoundariesMatchLegacyBytes) {
+  const size_t chunk_floats = 1024 * 1024 / sizeof(float);
+  for (const size_t width : {chunk_floats - 1, chunk_floats, chunk_floats + 1}) {
+    for (const size_t depth : {1, 3}) {
+      Mat<float> mat(width, 1, depth);
+      // Exact finite bit pattern; independent of either writer's byte loops.
+      const uint32_t bits = 0x3f812345;
+      for (size_t i = 0; i < mat.GetData().size(); ++i)
+        std::memcpy(mat.GetPtr() + i, &bits, sizeof(bits));
+      mat.Write(path_);
+      std::ifstream actual(path_, std::ios::binary);
+      std::ostringstream legacy;
+      SetFullPrecTextStream(legacy);
+      legacy << width << "&1&" << depth << "&";
+      WriteBinaryLittleEndian<float>(&legacy, {mat.GetPtr(), mat.GetData().size()});
+      const std::string bytes((std::istreambuf_iterator<char>(actual)),
+                              std::istreambuf_iterator<char>());
+      EXPECT_EQ(bytes, legacy.str());
+    }
+  }
+}
+
+TEST_F(MatReadTest, WritePreservesEmptyHeadersAndOpenFailure) {
+  for (const size_t width : {0, 2}) {
+    Mat<float> mat(width, 0, 3);
+    mat.Write(path_);
+    std::ifstream file(path_, std::ios::binary);
+    const std::string bytes((std::istreambuf_iterator<char>(file)),
+                            std::istreambuf_iterator<char>());
+    EXPECT_EQ(bytes, std::to_string(width) + "&0&3&");
+  }
+  Mat<float> empty;
+  empty.Write(path_);
+  std::ifstream file(path_, std::ios::binary);
+  const std::string bytes((std::istreambuf_iterator<char>(file)),
+                          std::istreambuf_iterator<char>());
+  EXPECT_EQ(bytes, "0&0&0&");
+  EXPECT_THROW(empty.Write(test_dir_ / "missing-parent" / "map.bin"), std::exception);
 }
 
 TEST_F(MatReadTest, MatchesLegacyBitsAndLayouts) {
