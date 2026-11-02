@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <iostream>
 #include <stdexcept>
 
 #include <gtest/gtest.h>
@@ -96,6 +97,11 @@ void ExpectBits(const FixedCohortResult::Maps& a, const FixedCohortResult::Maps&
   }
 }
 
+size_t PositiveDepthCount(const FixedCohortResult::Maps& maps) {
+  return std::count_if(maps.depth.GetData().begin(), maps.depth.GetData().end(),
+                       [](float depth) { return std::isfinite(depth) && depth > 0; });
+}
+
 TEST(MultiGpuFixedCohort, TwoDevicePhotoGeoExactUniqueWritersAndBarrier) {
   int count = 0;
   if (cudaGetDeviceCount(&count) != cudaSuccess || count < 2)
@@ -138,6 +144,19 @@ TEST(MultiGpuFixedCohort, TwoDevicePhotoGeoExactUniqueWritersAndBarrier) {
   const auto single = RunFixedCohortPhotoGeo(f.images, f.refs, f.budget,
       {1ull << 30, 256ull << 20}, NativeRunDeadline::FromBudget(std::chrono::seconds(120)), PairDispatch::kSerial);
   for (size_t i = 0; i < f.refs.size(); ++i) {
+    const auto& ref = f.refs[i];
+    SCOPED_TRACE("job=" + std::to_string(i) + " reference=" +
+                 std::to_string(ref.reference_image_idx));
+    std::cout << "MultiGpuFixture job=" << i
+              << " reference=" << ref.reference_image_idx
+              << " image=" << f.images[ref.reference_image_idx].GetPath()
+              << " single_photo_positive=" << PositiveDepthCount(single.photo[i])
+              << " multi_photo_positive=" << PositiveDepthCount(result.photo[i])
+              << " single_geo_positive=" << PositiveDepthCount(single.geo[i])
+              << " multi_geo_positive=" << PositiveDepthCount(result.geo[i])
+              << " geo_sources=";
+    for (int source : ref.geo_sources) std::cout << source << ',';
+    std::cout << std::endl;
     ExpectBits(single.photo[i], result.photo[i]);
     ExpectBits(single.geo[i], result.geo[i]);
     size_t valid = 0;
