@@ -49,6 +49,26 @@ class MultiGpuWorkers {
     }
   };
 
+  // RunRollingOwners drains locally before rethrowing a failed owner launch.
+  // Publish to every device BEFORE that local drain, preserving the original
+  // launch error and waking sibling admission/graph waiters immediately. The
+  // generic task parameter keeps std::function conversion inside this try.
+  template <class Factory = ThreadFactory>
+  auto OwnerThreadFactory(Factory factory = {}) {
+    return [this, factory](auto task) mutable {
+      try {
+        Check();
+        auto owner = factory(std::move(task));
+        if (!owner.joinable())
+          throw std::runtime_error("owner factory returned no worker");
+        return owner;
+      } catch (...) {
+        Cancel(std::current_exception());
+        throw;
+      }
+    };
+  }
+
   template <class Work, class Factory = ThreadFactory>
   void Run(size_t count, Work work, Factory factory = {},
            std::function<void()> external_check = {}) {

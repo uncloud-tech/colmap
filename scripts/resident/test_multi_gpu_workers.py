@@ -15,6 +15,8 @@ class MultiGpuWorkersTest(unittest.TestCase):
             binary = pathlib.Path(directory) / 'test'
             source.write_text('''#include "colmap/mvs/multi_gpu_workers.h"
 #include "colmap/mvs/owned_pair_coordinator.h"
+#include "colmap/mvs/owned_pair_run.h"
+#include "colmap/mvs/owned_graph_coordinator.h"
 #include <cassert>
 #include <atomic>
 #include <condition_variable>
@@ -64,6 +66,114 @@ try {
 assert(drained == 2);
 assert(workers.CancellationToken()->load());
 ''')
+
+    def test_partial_owner_launch_failure_cancels_peer_before_local_drain(self):
+        body = '''
+MultiGpuWorkers workers;
+const auto no_job = std::numeric_limits<size_t>::max();
+PairCoordinator local({100, 100}, {1, 1}, 2,
+    std::vector<ByteCharge>(3, {10, 10}), std::chrono::seconds(5));
+PairCoordinator peer({100, 100}, {1, 1}, 1,
+    std::vector<ByteCharge>(3, {10, 10}), std::chrono::seconds(5));
+OwnerGraphLaunchState local_graph(3), peer_graph(3);
+std::mutex mutex;
+std::condition_variable wake;
+bool local_running = false, peer_running = false, release_drain = false;
+bool launch_thrown = false, immediate = false, cancelled_before_drain = false;
+int controls_cancelled = 0;
+std::atomic<int> cleaned{0};
+std::atomic<int> local_starts{0}, peer_starts{0};
+workers.Register([&](std::exception_ptr error) {
+  local.Cancel(no_job, error);
+  local_graph.Cancel(error);
+  std::lock_guard<std::mutex> lock(mutex);
+  cancelled_before_drain = cleaned == 0;
+  ++controls_cancelled;
+  wake.notify_all();
+});
+workers.Register([&](std::exception_ptr error) {
+  peer.Cancel(no_job, error);
+  peer_graph.Cancel(error);
+  std::lock_guard<std::mutex> lock(mutex);
+  ++controls_cancelled;
+  wake.notify_all();
+});
+std::string reported;
+try {
+  workers.Run(2, [&](size_t device) {
+    if (device == 0) {
+      size_t launches = 0;
+      auto factory = workers.OwnerThreadFactory([&](auto task) {
+        if (launches++ == 1) {
+          std::unique_lock<std::mutex> lock(mutex);
+          wake.wait(lock, [&] { return local_running && peer_running; });
+          launch_thrown = true;
+          wake.notify_all();
+          throw std::runtime_error("original owner launch failure");
+        }
+        return std::thread(std::move(task));
+      });
+      RunRollingOwners(local, [&](size_t job) {
+        ++local_starts;
+        local.BeginPreparation(job);
+        local.ReadyAndWait(job);
+        std::unique_lock<std::mutex> lock(mutex);
+        local_running = true;
+        wake.notify_all();
+        wake.wait(lock, [&] { return release_drain; });
+      }, [](size_t, const char*) {}, factory, [&](size_t) { ++cleaned; });
+    } else {
+      RunRollingOwners(peer, [&](size_t job) {
+        ++peer_starts;
+        peer.BeginPreparation(job);
+        peer.ReadyAndWait(job);
+        {
+          std::unique_lock<std::mutex> lock(mutex);
+          peer_running = true;
+          wake.notify_all();
+          wake.wait(lock, [&] { return launch_thrown; });
+          immediate = wake.wait_for(lock, std::chrono::seconds(1), [&] {
+            return controls_cancelled == 2;
+          });
+        }
+        if (immediate) {
+          try { local_graph.Check(0); assert(false); }
+          catch (const std::runtime_error&) {}
+          try { peer_graph.Check(0); assert(false); }
+          catch (const std::runtime_error&) {}
+          assert(local.AdmittedCount() == 2 && peer.AdmittedCount() == 1);
+        }
+        {
+          std::lock_guard<std::mutex> lock(mutex);
+          release_drain = true;
+          wake.notify_all();
+        }
+        // A later device error must not replace the failed owner's launch.
+        workers.Cancel(std::make_exception_ptr(std::runtime_error("later peer failure")));
+        throw std::runtime_error("later peer failure");
+      }, [](size_t, const char*) {}, workers.OwnerThreadFactory(),
+         [&](size_t) { ++cleaned; });
+    }
+  });
+} catch (const std::runtime_error& error) { reported = error.what(); }
+// Use a normal failure exit rather than abort so the RED run leaves no core.
+if (!immediate || !cancelled_before_drain || controls_cancelled != 2 ||
+    reported != "original owner launch failure") return 1;
+assert(local_starts == 1 && peer_starts == 1);
+assert(local.AdmittedCount() == 2 && peer.AdmittedCount() == 1);
+// Device controllers are joined; the parent can check refusal without racing
+// RunRollingOwners' parent-only FIFO admission interface.
+assert(local.AdmitNext() == no_job && peer.AdmitNext() == no_job);
+assert(cleaned == 3);  // Running local, failed launch's admitted slot, peer.
+'''
+        for empty_owner in (False, True):
+            with self.subTest(empty_owner=empty_owner):
+                case = body
+                if empty_owner:
+                    case = case.replace('throw std::runtime_error("original owner launch failure");',
+                                        'return std::thread{};')
+                    case = case.replace('original owner launch failure', 'owner factory returned no worker')
+                self.run_cpp(case)
 
     def test_worker_failure_wakes_sibling_and_preserves_first_error(self):
         self.run_cpp('''

@@ -222,7 +222,8 @@ FixedCohortResult RunMultiGpuFixedCohortPhotoGeo(
             throw;
           }
         };
-        RunRollingOwners(coordinator, run, [](size_t, const char*) {});
+        RunRollingOwners(coordinator, run, [](size_t, const char*) {},
+                         workers.OwnerThreadFactory());
         workers.Check();
         // Solver owners joined; bank destroyed before next cohort allocation.
       }
