@@ -53,6 +53,10 @@ final dense plan before SfM. CPU model remains UNKNOWN; threads still default to
 With `--gpu-index` omitted, extraction and matching select the usable observed
 CUDA device with **most available memory**, breaking ties by lowest process-visible
 ordinal. Stereo separately uses the usable device set shown in the approval plan.
+Automatic selection refuses a usable set with mixed compute capabilities: heterogeneous
+output equivalence is not qualified. Select one device explicitly with `--gpu-index N`
+and rerun; the frontend does not silently filter devices or fall back. Matching compute
+capability alone does not qualify numerical equivalence or guarantee kernel support.
 `--gpu-index N` keeps the exact original single-device stereo implementation as
 well as selecting that nonnegative visible ordinal for extraction/matching; it
 refuses rather than falling back. `CUDA_VISIBLE_DEVICES` remapping is honored: these are CUDA

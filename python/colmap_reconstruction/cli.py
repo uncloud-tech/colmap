@@ -231,6 +231,13 @@ class Reconstruction:
                 ('' if requested is None else ' at explicit ordinal ' + str(requested)) +
                 '; check CUDA_VISIBLE_DEVICES, device access and CUDA runtime; free capacity or '
                 'select another ordinal explicitly and rerun. Inventory: ' + json.dumps(self.device_inventory))
+        if requested is None and len({(device['compute_capability_major'],
+                                       device['compute_capability_minor'])
+                                      for device in candidates}) > 1:
+            raise ValueError('automatic stereo placement has mixed compute capabilities; '
+                'heterogeneous output equivalence is not qualified. Select one visible device '
+                'explicitly with --gpu-index N and rerun; no devices were silently filtered. '
+                'Inventory: ' + json.dumps(self.device_inventory))
         selected = min(candidates, key=lambda device: (-int(device['available_device_bytes']), device['ordinal']))
         # Default stereo distributes over the explicitly previewed usable set;
         # an explicit --gpu-index keeps the entire original single-GPU path.
