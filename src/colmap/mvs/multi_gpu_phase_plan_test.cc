@@ -4,6 +4,7 @@
 // && ./phase-plan-test (do not define NDEBUG).
 #include "colmap/mvs/multi_gpu_phase_plan.h"
 
+#include <algorithm>
 #include <cassert>
 #include <iostream>
 #include <limits>
@@ -268,6 +269,72 @@ void InvalidDeclarationsAndOverflow() {
   assert(empty.groups[0].cohorts.empty());
   assert(empty.host_peak_raw == r.common_host_raw);
 }
+void MixedWorkAndUnequalDeviceCaps() {
+  auto r = Fixture();
+  r.geometry = true;
+  r.devices[0].capacity_bytes = 100;
+  r.devices[1].capacity_bytes = 1000;
+  r.jobs[0].private_raw.device = 200;
+  r.jobs[0].work = 900;
+  r.jobs[1].work = 100;
+  r.jobs[2].work = 300;
+  r.jobs[3].work = 10;
+  const auto p = BuildMultiGpuPhasePlan(r);
+  assert((p.groups[0].cohorts[0].jobs == std::vector<size_t>{17, 62, 4}));
+  assert((p.groups[1].cohorts[0].jobs == std::vector<size_t>{91}));
+  assert(p.groups[0].assigned_work == 410);
+  assert(p.groups[1].assigned_work == 900);
+  assert(p.groups[0].cohorts[0].active_owners == 1);
+  assert(p.groups[0].peak_raw.host == 40 && p.groups[0].peak_raw.device == 60);
+  assert(p.groups[1].peak_raw.host == 40 && p.groups[1].peak_raw.device == 220);
+  assert(p.host_peak_raw == 180);
+}
+void ZeroWorkStillHasCompleteUniqueCoverage() {
+  auto r = Fixture();
+  for (auto& job : r.jobs) job.work = 0;
+  const auto p = BuildMultiGpuPhasePlan(r);
+  std::vector<size_t> assigned;
+  for (const auto& group : p.groups) {
+    assert(group.assigned_work == 0);
+    for (const auto& cohort : group.cohorts)
+      assigned.insert(assigned.end(), cohort.jobs.begin(), cohort.jobs.end());
+  }
+  std::sort(assigned.begin(), assigned.end());
+  assert((assigned == std::vector<size_t>{4, 17, 62, 91}));
+  assert((r.jobs[0].sources == std::vector<size_t>{0, 0}));
+}
+void CompletePlanDeterminism() {
+  auto r = Fixture();
+  // Exercise sequential cohort boundaries as well as ordinary affinity groups.
+  r.devices[0].capacity_bytes = 250;
+  r.devices[1].capacity_bytes = 250;
+  r.jobs[2].sources = {2};
+  const auto a = BuildMultiGpuPhasePlan(r);
+  const auto b = BuildMultiGpuPhasePlan(r);
+  assert(a.geometry == b.geometry && a.host_peak_raw == b.host_peak_raw);
+  assert(a.groups.size() == b.groups.size());
+  assert(a.groups[0].cohorts.size() == 2);
+  for (size_t d = 0; d < a.groups.size(); ++d) {
+    const auto& x = a.groups[d];
+    const auto& y = b.groups[d];
+    assert(x.device.ordinal == y.device.ordinal && x.device.uuid == y.device.uuid);
+    assert(x.device.capacity_bytes == y.device.capacity_bytes);
+    assert(x.device.reserve_bytes == y.device.reserve_bytes);
+    assert(x.device.host_share_raw == y.device.host_share_raw);
+    assert(x.device.fixed_raw.host == y.device.fixed_raw.host);
+    assert(x.device.fixed_raw.device == y.device.fixed_raw.device);
+    assert(x.peak_raw.host == y.peak_raw.host && x.peak_raw.device == y.peak_raw.device);
+    assert(x.assigned_work == y.assigned_work && x.cohorts.size() == y.cohorts.size());
+    for (size_t c = 0; c < x.cohorts.size(); ++c) {
+      const auto& p = x.cohorts[c];
+      const auto& q = y.cohorts[c];
+      assert(p.jobs == q.jobs && p.active_owners == q.active_owners);
+      assert(p.bank_raw.host == q.bank_raw.host && p.bank_raw.device == q.bank_raw.device);
+      assert(p.private_peak_raw.host == q.private_peak_raw.host);
+      assert(p.private_peak_raw.device == q.private_peak_raw.device);
+    }
+  }
+}
 }  // namespace
 int main() {
   AssignmentAndAffinity();
@@ -279,5 +346,8 @@ int main() {
   MarginAndSeparateReserves();
   UnequalCapsAndAggregateHost();
   InvalidDeclarationsAndOverflow();
+  MixedWorkAndUnequalDeviceCaps();
+  ZeroWorkStillHasCompleteUniqueCoverage();
+  CompletePlanDeterminism();
   std::cout << "phase plan tests passed\n";
 }

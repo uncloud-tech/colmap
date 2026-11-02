@@ -362,6 +362,8 @@ with patch.object(tempfile, '_candidate_tempdir_list', return_value=candidates):
         self.assertEqual(plan['effective_dispatch']['extraction']['gpu_index'], 2)
         self.assertEqual(plan['device_selection']['mode'], 'auto')
         self.assertEqual(len(plan['device_inventory']), 2)
+        self.assertEqual([d['ordinal'] for d in plan['effective_dispatch']['stereo']['approved_devices']], [0, 2])
+        self.assertIn('PHOTO and GEO', plan['effective_dispatch']['stereo']['distribution'])
         # Inventory FREE selects; a fresh authoritative exact query admits.
         self.assertEqual(plan['hardware_observation']['available_device_bytes'], 16 * 1024**3)
         queries = [call for call in self.commands() if call[0] == 'reconstruction_info']
@@ -389,6 +391,12 @@ with patch.object(tempfile, '_candidate_tempdir_list', return_value=candidates):
                 self.assertEqual(plan['device_inventory'], inventory)
                 self.assertIn('not fastest-device', plan['device_selection']['limitations'])
                 self.assertEqual(plan['effective_dispatch']['extraction']['threads'], 1)
+                stereo = plan['effective_dispatch']['stereo']
+                approved = [d['ordinal'] for d in stereo['approved_devices']]
+                self.assertEqual(approved, [expected] if mode == 'explicit' else
+                                 sorted(d['ordinal'] for d in inventory if d['usable']))
+                if mode == 'explicit':
+                    self.assertEqual(stereo['distribution'], 'exact single-device path')
                 self.assert_preview_only()
 
     def test_no_device_unusable_and_invalid_explicit_refuse_without_fallback(self):

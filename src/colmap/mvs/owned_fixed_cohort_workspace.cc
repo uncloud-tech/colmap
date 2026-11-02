@@ -73,7 +73,8 @@ PreparedFixedCohortWorkspace PrepareFixedCohortWorkspace(
     uint64_t loader_scratch_host,
     NativeRunDeadline deadline,
     PairDispatch dispatch,
-    int tile_threads) {
+    int tile_threads,
+    const MultiGpuFixedCohortPlan* multi_gpu_plan) {
   Require(max_load_image_size == -1 || max_load_image_size > 0,
           "fixed-cohort invalid load image size");
   Require(dispatch == PairDispatch::kSerial || dispatch == PairDispatch::kPair,
@@ -93,7 +94,9 @@ PreparedFixedCohortWorkspace PrepareFixedCohortWorkspace(
         "fixed-cohort deadline expired before preparation");
   NativeRunDeadlineGuard guard(deadline);
   guard.Check();
-  const auto admitted = AdmitFixedCohortBudget(budget, capacity);
+  const auto admitted = multi_gpu_plan
+      ? ByteCharge{MarginBytes(multi_gpu_plan->host_peak_raw), 0}
+      : AdmitFixedCohortBudget(budget, capacity);
 
   ValidateFixedCohortWorkspaceCameras(workspace_path);
   guard.Check();
@@ -103,6 +106,7 @@ PreparedFixedCohortWorkspace PrepareFixedCohortWorkspace(
   result.deadline_ = deadline;
   result.dispatch_ = dispatch;
   result.tile_threads_ = tile_threads;
+  if (multi_gpu_plan) result.multi_gpu_plan_ = *multi_gpu_plan;
 
   {
     Workspace::Options options;
@@ -133,6 +137,8 @@ PreparedFixedCohortWorkspace PrepareFixedCohortWorkspace(
       result.references_.push_back(std::move(ref));
     }
     ValidateFixedCohortShape(result.images_, result.references_, budget);
+    if (multi_gpu_plan)
+      ValidateMultiGpuFixedCohortPlan(result.images_, result.references_, budget, *multi_gpu_plan);
     uint64_t known_scratch = 0;
     uint64_t original_bank = 0;
     for (size_t i = 0; i < result.images_.size(); ++i) {
@@ -148,10 +154,17 @@ PreparedFixedCohortWorkspace PrepareFixedCohortWorkspace(
             "fixed-cohort loader scratch below known logical inventory");
     // Cache contains original grayscale pixels; the prepared bank may be
     // resized. One aggregate margin per lifecycle peak, never margin-on-margin.
+    uint64_t loader_fixed = CheckedAdd(budget.process.host, budget.unknown.host);
+    if (multi_gpu_plan) {
+      // Every approved CUDA context already exists after preflight. Its
+      // per-device allowance overlaps decoding too, not only solver execution.
+      loader_fixed = 0;
+      for (const auto& group : multi_gpu_plan->phases[0].groups)
+        loader_fixed = CheckedAdd(loader_fixed, group.device.fixed_raw.host);
+    }
     const auto loader_raw = CheckedAdd(
         CheckedAdd(original_bank, budget.caller_inputs.host),
-        CheckedAdd(loader_scratch_host,
-                   CheckedAdd(budget.process.host, budget.unknown.host)));
+        CheckedAdd(loader_scratch_host, loader_fixed));
     const auto host_demand = std::max(admitted.host, MarginBytes(loader_raw));
     Require(
         CheckedAdd(host_demand, budget.headroom_reserve.host) <= capacity.host,

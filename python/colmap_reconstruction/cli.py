@@ -171,7 +171,15 @@ class Reconstruction:
         for name in ('loader_scratch_host', 'process_host', 'process_device',
                      'unknown_host', 'unknown_device', 'reserve_host', 'reserve_device'):
             argv += ['--' + name + '_bytes', str(getattr(a, name + '_bytes'))]
-        for name, value in (('host', a.host_budget_bytes), ('device', a.device_budget_bytes)):
+        stereo_devices = getattr(self, 'stereo_devices', [])
+        multi_gpu = len(stereo_devices) > 1
+        if multi_gpu:
+            argv += ['--stereo_devices', ','.join(str(d['ordinal']) + ':' + d['device_uuid'] + ':' +
+                str(min(int(d['available_device_bytes']), a.device_budget_bytes)
+                    if a.device_budget_bytes is not None else int(d['available_device_bytes']))
+                for d in stereo_devices)]
+        for name, value in (('host', self.dense_host_capacity if multi_gpu else a.host_budget_bytes),
+                            ('device', a.device_budget_bytes)):
             if value is not None:
                 argv += ['--' + name + '_capacity_bytes', str(value)]
         for key, value in self.graph['phases']['geo']['requested_options'].items():
@@ -224,6 +232,9 @@ class Reconstruction:
                 '; check CUDA_VISIBLE_DEVICES, device access and CUDA runtime; free capacity or '
                 'select another ordinal explicitly and rerun. Inventory: ' + json.dumps(self.device_inventory))
         selected = min(candidates, key=lambda device: (-int(device['available_device_bytes']), device['ordinal']))
+        # Default stereo distributes over the explicitly previewed usable set;
+        # an explicit --gpu-index keeps the entire original single-GPU path.
+        self.stereo_devices = sorted(candidates, key=lambda device: device['ordinal'])
         self.args.gpu_index = selected['ordinal']
         self.approved_device_uuid = selected['device_uuid']
         self.device_selection = dict(mode='auto' if requested is None else 'explicit',
@@ -261,6 +272,10 @@ class Reconstruction:
                 mapping=dict(backend='incremental CPU Ceres', threads=self.args.threads),
                 undistortion=dict(threads=self.args.threads),
                 stereo=dict(backend=self.args.backend, gpu_index=self.args.gpu_index,
+                    approved_devices=self.stereo_devices,
+                    distribution='independent PHOTO and GEO per-device affinity cohorts' if len(self.stereo_devices) > 1 else 'exact single-device path',
+                    exchange='fully admitted immutable host float32 PHOTO maps; full PHOTO barrier; no peer access or pooled VRAM',
+                    placement_approval='per-GPU groups/budgets resolve after SfM and are shown before stereo execution',
                     source_cap=self.args.source_cap, num_samples=self.args.num_samples,
                     random_seed=self.args.random_seed, cache_size_gib=self.args.cache_size_gib,
                     tile=self.args.tile, lookahead=not self.args.no_lookahead),
@@ -531,9 +546,31 @@ class Reconstruction:
 
     def dense_stage(self):
         self.check_inputs(self.input_files)
-        self.resources()
-        self.native('experimental_fixed_cohort', *self.dense_arguments())
+        capacity = self.resources()
+        multi_gpu = len(getattr(self, 'stereo_devices', [])) > 1
+        assignments = None
+        if multi_gpu:
+            # Freeze the invocation host cap for both metadata planning and
+            # execution. Native FREE checks may refuse, never silently replan.
+            self.dense_host_capacity = capacity['host']
+            plan_path = self.assets / 'multi-gpu-plan.json'
+            arguments = self.dense_arguments()
+            arguments[arguments.index('--report_path') + 1] = str(plan_path)
+            self.native('experimental_fixed_cohort', *arguments, '--prepare_only', '1')
+            self.multi_gpu_plan = json.loads(plan_path.read_bytes())
+            assignments = bind_multi_gpu_plan(self.multi_gpu_plan, self.graph, self.stereo_devices)
+            print('Resolved multi-GPU phase groups/budgets (approval required): ' +
+                  json.dumps(self.multi_gpu_plan, sort_keys=True), flush=True)
+            if not self.args.yes:
+                approve_plan(self.process)
+            self.check_inputs(self.input_files)
+            self.native('experimental_fixed_cohort', *self.dense_arguments(),
+                        '--approved_multi_gpu_plan', plan_path)
+        else:
+            self.native('experimental_fixed_cohort', *self.dense_arguments())
         self.report = json.loads((self.assets / 'cohort.json').read_bytes())
+        if multi_gpu and self.report.get('multi_gpu_plan') != self.multi_gpu_plan:
+            raise ValueError('native multi-GPU placement differs from approved plan')
         if (self.report.get('status') != 'completed'
                 or self.report.get('effective_backend') != 'experimental_fixed_cohort'
                 or self.report.get('allocation_fingerprint') != self.identity['allocation_fingerprint']):
@@ -543,8 +580,13 @@ class Reconstruction:
             expected = self.graph['phases'][phase]['jobs']
             # Exact effective order (including any duplicates), per-reference
             # depth/sigma/options/PRNG; never globalize or sort to obtain parity.
-            if actual != [dict(reference=j['reference'], sources=j['sources'], options=j['options'])
-                          for j in expected]:
+            bound = []
+            for job, entry in enumerate(expected):
+                options = dict(entry['options'])
+                if assignments is not None:
+                    options['gpu_index'] = assignments[phase][job]
+                bound.append(dict(reference=entry['reference'], sources=entry['sources'], options=options))
+            if actual != bound:
                 raise ValueError('native fixed-cohort effective ' + phase + ' plan changed')
         self.check_inputs(self.input_files)
         # Publish only complete native outputs into the fresh undistorted tree.
@@ -567,6 +609,42 @@ class Reconstruction:
                     if line.strip() and not line.strip().startswith('#')]
         if eligible != names and (len(eligible) != len(names) or set(eligible) != set(names)):
             raise ValueError('fusion eligibility differs from complete GEO producers')
+
+
+def bind_multi_gpu_plan(plan, graph, devices):
+    """Bind exact scientific inputs plus unique approved phase placement."""
+    if plan.get('schema_version') != 1:
+        raise ValueError('invalid multi-GPU plan version')
+    expected = []
+    for photo, geo in zip(graph['phases']['photo']['jobs'], graph['phases']['geo']['jobs'], strict=True):
+        if photo['reference'] != geo['reference']:
+            raise ValueError('multi-GPU PHOTO/GEO references differ')
+        expected.append(dict(reference=photo['reference'], photo_sources=photo['sources'],
+            geo_sources=geo['sources'], photo_options=photo['options'], geo_options=geo['options']))
+    if plan.get('scientific_inputs') != expected:
+        raise ValueError('multi-GPU scientific inputs/options changed')
+    assignments = {}
+    if [phase.get('phase') for phase in plan.get('phases', [])] != ['photo', 'geo']:
+        raise ValueError('multi-GPU phase barrier plan missing')
+    for phase in plan['phases']:
+        groups = phase['groups']
+        if [(g['ordinal'], g['uuid']) for g in groups] != [(d['ordinal'], d['device_uuid']) for d in devices]:
+            raise ValueError('multi-GPU approved device identity changed')
+        mapping = {}
+        for group in groups:
+            for cohort in group['cohorts']:
+                jobs = cohort['jobs']
+                if (not jobs or jobs != sorted(jobs) or type(cohort['active_owners']) is not int
+                        or not 1 <= cohort['active_owners'] <= len(jobs)):
+                    raise ValueError('invalid multi-GPU cohort order/owners')
+                for job in jobs:
+                    if type(job) is not int or not 0 <= job < len(expected) or job in mapping:
+                        raise ValueError('multi-GPU duplicate/invalid output writer')
+                    mapping[job] = str(group['ordinal'])
+        if len(mapping) != len(expected):
+            raise ValueError('multi-GPU incomplete reference coverage')
+        assignments[phase['phase']] = mapping
+    return assignments
 
 
 def validate_dense_map(path, width, height, channels, *, check=None):

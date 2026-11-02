@@ -156,6 +156,9 @@ std::vector<FixedCohortDeviceObservation> ObserveFixedCohortDevices(
 
 FixedCohortResult PreparedFixedCohortWorkspace::Run(
     const std::atomic<bool>* cancel) const {
+  if (multi_gpu_plan_)
+    return RunMultiGpuFixedCohortPhotoGeo(images_, references_, budget_, *multi_gpu_plan_,
+                                         deadline_, tile_threads_, cancel);
   return RunFixedCohortPhotoGeo(images_, references_, budget_, capacity_,
                               deadline_, dispatch_, tile_threads_, cancel);
 }

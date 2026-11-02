@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #pragma once
 
-#include "colmap/mvs/owned_fixed_cohort_pipeline.h"
+#include "colmap/mvs/multi_gpu_fixed_cohort.h"
+
+#include <optional>
 
 #include <filesystem>
 #include <string>
@@ -58,7 +60,8 @@ class PreparedFixedCohortWorkspace {
       uint64_t,
       NativeRunDeadline,
       PairDispatch,
-      int);
+      int,
+      const MultiGpuFixedCohortPlan*);
   std::vector<Image> images_;
   std::vector<std::string> names_;
   std::vector<FixedCohortReference> references_;
@@ -67,6 +70,7 @@ class PreparedFixedCohortWorkspace {
   NativeRunDeadline deadline_;
   PairDispatch dispatch_;
   int tile_threads_;
+  std::optional<MultiGpuFixedCohortPlan> multi_gpu_plan_;
 };
 
 // Linux/cgroup-v2 only. Known UNDISTORTED COLMAP workspace only; caller keeps
@@ -100,6 +104,7 @@ PreparedFixedCohortWorkspace PrepareFixedCohortWorkspace(
     uint64_t loader_scratch_host,
     NativeRunDeadline deadline,
     PairDispatch dispatch,
-    int tile_threads);
+    int tile_threads,
+    const MultiGpuFixedCohortPlan* multi_gpu_plan = nullptr);
 
 }  // namespace colmap::mvs::owned
