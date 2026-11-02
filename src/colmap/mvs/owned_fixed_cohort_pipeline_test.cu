@@ -17,7 +17,7 @@
 
 namespace colmap::mvs::owned {
 namespace {
-TEST(FixedCohortDeviceInventory, RestoresExactNonPrimaryAndNullContexts) {
+void CheckExactNonPrimaryAndNullContexts(int device_ordinal) {
   InventoryCudaDriver driver;
   decltype(&cuInit) init = nullptr;
   try {
@@ -55,6 +55,8 @@ TEST(FixedCohortDeviceInventory, RestoresExactNonPrimaryAndNullContexts) {
   int count = 0;
   ASSERT_EQ(get_count(&count), CUDA_SUCCESS);
   if (count == 0) GTEST_SKIP() << "visible CUDA device required";
+  if (device_ordinal == 1 && count < 2)
+    GTEST_SKIP() << "visible CUDA ordinal 1 requires at least two visible devices";
   CUcontext original = nullptr;
   ASSERT_EQ(get_current(&original), CUDA_SUCCESS);
   struct ContextCleanup {
@@ -71,8 +73,14 @@ TEST(FixedCohortDeviceInventory, RestoresExactNonPrimaryAndNullContexts) {
     }
   } cleanup{original, set_current, destroy};
   CUdevice device;
-  ASSERT_EQ(get_device(&device, 0), CUDA_SUCCESS);
+  ASSERT_EQ(get_device(&device, device_ordinal), CUDA_SUCCESS);
   ASSERT_EQ(create(&cleanup.created, 0, device), CUDA_SUCCESS);
+  if (device_ordinal == 1) {
+    const auto get_context_device = driver.Lookup<decltype(&cuCtxGetDevice)>("cuCtxGetDevice");
+    CUdevice context_device;
+    ASSERT_EQ(get_context_device(&context_device), CUDA_SUCCESS);
+    EXPECT_EQ(context_device, device);
+  }
   NativeRunDeadlineGuard guard(NativeRunDeadline::FromBudget(std::chrono::seconds(30)));
   const auto inventory = ObserveFixedCohortDevices(guard);
   EXPECT_EQ(inventory.size(), static_cast<size_t>(count));
@@ -84,6 +92,14 @@ TEST(FixedCohortDeviceInventory, RestoresExactNonPrimaryAndNullContexts) {
   EXPECT_EQ(without_context.size(), static_cast<size_t>(count));
   ASSERT_EQ(get_current(&current), CUDA_SUCCESS);
   EXPECT_EQ(current, nullptr);
+}
+
+TEST(FixedCohortDeviceInventory, RestoresExactNonPrimaryAndNullContexts) {
+  CheckExactNonPrimaryAndNullContexts(0);
+}
+
+TEST(FixedCohortDeviceInventory, RestoresExactNonPrimaryAndNullContextsOnVisibleOrdinal1) {
+  CheckExactNonPrimaryAndNullContexts(1);
 }
 
 TEST(FixedCohortDeviceInventory, RestoresContextAndReportsVisibleOrdinals) {
