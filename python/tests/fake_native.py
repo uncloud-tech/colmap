@@ -19,7 +19,7 @@ if os.environ.get('FAKE_CALLS'):
         stream.write(json.dumps([command, args]) + '\n')
 models = json.loads(os.environ.get('FAKE_SPARSE_MODELS', '{"0":{"num_registered_images":2,"num_points3D":4}}'))
 identity = dict(device_uuid='GPU-synthetic', schema_version=1, cuda_compiled=True, source_commit='a' * 40,
-                allocation_fingerprint=os.environ.get('FAKE_ALLOCATION_FP', '3b8473e3e8ea9860d80a17d3fc959b015d030bbfe63095868dc488f98f5b10df'),
+                allocation_fingerprint=os.environ.get('FAKE_ALLOCATION_FP', '21568f60165a4f2a05e478f5a2e29efed55fedb9f1347e731244b2534c690935'),
                 available_host_bytes=str(16 * 1024**3),
                 available_device_bytes='0' if os.environ.get('FAKE_BAD_FREE') else str(8 * 1024**3))
 
