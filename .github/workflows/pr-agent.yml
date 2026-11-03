@@ -33,9 +33,16 @@ jobs:
       - name: Describe, review and suggest improvements
         uses: The-PR-Agent/pr-agent@v0.49.0
         env:
-          OPENAI_KEY: ${{ secrets.OPENAI_KEY }}
+          # Ollama Cloud's OpenAI-compatible API; no local Ollama server.
+          OPENAI_KEY: ${{ secrets.OLLAMA_API_KEY }}
+          OPENAI__API_BASE: https://ollama.com/v1
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Use upstream default model settings; report the actual model used.
+          CONFIG__MODEL: openai/glm-5.3-flash
+          CONFIG__FALLBACK_MODELS: '[]'
+          CONFIG__MAX_MODEL_TOKENS: "32000"
+          # Conservative review budget below the advertised 1M context window.
+          CONFIG__CUSTOM_MODEL_MAX_TOKENS: "128000"
+          # Report the actual model used without dumping configuration/secrets.
           CONFIG__LOG_LEVEL: INFO
           CONFIG__OUTPUT_RUN_DETAILS: "true"
           GITHUB_ACTION_CONFIG__AUTO_DESCRIBE: "true"
