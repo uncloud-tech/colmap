@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"Configure the real MVS rules with stub targets; no CUDA build or GPU needed."
+"""Configure the real MVS rules with stub targets; no CUDA build or GPU needed."""
 
 import pathlib
 import subprocess
@@ -53,9 +53,7 @@ file(WRITE "${{CMAKE_BINARY_DIR}}/architectures" "${{archs}}")
             if opt_in is not None:
                 command.append("-DMVS_NATIVE_BLACKWELL_ENABLED=" + opt_in)
             result = subprocess.run(command, capture_output=True, text=True)
-            self.assertEqual(
-                result.returncode, 0, result.stdout + result.stderr
-            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             return (build / "architectures").read_text(), result.stderr
 
     def test_native_sm120_is_explicit_experimental_opt_in(self):
