@@ -3,17 +3,15 @@
 
 import pathlib
 import subprocess
-import tempfile
 import unittest
+from tempfile import TemporaryDirectory
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
 class BlackwellBuildSelectionTest(unittest.TestCase):
     def configure(self, architectures, opt_in=None):
-        with tempfile.TemporaryDirectory(
-            prefix=".blackwell-test-", dir=ROOT
-        ) as directory:
+        with TemporaryDirectory(prefix=".blackwell-test-", dir=ROOT) as directory:
             source = pathlib.Path(directory)
             (source / "empty.cc").write_text("// Configure-only target.\n")
             # Read the real root option declaration, without configuring its
