@@ -136,12 +136,25 @@ fusion. Multiple sparse models refuse unless `--sparse-model NAME` or explicit
 lexicographic-name ties; mapper/model numbering is nondeterministic. At least two
 registered images and a nonempty point model are required, not a quality claim.
 
-**Supported-input limitation: CUDA SIFT currently truncates input widths to a
-multiple of four. This frontend refuses affected inputs, rather than silently
-losing columns.** Effective width is encoded height for EXIF orientations 6/8
-(the native gravity rotation), otherwise encoded width. An odd height alone is
-not refused. Native support for other effective widths remains a delivery
-blocker; this is not general full-resolution photo-directory qualification.
+CUDA SIFT accepts effective input widths in all four modulo-four classes,
+without cropping, resizing or a CPU fallback. Effective width is encoded height
+for EXIF orientations 6/8 (the native gravity rotation), otherwise encoded width.
+For non-multiple-of-four widths the frontend requires the matching native
+allocation fingerprint: old or unknown binaries may still truncate columns and
+are refused even with explicit resource allowances. Install matching native and
+Python components together. This does not establish general photo-directory
+quality or physical-fit qualification.
+
+The new CUDA path keeps exact logical octave dimensions, with tightly packed
+rows in optionally rounded allocation capacity. Extra capacity is not image
+content: filtering, gradients, feature detection, orientation and descriptors use
+the logical domain. Upsampling clamps at its right/bottom edges. Coordinates
+remain in the original camera/pixel frame. For compatibility, inputs whose
+actual CUDA upload width is divisible by four retain historical rounded octave
+domains and resampling behavior; this is not a universal boundary correction or
+an equivalence claim for previously truncated inputs. The domain mode resets
+for each input, including extractor reuse and rotation. OpenCL/OpenGL behavior
+is unchanged.
 
 Before extraction, native `photo_directory_summary` recursively inspects headers
 in native filesystem-path discovery order. Empty inventories, corrupt or
@@ -254,9 +267,11 @@ maximum edge, independently of the expert undistortion cap, with explicit GPU
 SIFT and first octave -1. Native compensated maximum-dimension checks reject
 backend clamping; CUDA SIFT's automatic memory-fit octave skipping is disabled
 by default. Allocation failures propagate through the bounded controller and
-drain workers, without a reduced-size or CPU retry. The multiple-of-four
-working-width restriction above prevents the backend's separate column
-truncation. There is no automatic feature-count change or quality reduction.
+drain workers, without a reduced-size or CPU retry. The source-bound odd-width
+path above prevents separate backend column truncation. There is no automatic
+feature-count change or quality reduction. Existing logical host payload terms
+already charge original decoded/conversion dimensions; CUDA/library workspace
+remains an explicit UNKNOWN allowance, not a newly certified physical bound.
 
 Native `FeatureExtraction.host_budget_bytes` defaults to zero, retaining legacy
 behavior. Nonzero budgets support grayscale SIFT (CPU, covariant CPU or GPU) with

@@ -2,6 +2,10 @@
 
 #include <gtest/gtest.h>
 
+#if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
+#include <GL/glew.h>
+#endif
+
 #if defined(COLMAP_GUI_ENABLED)
 #include <QApplication>
 #else
@@ -15,8 +19,20 @@
 #include "colmap/util/opengl_utils.h"
 #if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
 #include "colmap/util/cuda.h"
+#include "thirdparty/SiftGPU/GlobalUtil.h"
+#include "thirdparty/SiftGPU/GLTexImage.h"
+#include "thirdparty/SiftGPU/CuTexImage.h"
+// SiftGPU's directory-private definition also guards its public declarations.
+#ifndef SIFTGPU_CUDA_ENABLED
+#define SIFTGPU_CUDA_ENABLED
+#include "thirdparty/SiftGPU/ProgramCU.h"
+#undef SIFTGPU_CUDA_ENABLED
+#else
+#include "thirdparty/SiftGPU/ProgramCU.h"
+#endif
 #endif
 
+#include <algorithm>
 #include <functional>
 #include <limits>
 #include <stdexcept>
@@ -230,6 +246,163 @@ TEST(ExtractSiftFeaturesGPU, Nominal) {
     ValidateDescriptorNorms(descriptors);
   });
 }
+
+#if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
+TEST(ExtractSiftFeaturesGPU, InputDomainAndImmutability) {
+  RunGpuTest([] {
+    FeatureExtractionOptions options(FeatureExtractorType::SIFT);
+    options.use_gpu = true;
+    options.gpu_index = "0";
+    auto extractor = CreateSiftFeatureExtractor(options);
+    ASSERT_NE(extractor, nullptr);
+    ASSERT_TRUE(GlobalUtil::_UseCUDA);
+    for (int width : {1, 2, 3, 4, 5, 257, 258, 259, 260}) {
+      for (int height : {1, 2, 17}) {
+        std::vector<float> pixels(width * height);
+        std::iota(pixels.begin(), pixels.end(), 0.0f);
+        const auto original = pixels;
+        GLTexInput input;
+        ASSERT_TRUE(input.SetImageData(width, height, pixels.data(),
+                                      GL_LUMINANCE, GL_FLOAT));
+        EXPECT_EQ(input.GetImgWidth(), width);
+        EXPECT_EQ(input.GetImgHeight(), height);
+        EXPECT_EQ(pixels, original);
+        std::vector<uint8_t> bytes(width * height);
+        for (size_t i = 0; i < bytes.size(); ++i) bytes[i] = i % 251;
+        const auto original_bytes = bytes;
+        ASSERT_TRUE(input.SetImageData(width, height, bytes.data(),
+                                      GL_LUMINANCE, GL_UNSIGNED_BYTE));
+        ASSERT_EQ(input.GetImgWidth(), width);
+        ASSERT_EQ(input.GetImgHeight(), height);
+        const auto* converted = static_cast<const float*>(input._pixel_data);
+        for (size_t i = 0; i < bytes.size(); ++i) {
+          EXPECT_FLOAT_EQ(converted[i], bytes[i] / 255.0f);
+        }
+        EXPECT_EQ(bytes, original_bytes);
+      }
+    }
+  });
+}
+
+TEST(ExtractSiftFeaturesGPU, ExactDomainCudaUpsampling) {
+  if (GetNumCudaDevices() == 0) {
+    GTEST_SKIP() << "No CUDA or HIP devices available";
+  }
+  ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+  for (int width : {1, 2, 3, 4, 5, 257, 258, 259, 260}) {
+    for (int height : {1, 3}) {
+      SCOPED_TRACE(::testing::Message() << "width=" << width
+                                      << " height=" << height);
+      CuTexImage src;
+      // Populate oversized, rounded capacity before reducing the logical size.
+      // Rows are tightly packed: none of this tail is image content, even on
+      // the last row. Poison makes accidental texture fetches observable.
+      const int capacity_width = (width + 3) / 4 * 4;
+      ASSERT_TRUE(src.InitTexture(capacity_width, height + 1));
+      std::vector<float> input(capacity_width * (height + 1), -8192.0f);
+      for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+          input[y * width + x] = 8.0f + 4.0f * x + 64.0f * y;
+        }
+      }
+      src.CopyFromHost(input.data());
+      src.SetImageSize(width, height);
+      src._exactDomain = true;
+      for (int log_scale : {1, 2, 3}) {
+        SCOPED_TRACE(::testing::Message() << "log_scale=" << log_scale);
+        const int scale = 1 << log_scale;
+        const int dst_width = width * scale;
+        const int dst_height = height * scale;
+        CuTexImage dst;
+        ASSERT_TRUE(dst.InitTexture(dst_width, dst_height));
+        std::vector<float> output(dst_width * dst_height, -8192.0f);
+        dst.CopyFromHost(output.data());
+        ProgramCU::SampleImageU(&dst, &src, log_scale);
+        ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        dst.CopyToHost(output.data());
+        ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+        for (int y = 0; y < dst_height; ++y) {
+          for (int x = 0; x < dst_width; ++x) {
+            // Bilinear interpolation reproduces an affine plane exactly.
+            // Constant extension clamps continuous coordinates independently,
+            // not flattened texture indices. All values are binary-exact.
+            const float sample_x =
+                std::min(static_cast<float>(x) / scale,
+                         static_cast<float>(width - 1));
+            const float sample_y =
+                std::min(static_cast<float>(y) / scale,
+                         static_cast<float>(height - 1));
+            const float expected = 8.0f + 4.0f * sample_x + 64.0f * sample_y;
+            ASSERT_EQ(output[y * dst_width + x], expected)
+                << "x=" << x << " y=" << y;
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST(ExtractSiftFeaturesGPU, ArbitraryWidthsAndReuse) {
+  RunGpuTest([] {
+    FeatureExtractionOptions options(FeatureExtractorType::SIFT);
+    options.use_gpu = true;
+    options.gpu_index = "0";
+    auto reused = CreateSiftFeatureExtractor(options);
+    ASSERT_NE(reused, nullptr);
+    // Repeated and descending sizes exercise FitPyramid as well as allocation,
+    // with exact-domain -> legacy-domain -> exact-domain transitions.
+    for (int octave : {-1, 0, 1}) {
+      options.sift->first_octave = octave;
+      reused = CreateSiftFeatureExtractor(options);
+      for (int width : {259, 260, 257, 258, 260, 257, 1, 2, 3, 4, 5}) {
+        for (bool rotated : {false, true}) {
+          for (bool square : {false, true}) {
+            if (square && width < 257) continue;
+            SCOPED_TRACE(::testing::Message()
+                         << "width=" << width << " rotated=" << rotated
+                         << " first_octave=" << octave
+                         << " fixture=" << (square ? "square" : "checker"));
+            const int height = width < 6 ? 3 : 129;
+            Bitmap bitmap(width, height, false);
+            if (square) {
+              // Match Nominal's 64-pixel square on a black background.
+              // Unlike the fine checker, it has structure at coarse octaves.
+              bitmap.Fill(BitmapColor<uint8_t>(0));
+              for (int y = height / 2 - 32; y < height / 2 + 32; ++y) {
+                for (int x = width / 2 - 32; x < width / 2 + 32; ++x) {
+                  bitmap.SetPixel(x, y, BitmapColor<uint8_t>(255));
+                }
+              }
+            } else {
+              for (int y = 0; y < height; ++y) {
+                for (int x = 0; x < width; ++x) {
+                  bitmap.SetPixel(x, y, BitmapColor<uint8_t>(
+                      ((x / 5 + y / 7) % 2) * 255));
+                }
+              }
+            }
+            if (rotated) bitmap.Rot90(1);
+            FeatureKeypoints keypoints, control_keypoints;
+            FeatureDescriptors descriptors, control_descriptors;
+            auto fresh = CreateSiftFeatureExtractor(options);
+            ASSERT_NE(fresh, nullptr);
+            ASSERT_TRUE(reused->Extract(bitmap, &keypoints, &descriptors));
+            ASSERT_TRUE(fresh->Extract(bitmap, &control_keypoints, &control_descriptors));
+            ValidateKeypoints(keypoints, bitmap);
+            EXPECT_EQ(keypoints, control_keypoints);
+            ASSERT_EQ(descriptors.data.rows(), control_descriptors.data.rows());
+            EXPECT_TRUE((descriptors.data.array() == control_descriptors.data.array()).all());
+            // The checker remains a reuse/immutability regression even when
+            // smoothing and scale-space extrema rejection leave no features.
+            if (square) EXPECT_FALSE(keypoints.empty());
+          }
+        }
+      }
+    }
+  });
+}
+#endif
 
 FeatureDescriptors CreateRandomFeatureDescriptors(const size_t num_features) {
   SetPRNGSeed(0);

@@ -923,7 +923,12 @@ int GLTexInput::SetImageData( int width,  int height, const void * data,
 
 	if( simple_format
 		&& ( width > _texMaxDim || height > _texMaxDim || GlobalUtil::_PreProcessOnCPU)
-		&& GlobalUtil::_octave_min_default >0   )
+		&& GlobalUtil::_octave_min_default >0
+        // A subpixel-sized octave must be sampled on the GPU, where its
+        // domain is clamped to one pixel, not converted to an empty upload.
+        && (!GlobalUtil::_UseCUDA ||
+            ((width >> GlobalUtil::_octave_min_default) > 0 &&
+             (height >> GlobalUtil::_octave_min_default) > 0)) )
 	{
 		_down_sampled = GlobalUtil::_octave_min_default;
 		ws = width >> GlobalUtil::_octave_min_default;
@@ -966,7 +971,9 @@ int GLTexInput::SetImageData( int width,  int height, const void * data,
     if(GlobalUtil::_UseCUDA || GlobalUtil::_UseOpenCL)
     {
         //////////////////////////////////////
-        int tWidth = TruncateWidthCU(_imgWidth);
+        // CUDA uses scalar, tightly packed float rows. Only the OpenCL
+        // backend still requires the historical input-width truncation.
+        int tWidth = GlobalUtil::_UseCUDA ? _imgWidth : TruncateWidthCU(_imgWidth);
         int skip = _imgWidth - tWidth;
         //skip = 0;
         if(!simple_format)

@@ -41,6 +41,9 @@ protected:
 	int			_texHeight;
 	GLuint		_fromPBO;
 public:
+    // Only used to select input resampling boundary behavior. Logical rows
+    // remain tightly packed even when allocation capacity is rounded up.
+    bool _exactDomain = false;
 	// Owns a texture object handle. Move-only: a copy would destroy the same
 	// handle twice, and the callers below default-construct one and then
 	// move-assign a binding into it, so an unbound handle must also be safe to

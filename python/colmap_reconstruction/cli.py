@@ -15,7 +15,7 @@ import sys
 import tempfile
 
 from .process import NativeFailure, NativeProcess
-from .resource_policy import select_policy, validate_overrides
+from .resource_policy import ALLOCATION_FINGERPRINT, select_policy, validate_overrides
 
 
 def positive_int(text):
@@ -367,17 +367,18 @@ class Reconstruction:
             if orientation is not None and (type(orientation) is not int or orientation <= 0):
                 raise ValueError('invalid native photo EXIF orientation')
             # ImageReader derives gravity from EXIF 1/3/6/8. The extraction
-            # worker rotates 6/8 by 90/270 degrees before CUDA SIFT, whose
-            # GLTexInput::TruncateWidthCU otherwise silently drops columns.
+            # worker rotates 6/8 by 90/270 degrees before CUDA SIFT. The
+            # allocation closure binds the exact-domain CUDA implementation;
+            # older/unknown binaries may still silently truncate columns.
             swapped = orientation in (6, 8)
             working_width = photo['height'] if swapped else photo['width']
-            if working_width % 4:
+            if (working_width % 4
+                    and self.identity.get('allocation_fingerprint') != ALLOCATION_FINGERPRINT):
                 raise ValueError('unsupported CUDA SIFT input ' + photo['path']
                     + ': effective working width ' + str(working_width)
                     + (' after EXIF rotation' if swapped else '')
-                    + ' must be a multiple of four (backend truncates columns); '
-                      'no automatic resize/fallback. Use supported input dimensions '
-                      'explicitly; originals are unchanged. Native odd-width support is pending.')
+                    + ' requires the matching native odd-width CUDA SIFT build; '
+                      'install the matching executable and rerun; no automatic resize/fallback.')
             working_dimensions.append(dict(path=photo['path'], width=working_width,
                 height=photo['width'] if swapped else photo['height']))
             paths.add(photo['path'])

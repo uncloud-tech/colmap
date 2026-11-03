@@ -64,6 +64,7 @@ EXTRACTION_ALLOCATION_SOURCES = (
     "src/thirdparty/SiftGPU/SiftGPU.cpp",
     "src/thirdparty/SiftGPU/SiftPyramid.cpp",
     "src/thirdparty/SiftGPU/PyramidCU.cpp",
+    "src/thirdparty/SiftGPU/CudaImageDomain.h",
     "src/thirdparty/SiftGPU/ProgramCU.cu",
     "src/colmap/exe/feature.cc",
 )

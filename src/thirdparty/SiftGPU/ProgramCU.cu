@@ -29,6 +29,7 @@
 #include "CuTexImage.h"
 #include "ProgramCU.h"
 #include "GlobalUtil.h"
+#include "CudaImageDomain.h"
 
 //----------------------------------------------------------------
 //Begin SiftGPU setting section.
@@ -234,7 +235,7 @@ template<int  FW>  __global__ void FilterV(cudaTextureObject_t texData, float* d
 }
 
 
-template<int LOG_SCALE> __global__ void UpsampleKernel(cudaTextureObject_t texData, float* d_result, int width)
+template<int LOG_SCALE> __global__ void UpsampleKernel(cudaTextureObject_t texData, float* d_result, int width, int height, bool exact_domain)
 {
 	const int SCALE = (1 << LOG_SCALE), SCALE_MASK = (SCALE - 1);
 	const float INV_SCALE = 1.0f / (float(SCALE));
@@ -243,16 +244,18 @@ template<int LOG_SCALE> __global__ void UpsampleKernel(cudaTextureObject_t texDa
 
 	int row = blockIdx.y >> LOG_SCALE;
 	int index = row * width + col;
+    const int neighbor = siftgpu::UpsampleNeighbor(col, row, width, height, exact_domain);
 	int dst_row = blockIdx.y;
 	int dst_idx= (width * dst_row + col) * SCALE;
 	int helper = blockIdx.y & SCALE_MASK;
 	if (helper)
 	{
 		float v11 = tex1Dfetch<float>(texData, index);
-		float v12 = tex1Dfetch<float>(texData, index + 1);
-		index += width;
+		float v12 = tex1Dfetch<float>(texData, neighbor);
+        const int next_row = siftgpu::UpsampleRow(row + 1, height, exact_domain);
+		index = next_row * width + col;
 		float v21 = tex1Dfetch<float>(texData, index);
-		float v22 = tex1Dfetch<float>(texData, index + 1);
+		float v22 = tex1Dfetch<float>(texData, siftgpu::UpsampleNeighbor(col, row + 1, width, height, exact_domain));
 		float w1 = INV_SCALE * helper, w2 = 1.0 - w1;
 		float v1 = (v21 * w1  + w2 * v11);
 		float v2 = (v22 * w1  + w2 * v12);
@@ -267,7 +270,7 @@ template<int LOG_SCALE> __global__ void UpsampleKernel(cudaTextureObject_t texDa
 	}else
 	{
 		float v1 = tex1Dfetch<float>(texData, index);
-		float v2 = tex1Dfetch<float>(texData, index + 1);
+		float v2 = tex1Dfetch<float>(texData, neighbor);
 		d_result[dst_idx] = v1;
 #pragma unroll
 		for(int i = 1; i < SCALE; ++i)
@@ -289,9 +292,9 @@ void ProgramCU::SampleImageU(CuTexImage *dst, CuTexImage *src, int log_scale)
 	dim3 block(FILTERH_TILE_WIDTH);
 	switch(log_scale)
 	{
-	case 1 : 	UpsampleKernel<1> <<< grid, block>>> (srcTex.handle, (float*) dst->_cuData, width);	break;
-	case 2 : 	UpsampleKernel<2> <<< grid, block>>> (srcTex.handle, (float*) dst->_cuData, width);	break;
-	case 3 : 	UpsampleKernel<3> <<< grid, block>>> (srcTex.handle, (float*) dst->_cuData, width);	break;
+	case 1 : 	UpsampleKernel<1> <<< grid, block>>> (srcTex.handle, (float*) dst->_cuData, width, height, src->_exactDomain);	break;
+	case 2 : 	UpsampleKernel<2> <<< grid, block>>> (srcTex.handle, (float*) dst->_cuData, width, height, src->_exactDomain);	break;
+	case 3 : 	UpsampleKernel<3> <<< grid, block>>> (srcTex.handle, (float*) dst->_cuData, width, height, src->_exactDomain);	break;
 	default:	break;
 	}
 }
@@ -698,8 +701,11 @@ void __global__ InitHist_Kernel(cudaTextureObject_t texDataF4, int4* hist, int w
 #pragma unroll
 				for(int i = 0; i < 4 ; ++i, ++scol)
 				{
-					float4 temp = tex1Dfetch<float4>(texDataF4, sidx +i);
-					v[i] = (scol < ws -1 && scol > 0 && temp.x!=0) ? 1 : 0;
+					if(siftgpu::IsFeatureColumn(scol, ws))
+                    {
+                        float4 temp = tex1Dfetch<float4>(texDataF4, sidx + i);
+                        v[i] = temp.x != 0 ? 1 : 0;
+                    }
 				}
 			}
 			hist[hidx] = make_int4(v[0], v[1], v[2], v[3]);
