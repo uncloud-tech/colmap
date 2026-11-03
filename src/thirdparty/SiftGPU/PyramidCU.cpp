@@ -39,6 +39,7 @@ using namespace std;
 #include "SiftPyramid.h"
 #include "ProgramCU.h"
 #include "PyramidCU.h"
+#include "CudaImageDomain.h"
 
 
 //#include "imdebug/imdebuggl.h"
@@ -86,10 +87,12 @@ void PyramidCU::InitializeContext()
 void PyramidCU::InitPyramid(int w, int h, int ds)
 {
 	int wp, hp, toobig = 0;
+    // GLTexInput has already applied ds to its CPU upload dimensions.
+    _exact_domain = ((w >> ds) % 4) != 0;
 	if(ds == 0)
 	{
 		//
-		TruncateWidth(w);
+		if(!_exact_domain) TruncateWidth(w);
 		////
 		_down_sample_factor = 0;
 		if(GlobalUtil::_octave_min_default>=0)
@@ -114,12 +117,17 @@ void PyramidCU::InitPyramid(int w, int h, int ds)
 		h >>= ds;
 		/////
 
-		TruncateWidth(w);
+		if(!_exact_domain) TruncateWidth(w);
 
 		wp = w;
 		hp = h; 
 
 	}
+
+    // A requested positive first octave on a tiny input has no nonempty
+    // historical output to preserve. Keep one sample rather than a zero grid.
+    wp = max(1, wp);
+    hp = max(1, hp);
 
 	while(wp > GlobalUtil::_texMaxDim  || hp > GlobalUtil::_texMaxDim )
 	{
@@ -231,18 +239,25 @@ void PyramidCU::ResizePyramid(int w, int h)
 		totalkb += ((nlev *8 -19)* (wa * h) * 4 / 1024);
 		for( j = 0; j< nlev; j++, gus++, dog++, got++, key++)
 		{
-			gus->InitTexture(wa, h); //nlev
+			gus->InitTexture(wa, h);
+            gus->SetImageSize(siftgpu::LevelWidth(w, _exact_domain), h); //nlev
 			if(j==0)continue;
-			dog->InitTexture(wa, h);  //nlev -1
+			dog->InitTexture(wa, h);
+            dog->SetImageSize(siftgpu::LevelWidth(w, _exact_domain), h);  //nlev -1
 			if(	j >= 1 && j < 1 + param._dog_level_num)
 			{
-				got->InitTexture(wa, h, 2); //2 * nlev - 6
+				got->InitTexture(wa, h, 2);
+                got->SetImageSize(siftgpu::LevelWidth(w, _exact_domain), h); //2 * nlev - 6
 				got->InitTexture2D();
 			}
-			if(j > 1 && j < nlev -1)	key->InitTexture(wa, h, 4); // nlev -3 ; 4 * nlev - 12
+			if(j > 1 && j < nlev -1) {
+                key->InitTexture(wa, h, 4);
+                key->SetImageSize(siftgpu::LevelWidth(w, _exact_domain), h);
+            } // nlev -3 ; 4 * nlev - 12
 		}
 		w>>=1;
 		h>>=1;
+        if(_exact_domain) { w = siftgpu::LevelWidth(w, true); h = max(1, h); }
 	}
 
 	totalkb += ResizeFeatureStorage();
@@ -290,18 +305,25 @@ void PyramidCU::FitPyramid(int w, int h)
 
 		for(int j = 0; j< nlev; j++, gus++, dog++, got++, key++)
 		{
-			gus->InitTexture(wa, h); //nlev
+			gus->InitTexture(wa, h);
+            gus->SetImageSize(siftgpu::LevelWidth(w, _exact_domain), h); //nlev
 			if(j==0)continue;
-			dog->InitTexture(wa, h);  //nlev -1
+			dog->InitTexture(wa, h);
+            dog->SetImageSize(siftgpu::LevelWidth(w, _exact_domain), h);  //nlev -1
 			if(	j >= 1 && j < 1 + param._dog_level_num)
 			{
-				got->InitTexture(wa, h, 2); //2 * nlev - 6
+				got->InitTexture(wa, h, 2);
+                got->SetImageSize(siftgpu::LevelWidth(w, _exact_domain), h); //2 * nlev - 6
 				got->InitTexture2D();
 			}
-			if(j > 1 && j < nlev -1)	key->InitTexture(wa, h, 4); // nlev -3 ; 4 * nlev - 12
+			if(j > 1 && j < nlev -1) {
+                key->InitTexture(wa, h, 4);
+                key->SetImageSize(siftgpu::LevelWidth(w, _exact_domain), h);
+            } // nlev -3 ; 4 * nlev - 12
 		}
 		w>>=1;
 		h>>=1;
+        if(_exact_domain) { w = siftgpu::LevelWidth(w, true); h = max(1, h); }
 	}
 }
 
@@ -328,7 +350,7 @@ int PyramidCU::ResizeFeatureStorage()
 	int w,  i;
 
 	//
-	int num = (int)ceil(log(double(whmax))/log(4.0));
+	int num = max(1, (int)ceil(log(double(whmax))/log(4.0)));
 
 	if( _hpLevelNum != num)
 	{
@@ -925,7 +947,7 @@ GLTexImage* PyramidCU::GetLevelTexture(int octave, int level, int dataName)
 void PyramidCU::ConvertInputToCU(GLTexInput* input)
 {
 	int ws = input->GetImgWidth(), hs = input->GetImgHeight();
-	TruncateWidth(ws);
+    _inputTex->_exactDomain = _exact_domain;
 	//copy the input image to pixel buffer object
     if(input->_pixel_data)
     {
@@ -1134,7 +1156,8 @@ int PyramidCU::FitHistogramPyramid(CuTexImage* tex)
 	CuTexImage *htex;
 	int hist_level_num = _hpLevelNum - _pyramid_octave_first / 2; 
 	htex = _histoPyramidTex + hist_level_num - 1;
-	int w = (tex->GetImgWidth() + 2) >> 2;
+	int w = _exact_domain ? siftgpu::HistogramWidth(tex->GetImgWidth())
+                          : (tex->GetImgWidth() + 2) >> 2;
 	int h = tex->GetImgHeight();
 	int count = 0; 
 	for(int k = 0; k < hist_level_num; k++, htex--)

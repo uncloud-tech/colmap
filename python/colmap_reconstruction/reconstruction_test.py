@@ -202,11 +202,12 @@ class FrontendTest(unittest.TestCase):
                 self.assertEqual([call.args[0] for call in native.call_args_list], ['photo_directory_summary'])
                 self.assertFalse((root / 'database.db').exists())
 
-    def test_cuda_sift_refuses_only_effective_width_truncation(self):
+    def test_cuda_sift_exact_domain_requires_current_native_binding(self):
         import json
         from unittest.mock import patch
         from colmap_reconstruction.cli import Reconstruction, parse_args
         from colmap_reconstruction.process import NativeFailure
+        from colmap_reconstruction.resource_policy import ALLOCATION_FINGERPRINT
         # EXIF 6/8 swap working width/height; null, 1, 3 and unsupported
         # mirrored orientations do not. A 3001-pixel height alone is valid.
         for width, height, orientation, refuses in (
@@ -214,34 +215,38 @@ class FrontendTest(unittest.TestCase):
                 (4004, 3001, 3, False), (4004, 3001, 5, False),
                 (4004, 3001, 6, True), (4004, 3001, 8, True),
                 (4003, 3004, None, True), (4003, 3004, 6, False),
-                (6204, 4132, None, False), (6201, 4130, None, True)):
-            with self.subTest(width=width, height=height, orientation=orientation), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                reconstruction = Reconstruction(parse_args(['--photos', str(root),
-                    '--workspace', str(root)]), sys.executable)
-                reconstruction.assets.mkdir()
-                reconstruction.identity = {'source_commit': 'a' * 40}
-                for name in ('loader_scratch_host', 'process_host', 'unknown_host', 'reserve_host'):
-                    setattr(reconstruction.args, name + '_bytes', 0)
-                commands = []
-                def native(command, *arguments, **kwargs):
-                    commands.append(command)
-                    if command == 'photo_directory_summary':
-                        summary = photo_summary(width, height, orientation)
-                        summary['photos'][0]['path'] = 'DSC_0393.JPG'
-                        return json.dumps(summary)
-                    self.assertEqual(command, 'feature_extractor')
-                    raise NativeFailure('test boundary')
-                with patch.object(reconstruction, 'native', side_effect=native), \
-                     patch.object(reconstruction, 'resources', return_value={'host': 2**30}):
-                    if refuses:
-                        with self.assertRaisesRegex(ValueError, 'DSC_0393.JPG: effective working width.*multiple of four.*no automatic resize/fallback'):
-                            reconstruction.prepare()
-                        self.assertEqual(commands, ['photo_directory_summary'])
-                    else:
-                        with self.assertRaises(NativeFailure):
-                            reconstruction.prepare()
-                        self.assertEqual(commands, ['photo_directory_summary', 'feature_extractor'])
+                (6204, 4132, None, False), (6201, 4130, None, True),
+                (6202, 4130, None, True), (1, 2, None, True),
+                (2, 1, 6, True), (3, 2, 8, True)):
+            for current in (False, True):
+                with self.subTest(width=width, height=height, orientation=orientation, current=current), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    reconstruction = Reconstruction(parse_args(['--photos', str(root),
+                        '--workspace', str(root)]), sys.executable)
+                    reconstruction.assets.mkdir()
+                    reconstruction.identity = {'source_commit': 'a' * 40,
+                        'allocation_fingerprint': ALLOCATION_FINGERPRINT if current else '0' * 64}
+                    for name in ('loader_scratch_host', 'process_host', 'unknown_host', 'reserve_host'):
+                        setattr(reconstruction.args, name + '_bytes', 0)
+                    commands = []
+                    def native(command, *arguments, **kwargs):
+                        commands.append(command)
+                        if command == 'photo_directory_summary':
+                            summary = photo_summary(width, height, orientation)
+                            summary['photos'][0]['path'] = 'DSC_0393.JPG'
+                            return json.dumps(summary)
+                        self.assertEqual(command, 'feature_extractor')
+                        raise NativeFailure('test boundary')
+                    with patch.object(reconstruction, 'native', side_effect=native), \
+                         patch.object(reconstruction, 'resources', return_value={'host': 2**30}):
+                        if refuses and not current:
+                            with self.assertRaisesRegex(ValueError, 'DSC_0393.JPG: effective working width.*matching native odd-width CUDA SIFT'):
+                                reconstruction.prepare()
+                            self.assertEqual(commands, ['photo_directory_summary'])
+                        else:
+                            with self.assertRaises(NativeFailure):
+                                reconstruction.prepare()
+                            self.assertEqual(commands, ['photo_directory_summary', 'feature_extractor'])
 
     def test_resolution_report_distinguishes_geometry_from_explicit_resize(self):
         import json

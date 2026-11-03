@@ -2,6 +2,10 @@
 
 #include <gtest/gtest.h>
 
+#if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
+#include <GL/glew.h>
+#endif
+
 #if defined(COLMAP_GUI_ENABLED)
 #include <QApplication>
 #else
@@ -15,6 +19,8 @@
 #include "colmap/util/opengl_utils.h"
 #if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
 #include "colmap/util/cuda.h"
+#include "thirdparty/SiftGPU/GlobalUtil.h"
+#include "thirdparty/SiftGPU/GLTexImage.h"
 #endif
 
 #include <functional>
@@ -230,6 +236,84 @@ TEST(ExtractSiftFeaturesGPU, Nominal) {
     ValidateDescriptorNorms(descriptors);
   });
 }
+
+#if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
+TEST(ExtractSiftFeaturesGPU, InputDomainAndImmutability) {
+  RunGpuTest([] {
+    FeatureExtractionOptions options(FeatureExtractorType::SIFT);
+    options.use_gpu = true;
+    options.gpu_index = "0";
+    auto extractor = CreateSiftFeatureExtractor(options);
+    ASSERT_NE(extractor, nullptr);
+    ASSERT_TRUE(GlobalUtil::_UseCUDA);
+    for (int width : {1, 2, 3, 4, 5, 257, 258, 259, 260}) {
+      for (int height : {1, 2, 17}) {
+        std::vector<float> pixels(width * height);
+        std::iota(pixels.begin(), pixels.end(), 0.0f);
+        const auto original = pixels;
+        GLTexInput input;
+        ASSERT_TRUE(input.SetImageData(width, height, pixels.data(),
+                                      GL_LUMINANCE, GL_FLOAT));
+        EXPECT_EQ(input.GetImgWidth(), width);
+        EXPECT_EQ(input.GetImgHeight(), height);
+        EXPECT_EQ(pixels, original);
+        std::vector<uint8_t> bytes(width * height);
+        for (size_t i = 0; i < bytes.size(); ++i) bytes[i] = i % 251;
+        const auto original_bytes = bytes;
+        ASSERT_TRUE(input.SetImageData(width, height, bytes.data(),
+                                      GL_LUMINANCE, GL_UNSIGNED_BYTE));
+        ASSERT_EQ(input.GetImgWidth(), width);
+        ASSERT_EQ(input.GetImgHeight(), height);
+        const auto* converted = static_cast<const float*>(input._pixel_data);
+        for (size_t i = 0; i < bytes.size(); ++i) {
+          EXPECT_FLOAT_EQ(converted[i], bytes[i] / 255.0f);
+        }
+        EXPECT_EQ(bytes, original_bytes);
+      }
+    }
+  });
+}
+
+TEST(ExtractSiftFeaturesGPU, ArbitraryWidthsAndReuse) {
+  RunGpuTest([] {
+    FeatureExtractionOptions options(FeatureExtractorType::SIFT);
+    options.use_gpu = true;
+    options.gpu_index = "0";
+    auto reused = CreateSiftFeatureExtractor(options);
+    ASSERT_NE(reused, nullptr);
+    // Repeated and descending sizes exercise FitPyramid as well as allocation,
+    // with exact-domain -> legacy-domain -> exact-domain transitions.
+    for (int octave : {-1, 0, 1}) {
+      options.sift->first_octave = octave;
+      reused = CreateSiftFeatureExtractor(options);
+      for (int width : {259, 260, 257, 258, 260, 257, 1, 2, 3, 4, 5}) {
+        for (bool rotated : {false, true}) {
+          const int height = width < 6 ? 3 : 129;
+          Bitmap bitmap(width, height, false);
+          for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+              bitmap.SetPixel(x, y, BitmapColor<uint8_t>(
+                  ((x / 5 + y / 7) % 2) * 255));
+            }
+          }
+          if (rotated) bitmap.Rot90(1);
+          FeatureKeypoints keypoints, control_keypoints;
+          FeatureDescriptors descriptors, control_descriptors;
+          auto fresh = CreateSiftFeatureExtractor(options);
+          ASSERT_NE(fresh, nullptr);
+          ASSERT_TRUE(reused->Extract(bitmap, &keypoints, &descriptors));
+          ASSERT_TRUE(fresh->Extract(bitmap, &control_keypoints, &control_descriptors));
+          ValidateKeypoints(keypoints, bitmap);
+          EXPECT_EQ(keypoints, control_keypoints);
+          ASSERT_EQ(descriptors.data.rows(), control_descriptors.data.rows());
+          EXPECT_TRUE((descriptors.data.array() == control_descriptors.data.array()).all());
+          if (width >= 257) EXPECT_FALSE(keypoints.empty());
+        }
+      }
+    }
+  });
+}
+#endif
 
 FeatureDescriptors CreateRandomFeatureDescriptors(const size_t num_features) {
   SetPRNGSeed(0);

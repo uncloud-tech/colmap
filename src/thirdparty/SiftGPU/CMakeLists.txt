@@ -14,6 +14,7 @@ if(CUDA_ENABLED OR HIP_ENABLED)
     # toolchains; on ROCm they are translated by colmap/util/cuda_to_hip.h.
     add_compile_definitions(SIFTGPU_CUDA_ENABLED)
     set(OPTIONAL_GPU_SRCS
+        CudaImageDomain.h
         CuTexImage.h CuTexImage.cpp
         ProgramCU.cu
         ProgramCU.h

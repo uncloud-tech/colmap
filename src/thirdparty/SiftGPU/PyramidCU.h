@@ -30,6 +30,8 @@ class CuTexImage;
 class SiftPyramid;
 class PyramidCU:public SiftPyramid
 {
+	// Reset from each effective (post-rotation) input, never from capacity.
+    bool _exact_domain = false;
 	CuTexImage* _inputTex;
 	CuTexImage* _allPyramid;
 	CuTexImage* _histoPyramidTex;
