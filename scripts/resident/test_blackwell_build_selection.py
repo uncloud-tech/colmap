@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""Configure the real MVS rules with stub targets; no CUDA build or GPU needed."""
+"""Configure real MVS rules with stub targets, without CUDA or a GPU."""
 
 import pathlib
 import subprocess
@@ -11,8 +11,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 class BlackwellBuildSelectionTest(unittest.TestCase):
     def configure(self, architectures, opt_in=None):
-        with TemporaryDirectory(prefix=".blackwell-test-", dir=ROOT) as directory:
-            source = pathlib.Path(directory)
+        with TemporaryDirectory(prefix=".blackwell-test-", dir=ROOT) as tmp:
+            source = pathlib.Path(tmp)
             (source / "empty.cc").write_text("// Configure-only target.\n")
             # Read the real root option declaration, without configuring its
             # heavyweight dependencies. Missing options must not default to ON.
@@ -51,7 +51,9 @@ file(WRITE "${{CMAKE_BINARY_DIR}}/architectures" "${{archs}}")
             if opt_in is not None:
                 command.append("-DMVS_NATIVE_BLACKWELL_ENABLED=" + opt_in)
             result = subprocess.run(command, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(
+                result.returncode, 0, result.stdout + result.stderr
+            )
             return (build / "architectures").read_text(), result.stderr
 
     def test_native_sm120_is_explicit_experimental_opt_in(self):
