@@ -24,6 +24,11 @@ jobs:
         github.event.issue.pull_request &&
         contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
         startsWith(github.event.comment.body, '/')))
+    # One eligible review per PR, shared by automatic and manual triggers.
+    # Keep this job-level so ignored bot/unrelated events cannot cancel reviews.
+    concurrency:
+      group: ${{ github.workflow }}-pr-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
