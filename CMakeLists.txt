@@ -49,6 +49,7 @@ option(BUILD_SHARED_LIBS "Whether to build shared libraries (faster linktime, sl
 option(ALL_SOURCE_TARGET "Whether to create a target for all source files (for Visual Studio / XCode development)" OFF)
 
 # Experimental
+option(MVS_NATIVE_BLACKWELL_ENABLED "Experimental native Blackwell MVS codegen for qualification only; bypasses known NVCC corruption workaround, not a correctness guarantee" OFF)
 option(CASPAR_ENABLED "Whether to enable CASPAR-accelerated bundle adjustment" OFF)
 option(CASPAR_USE_DOUBLE "Use double precision in Caspar solver" OFF)
 

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
-// Native two-device gates. A skipped test is NOT multi-GPU qualification.
+// Native multi-device gates. A skipped test is NOT multi-GPU qualification.
 #include "colmap/mvs/multi_gpu_fixed_cohort.h"
 #include "colmap/mvs/owned_fixed_cohort_validation.h"
 #include "colmap/mvs/patch_match_cuda_owned.h"
@@ -23,7 +23,7 @@ struct Fixture {
   std::vector<PhasePlanDevice> devices;
 };
 
-Fixture MakeFixture(size_t clusters = 1) {
+Fixture MakeFixture(size_t clusters = 1, int device_count = 2) {
   Fixture f;
   // Reference 2 sees only adjacent cameras. At Z=4, a 0.125 baseline
   // gives at most 1.791 degrees: no true plane point can pass the unchanged
@@ -90,7 +90,7 @@ Fixture MakeFixture(size_t clusters = 1) {
   declarations.unknown_provenance = "tiny native fixture allowance, not calibrated physical-fit proof";
   declarations.headroom_reserve = {1ull << 20, 1ull << 20};
   f.budget = BuildFixedCohortLogicalInventory(f.shapes, jobs, declarations);
-  for (int d = 0; d < 2; ++d) {
+  for (int d = 0; d < device_count; ++d) {
     const auto observed = ObserveFixedCohortCapacities(d);
     PhasePlanDevice device;
     device.ordinal = d;
@@ -115,20 +115,31 @@ size_t PositiveDepthCount(const FixedCohortResult::Maps& maps) {
                        [](float depth) { return std::isfinite(depth) && depth > 0; });
 }
 
-TEST(MultiGpuFixedCohort, TwoDevicePhotoGeoExactUniqueWritersAndBarrier) {
+// SM120 is a candidate qualification path, not inferred support. Keep the
+// original two-device gate restricted to the already qualified architectures.
+void CheckPhotoGeoExactUniqueWritersAndBarrier(int device_count) {
   int count = 0;
-  if (cudaGetDeviceCount(&count) != cudaSuccess || count < 2)
-    GTEST_SKIP() << "requires two actual visible CUDA devices";
-  cudaDeviceProp a{}, b{};
-  ASSERT_EQ(cudaGetDeviceProperties(&a, 0), cudaSuccess);
-  ASSERT_EQ(cudaGetDeviceProperties(&b, 1), cudaSuccess);
-  if (a.major != 8 || (a.minor != 6 && a.minor != 9) || a.major != b.major || a.minor != b.minor)
-    GTEST_SKIP() << "primary exactness gate requires identical qualified sm86/89 devices; heterogeneous/Blackwell not inferred";
-  auto f = MakeFixture();
+  if (cudaGetDeviceCount(&count) != cudaSuccess || count < device_count)
+    GTEST_SKIP() << "requires " << device_count << " actual visible CUDA devices";
+  cudaDeviceProp first{};
+  ASSERT_EQ(cudaGetDeviceProperties(&first, 0), cudaSuccess);
+  const bool qualified = first.major == 8 && (first.minor == 6 || first.minor == 9);
+  const bool candidate = device_count == 4 && first.major == 12 && first.minor == 0;
+  if (!qualified && !candidate)
+    GTEST_SKIP() << "requires homogeneous sm86/89 or four candidate sm120 devices";
+  for (int d = 1; d < device_count; ++d) {
+    cudaDeviceProp properties{};
+    ASSERT_EQ(cudaGetDeviceProperties(&properties, d), cudaSuccess);
+    if (properties.major != first.major || properties.minor != first.minor)
+      GTEST_SKIP() << "heterogeneous output equivalence is not qualified";
+  }
+  // Four references seed four useful devices; ordered duplicate sources and
+  // all numerical options are identical to the existing single-device oracle.
+  auto f = MakeFixture(1, device_count);
   const auto plan = PlanMultiGpuFixedCohort(f.shapes, f.refs, f.budget, f.devices, 1ull << 30, 1);
   std::atomic<int> begins[2][4]{};
   std::atomic<int> outputs[2][4]{};
-  std::atomic<bool> useful[2][2]{};
+  std::atomic<bool> useful[2][4]{};
   std::atomic<bool> photo_joined{false};
   const auto result = RunMultiGpuFixedCohortPhotoGeo(f.images, f.refs, f.budget, plan,
       NativeRunDeadline::FromBudget(std::chrono::seconds(120)), 32, nullptr,
@@ -151,8 +162,8 @@ TEST(MultiGpuFixedCohort, TwoDevicePhotoGeoExactUniqueWritersAndBarrier) {
       EXPECT_EQ(begins[geo][i].load(), 1);
       EXPECT_EQ(outputs[geo][i].load(), 1);
     }
-    EXPECT_TRUE(useful[geo][0].load());
-    EXPECT_TRUE(useful[geo][1].load());
+    for (int d = 0; d < device_count; ++d)
+      EXPECT_TRUE(useful[geo][d].load()) << "device=" << d;
   }
   const auto single = RunFixedCohortPhotoGeo(f.images, f.refs, f.budget,
       {1ull << 30, 256ull << 20}, NativeRunDeadline::FromBudget(std::chrono::seconds(120)), PairDispatch::kSerial);
@@ -188,6 +199,14 @@ TEST(MultiGpuFixedCohort, TwoDevicePhotoGeoExactUniqueWritersAndBarrier) {
     }
     EXPECT_GT(valid, 0) << "all-filtered maps are not useful reconstruction proof";
   }
+}
+
+TEST(MultiGpuFixedCohort, TwoDevicePhotoGeoExactUniqueWritersAndBarrier) {
+  CheckPhotoGeoExactUniqueWritersAndBarrier(2);
+}
+
+TEST(MultiGpuFixedCohort, FourDevicePhotoGeoExactUniqueWritersAndBarrier) {
+  CheckPhotoGeoExactUniqueWritersAndBarrier(4);
 }
 
 // The 16 independent copies retain the corrected plane, ordered duplicates,
@@ -394,11 +413,11 @@ TEST(MultiGpuFixedCohort, CancellationAtCohortRetirementStopsNewBanksAndDrains) 
       NativeRunDeadline::FromBudget(std::chrono::seconds(300)), 32));
 }
 
-TEST(MultiGpuFixedCohort, ObserverFailureAndCancellationDrainAllDevicesWithoutResult) {
+void CheckObserverFailureAndCancellationDrainAllDevicesWithoutResult(int device_count) {
   int count = 0;
-  if (cudaGetDeviceCount(&count) != cudaSuccess || count < 2)
-    GTEST_SKIP() << "requires two actual visible CUDA devices";
-  auto f = MakeFixture();
+  if (cudaGetDeviceCount(&count) != cudaSuccess || count < device_count)
+    GTEST_SKIP() << "requires " << device_count << " actual visible CUDA devices";
+  auto f = MakeFixture(1, device_count);
   const auto plan = PlanMultiGpuFixedCohort(f.shapes, f.refs, f.budget, f.devices, 1ull << 30, 1);
   for (const bool failed_geo : {false, true}) {
     for (const bool cancel_request : {false, true}) {
@@ -417,6 +436,13 @@ TEST(MultiGpuFixedCohort, ObserverFailureAndCancellationDrainAllDevicesWithoutRe
   }
   EXPECT_NO_THROW(RunMultiGpuFixedCohortPhotoGeo(f.images, f.refs, f.budget, plan,
       NativeRunDeadline::FromBudget(std::chrono::seconds(120)), 32));
+}
+TEST(MultiGpuFixedCohort, ObserverFailureAndCancellationDrainAllDevicesWithoutResult) {
+  CheckObserverFailureAndCancellationDrainAllDevicesWithoutResult(2);
+}
+
+TEST(MultiGpuFixedCohort, FourDeviceObserverFailureAndCancellationDrainAllDevicesWithoutResult) {
+  CheckObserverFailureAndCancellationDrainAllDevicesWithoutResult(4);
 }
 }  // namespace
 }  // namespace colmap::mvs::owned

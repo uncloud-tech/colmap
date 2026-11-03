@@ -459,7 +459,14 @@ if(CUDA_ENABLED)
         endif()
     endif()
 
-    if(_COLMAP_BLACKWELL_TARGET)
+    if(_COLMAP_BLACKWELL_TARGET AND MVS_NATIVE_BLACKWELL_ENABLED)
+        message(WARNING
+            "Using experimental native Blackwell MVS codegen. The known NVCC "
+            "compiler corruption workaround is disabled; this is NOT a correctness "
+            "or hardware support guarantee. Verify target SASS and run native "
+            "output exactness tests before accepting results "
+            "(see https://github.com/colmap/colmap/issues/3514).")
+    elseif(_COLMAP_BLACKWELL_TARGET)
         message(WARNING
             "Blackwell GPU (sm_100+) detected. Replacing sm_100+ architectures "
             "with 90-virtual (PTX) for colmap_mvs_cuda to work around an NVCC "
@@ -629,6 +636,10 @@ COLMAP_ADD_TEST(
 
 # Uses real coordinator and owner threads; POSIX subprocess death diagnostics.
 if(TESTS_ENABLED AND UNIX)
+    add_test(NAME "mvs/blackwell_build_selection_test"
+        COMMAND ${Python3_EXECUTABLE} -I
+            "${PROJECT_SOURCE_DIR}/scripts/resident/test_blackwell_build_selection.py")
+    set_tests_properties(mvs/blackwell_build_selection_test PROPERTIES TIMEOUT 60)
     add_test(NAME "mvs/multi_gpu_workers_test"
         COMMAND ${Python3_EXECUTABLE} -I
             "${PROJECT_SOURCE_DIR}/scripts/resident/test_multi_gpu_workers.py")
