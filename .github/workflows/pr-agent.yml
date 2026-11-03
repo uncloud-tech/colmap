@@ -1,0 +1,52 @@
+name: PR Agent
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+  issue_comment:
+    types: [created, edited]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  review:
+    # Fork PR events lack provider secrets. Maintainers can request reviews via
+    # PR comments after this workflow is on the repository's default branch.
+    # Restrict comment-triggered API spending to repository collaborators.
+    if: >-
+      github.event.sender.type != 'Bot' &&
+      ((github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository) ||
+       (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+        startsWith(github.event.comment.body, '/')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # No checkout or execution of PR-head code. This upstream action uses an
+      # ephemeral Docker runtime on the GitHub-hosted runner, not a hosted service.
+      # The release pins the wrapper, NOT its rolling github_action image digest.
+      - name: Describe, review and suggest improvements
+        uses: The-PR-Agent/pr-agent@v0.49.0
+        env:
+          # Ollama Cloud's OpenAI-compatible API; no local Ollama server.
+          OPENAI_KEY: ${{ secrets.OLLAMA_API_KEY }}
+          OPENAI__API_BASE: https://ollama.com/v1
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CONFIG__MODEL: openai/glm-5.3-flash
+          CONFIG__FALLBACK_MODELS: '[]'
+          CONFIG__MAX_MODEL_TOKENS: "32000"
+          # Conservative review budget below the advertised 1M context window.
+          CONFIG__CUSTOM_MODEL_MAX_TOKENS: "128000"
+          # Report the actual model used without dumping configuration/secrets.
+          CONFIG__LOG_LEVEL: INFO
+          CONFIG__OUTPUT_RUN_DETAILS: "true"
+          GITHUB_ACTION_CONFIG__AUTO_DESCRIBE: "true"
+          GITHUB_ACTION_CONFIG__AUTO_REVIEW: "true"
+          GITHUB_ACTION_CONFIG__AUTO_IMPROVE: "true"
+          GITHUB_ACTION_CONFIG__PR_ACTIONS: '["opened", "reopened", "ready_for_review", "synchronize"]'
+          GITHUB_ACTION_CONFIG__FAIL_ON_TOOL_ERRORS: "true"
