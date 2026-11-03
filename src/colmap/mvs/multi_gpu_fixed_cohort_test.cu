@@ -376,7 +376,7 @@ TEST(MultiGpuFixedCohort,
     SCOPED_TRACE("single-device closed cluster starting at global job=" +
                  std::to_string(base));
     std::vector<FixedCohortReference> refs(f.refs.begin() + base,
-                                         f.refs.begin() + base + 4);
+                                           f.refs.begin() + base + 4);
     std::vector<FixedCohortJobShape> jobs;
     for (const auto& ref : refs) {
       for (const auto& sources : {ref.photo_sources, ref.geo_sources}) {
@@ -400,17 +400,16 @@ TEST(MultiGpuFixedCohort,
               << std::endl;
     FixedCohortResult single;
     ASSERT_NO_THROW(single = RunFixedCohortPhotoGeo(f.images,
-                                                  refs,
-                                                  budget,
-                                                  {1ull << 30, 256ull << 20},
-                                                  single_deadline,
-                                                  PairDispatch::kSerial));
+                                                    refs,
+                                                    budget,
+                                                    {1ull << 30, 256ull << 20},
+                                                    single_deadline,
+                                                    PairDispatch::kSerial));
     measured_snapshot_bytes =
         CheckedAdd(measured_snapshot_bytes, single.actual_snapshot_bytes);
-    measured_staging_bytes.insert(
-        measured_staging_bytes.end(),
-        single.actual_geo_staging_bytes.begin(),
-        single.actual_geo_staging_bytes.end());
+    measured_staging_bytes.insert(measured_staging_bytes.end(),
+                                  single.actual_geo_staging_bytes.begin(),
+                                  single.actual_geo_staging_bytes.end());
     std::cout << "CohortTurnover stage=single_cluster completed global_job="
               << base << " actual_pitched_snapshot_bytes="
               << single.actual_snapshot_bytes;
