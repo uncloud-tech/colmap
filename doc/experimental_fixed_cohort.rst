@@ -67,10 +67,44 @@ requested native map has been written successfully. It records completed
 backend, generated allocation fingerprint, requested/effective storage and
 reason, actual phase owner limits (not observed concurrency), and per-reference
 options/source lists. Exact capacity-byte values are decimal strings. It never
-writes a report in ``prepare_only`` mode. Existing report/output paths refuse
+writes a report in single-device ``prepare_only`` mode. Existing report/output paths refuse
 before preparation; the eventual publication remains atomically no-clobber.
 ``colmap-reconstruct`` uses this mode; see ``reconstruction-cli.md`` for the
 installed photos-to-fusion workflow and its experimental limitations.
+
+Approved multi-device execution
+-------------------------------
+
+The installed photos-only frontend can explicitly approve a stereo device set
+independently of the extraction/matching device. Its native adapter passes
+``--stereo_devices ordinal:uuid:capacity-bytes,...`` (at least two distinct actual
+visible devices), ``--observe_capacities 1``, a common host capacity, automatic
+owners and shared/auto PHOTO source storage. UUIDs are the raw lowercase hex
+values from native inventory; per-device caps never raise observed FREE.
+
+For this mode only, ``--prepare_only 1 --report_path NEW`` writes the complete
+metadata-only approval plan without decoding pixels or creating the output root.
+It queries device resources but runs no solver. Execution requires
+``--approved_multi_gpu_plan PATH`` with the exact same device budgets, numerical
+options, ordered source lists and phase placement. The completed execution report
+contains that plan and exact executed per-reference options, including each
+assigned device ordinal. A changed plan refuses before payload preparation.
+
+One native process distributes both PHOTO and GEO. PHOTO cohorts share existing
+immutable grayscale source banks. A fully admitted host float32 PHOTO exchange
+survives the complete producer barrier and final GEO drain; GEO uses the existing
+host-map solver input, not foreign-device snapshots. There is no peer access,
+pooled VRAM, disk exchange, source reduction or cross-cohort/GEO cache claim.
+Common host admission includes caller/frozen images, PHOTO exchange and retained
+GEO outputs even with ``final_geo_only``. Per-device static host envelopes and
+separate VRAM budgets include banks, private owners and transients. Sequential
+cohorts preserve quality when a larger union does not fit; an exchange that cannot
+fit refuses honestly. Cancellation wakes every live device coordinator and graph
+control and joins launched workers before returning failure.
+
+The single-device entry and snapshot validation remain unchanged when
+``--stereo_devices`` is absent. No multi-device performance or Blackwell
+qualification follows from planning or resource observations.
 
 Invocation
 ----------

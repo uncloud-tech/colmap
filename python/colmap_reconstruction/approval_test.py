@@ -56,7 +56,7 @@ if command == 'reconstruction_info':
         available_host_bytes=32 * 1024**3,
         available_device_bytes=(int(Path(os.environ['TEST_FREE']).read_text()) if Path(os.environ['TEST_FREE']).exists() else 16 * 1024**3),
         device_uuid=(Path(os.environ['TEST_DEVICE']).read_text() if Path(os.environ['TEST_DEVICE']).exists() else next((d['device_uuid'] for d in json.loads(os.environ.get('TEST_INVENTORY', '[]')) if '--gpu_index' in sys.argv and d['ordinal'] == int(sys.argv[sys.argv.index('--gpu_index') + 1])), 'GPU-test')),
-        device_inventory=json.loads(os.environ.get('TEST_INVENTORY', '[{"ordinal":0,"usable":true,"available_device_bytes":"17179869184","device_uuid":"GPU-test"},{"ordinal":2,"usable":true,"available_device_bytes":"17179869184","device_uuid":"GPU-test"}]')))))
+        device_inventory=json.loads(os.environ.get('TEST_INVENTORY', '[{"ordinal":0,"usable":true,"compute_capability_major":8,"compute_capability_minor":9,"available_device_bytes":"17179869184","device_uuid":"GPU-test"},{"ordinal":2,"usable":true,"compute_capability_major":8,"compute_capability_minor":9,"available_device_bytes":"17179869184","device_uuid":"GPU-test"}]')))))
 elif os.environ.get('TEST_SIDECAR') and command == 'feature_extractor':
     image_list = Path(sys.argv[sys.argv.index('--image_list_path') + 1])
     workspace = Path(sys.argv[sys.argv.index('--database_path') + 1]).parent
@@ -354,14 +354,16 @@ with patch.object(tempfile, '_candidate_tempdir_list', return_value=candidates):
 
     def test_auto_selects_most_free_visible_device_without_output(self):
         self.env['TEST_INVENTORY'] = json.dumps([
-            dict(ordinal=0, usable=True, available_device_bytes=str(8 * 1024**3), device_uuid='GPU-zero'),
-            dict(ordinal=2, usable=True, available_device_bytes=str(24 * 1024**3), device_uuid='GPU-two')])
+            dict(ordinal=0, usable=True, compute_capability_major=8, compute_capability_minor=9, available_device_bytes=str(8 * 1024**3), device_uuid='GPU-zero'),
+            dict(ordinal=2, usable=True, compute_capability_major=8, compute_capability_minor=9, available_device_bytes=str(24 * 1024**3), device_uuid='GPU-two')])
         result = self.invoke('--plan-only')
         self.assertEqual(result.returncode, 0, result.stderr)
         plan = json.loads(result.stdout.split('Effective plan (approval required): ')[1])
         self.assertEqual(plan['effective_dispatch']['extraction']['gpu_index'], 2)
         self.assertEqual(plan['device_selection']['mode'], 'auto')
         self.assertEqual(len(plan['device_inventory']), 2)
+        self.assertEqual([d['ordinal'] for d in plan['effective_dispatch']['stereo']['approved_devices']], [0, 2])
+        self.assertIn('PHOTO and GEO', plan['effective_dispatch']['stereo']['distribution'])
         # Inventory FREE selects; a fresh authoritative exact query admits.
         self.assertEqual(plan['hardware_observation']['available_device_bytes'], 16 * 1024**3)
         queries = [call for call in self.commands() if call[0] == 'reconstruction_info']
@@ -369,15 +371,73 @@ with patch.object(tempfile, '_candidate_tempdir_list', return_value=candidates):
         self.assertEqual(queries[1][1:3], ['--gpu_index', '2'])
         self.assert_preview_only()
 
+    def test_mixed_compute_capability_auto_refuses_before_preview_or_execution(self):
+        for capabilities in ((8, 6, 8, 9), (8, 9, 9, 0)):
+            inventory = [dict(ordinal=0, usable=True, available_device_bytes='19000000000',
+                              device_uuid='GPU-zero', compute_capability_major=capabilities[0],
+                              compute_capability_minor=capabilities[1]),
+                         dict(ordinal=2, usable=True, available_device_bytes='9000000000',
+                              device_uuid='GPU-two', compute_capability_major=capabilities[2],
+                              compute_capability_minor=capabilities[3])]
+            self.env['TEST_INVENTORY'] = json.dumps(inventory)
+            for mode in ('--plan-only', '--yes'):
+                with self.subTest(capabilities=capabilities, mode=mode):
+                    result = self.invoke(mode)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn('mixed compute capabilities', result.stderr)
+                    self.assertIn('--gpu-index', result.stderr)
+                    self.assertNotIn('Effective plan (approval required):', result.stdout)
+                    self.assertTrue(all(call[0] == 'reconstruction_info' and
+                                        '--gpu_index' not in call for call in self.commands()))
+                    self.assert_preview_only()
+
+    def test_compute_capability_selection_preserves_homogeneous_auto_and_exact_override(self):
+        # sm89 matches the retained L40 qualification. sm90 here proves only
+        # frontend policy, not native capability or numerical qualification.
+        for major, minor, explicit in ((8, 9, None), (9, 0, None), (8, 9, 0), (8, 9, 2)):
+            inventory = [dict(ordinal=2, usable=True, available_device_bytes='9000000000',
+                              device_uuid='GPU-two', compute_capability_major=major,
+                              compute_capability_minor=minor),
+                         dict(ordinal=0, usable=True, available_device_bytes='19000000000',
+                              device_uuid='GPU-zero', compute_capability_major=major,
+                              compute_capability_minor=minor)]
+            if explicit is not None:
+                # The explicit selection must remain exact, even when it has
+                # less FREE than the other usable, different-capability GPU.
+                inventory[0]['compute_capability_minor'] = 6
+            else:
+                inventory.append(dict(ordinal=7, usable=False, available_device_bytes=None,
+                    device_uuid='GPU-unusable', compute_capability_major=7,
+                    compute_capability_minor=5, reason='context unavailable'))
+            self.env['TEST_INVENTORY'] = json.dumps(inventory)
+            with self.subTest(major=major, minor=minor, explicit=explicit):
+                options = [] if explicit is None else ['--gpu-index', str(explicit)]
+                result = self.invoke('--plan-only', *options)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                plan = json.loads(result.stdout.split('Effective plan (approval required): ')[1])
+                selected = 0 if explicit is None else explicit
+                for stage in ('extraction', 'matching'):
+                    self.assertEqual(plan['effective_dispatch'][stage]['gpu_index'], selected)
+                self.assertEqual(plan['device_selection']['device_uuid'],
+                                 'GPU-zero' if selected == 0 else 'GPU-two')
+                stereo = plan['effective_dispatch']['stereo']
+                self.assertEqual([d['ordinal'] for d in stereo['approved_devices']],
+                                 [0, 2] if explicit is None else [explicit])
+                self.assertEqual(plan['device_inventory'], inventory)
+                self.assertEqual(plan['device_selection']['ordinal'], 0 if explicit is None else explicit)
+                if explicit is not None:
+                    self.assertEqual(stereo['distribution'], 'exact single-device path')
+                self.assert_preview_only()
+
     def test_visible_selection_single_ties_unusable_and_exact_override(self):
         cases = [
-            ([dict(ordinal=3, usable=True, available_device_bytes='9000000000', device_uuid='GPU-three')], [], 3, 'auto'),
-            ([dict(ordinal=2, usable=True, available_device_bytes='9000000000', device_uuid='GPU-two'),
-              dict(ordinal=0, usable=True, available_device_bytes='9000000000', device_uuid='GPU-zero')], [], 0, 'auto'),
+            ([dict(ordinal=3, usable=True, compute_capability_major=8, compute_capability_minor=9, available_device_bytes='9000000000', device_uuid='GPU-three')], [], 3, 'auto'),
+            ([dict(ordinal=2, usable=True, compute_capability_major=8, compute_capability_minor=9, available_device_bytes='9000000000', device_uuid='GPU-two'),
+              dict(ordinal=0, usable=True, compute_capability_major=8, compute_capability_minor=9, available_device_bytes='9000000000', device_uuid='GPU-zero')], [], 0, 'auto'),
             ([dict(ordinal=0, usable=False, available_device_bytes=None, device_uuid='', reason='context unavailable'),
-              dict(ordinal=2, usable=True, available_device_bytes='9000000000', device_uuid='GPU-two')], [], 2, 'auto'),
-            ([dict(ordinal=0, usable=True, available_device_bytes='19000000000', device_uuid='GPU-zero'),
-              dict(ordinal=2, usable=True, available_device_bytes='9000000000', device_uuid='GPU-two')], ['--gpu-index', '2'], 2, 'explicit')]
+              dict(ordinal=2, usable=True, compute_capability_major=8, compute_capability_minor=9, available_device_bytes='9000000000', device_uuid='GPU-two')], [], 2, 'auto'),
+            ([dict(ordinal=0, usable=True, compute_capability_major=8, compute_capability_minor=9, available_device_bytes='19000000000', device_uuid='GPU-zero'),
+              dict(ordinal=2, usable=True, compute_capability_major=8, compute_capability_minor=9, available_device_bytes='9000000000', device_uuid='GPU-two')], ['--gpu-index', '2'], 2, 'explicit')]
         for inventory, options, expected, mode in cases:
             with self.subTest(expected=expected, mode=mode, inventory=inventory):
                 self.env['TEST_INVENTORY'] = json.dumps(inventory)
@@ -389,13 +449,19 @@ with patch.object(tempfile, '_candidate_tempdir_list', return_value=candidates):
                 self.assertEqual(plan['device_inventory'], inventory)
                 self.assertIn('not fastest-device', plan['device_selection']['limitations'])
                 self.assertEqual(plan['effective_dispatch']['extraction']['threads'], 1)
+                stereo = plan['effective_dispatch']['stereo']
+                approved = [d['ordinal'] for d in stereo['approved_devices']]
+                self.assertEqual(approved, [expected] if mode == 'explicit' else
+                                 sorted(d['ordinal'] for d in inventory if d['usable']))
+                if mode == 'explicit':
+                    self.assertEqual(stereo['distribution'], 'exact single-device path')
                 self.assert_preview_only()
 
     def test_no_device_unusable_and_invalid_explicit_refuse_without_fallback(self):
         cases = [([], []),
                  ([dict(ordinal=0, usable=False, reason='context failed')], []),
-                 ([dict(ordinal=0, usable=True, available_device_bytes='9000000000', device_uuid='GPU-zero')], ['--gpu-index', '7']),
-                 ([dict(ordinal=0, usable=True, available_device_bytes='9000000000', device_uuid='GPU-zero'),
+                 ([dict(ordinal=0, usable=True, compute_capability_major=8, compute_capability_minor=9, available_device_bytes='9000000000', device_uuid='GPU-zero')], ['--gpu-index', '7']),
+                 ([dict(ordinal=0, usable=True, compute_capability_major=8, compute_capability_minor=9, available_device_bytes='9000000000', device_uuid='GPU-zero'),
                    dict(ordinal=2, usable=False, reason='permission denied')], ['--gpu-index', '2'])]
         for inventory, options in cases:
             with self.subTest(inventory=inventory, options=options):

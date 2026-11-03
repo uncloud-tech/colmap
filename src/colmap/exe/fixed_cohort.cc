@@ -2,6 +2,7 @@
 #include "colmap/exe/fixed_cohort.h"
 
 #include "colmap/controllers/option_manager.h"
+#include "colmap/exe/multi_gpu_plan_json.h"
 #include "colmap/exe/optimized_dense_plan_options.h"
 #include "colmap/mvs/generated/resident_allocation_fingerprint.h"
 #include "colmap/mvs/model.h"
@@ -15,11 +16,18 @@
 #include "colmap/util/misc.h"
 #include "colmap/util/string.h"
 
+#include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <chrono>
+#include <csignal>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
+#include <limits>
 #include <map>
+#include <optional>
 #include <set>
 
 namespace colmap {
@@ -29,6 +37,31 @@ namespace fs = std::filesystem;
 void Require(bool valid, const char* message) {
   if (!valid) throw std::invalid_argument(message);
 }
+// Lock-free atomic stores are async-signal-safe. Keep the token process-static
+// so a signal can never address an object being destroyed by stack unwinding.
+std::atomic<bool> multi_gpu_cancelled{false};
+static_assert(std::atomic<bool>::is_always_lock_free);
+void CancelMultiGpu(int) { multi_gpu_cancelled.store(true); }
+class MultiGpuSignalGuard {
+ public:
+  MultiGpuSignalGuard() {
+    multi_gpu_cancelled.store(false);
+    old_int_ = std::signal(SIGINT, CancelMultiGpu);
+    if (old_int_ == SIG_ERR) throw std::runtime_error("cannot install multi-GPU SIGINT handler");
+    old_term_ = std::signal(SIGTERM, CancelMultiGpu);
+    if (old_term_ == SIG_ERR) {
+      std::signal(SIGINT, old_int_);
+      throw std::runtime_error("cannot install multi-GPU SIGTERM handler");
+    }
+  }
+  ~MultiGpuSignalGuard() {
+    std::signal(SIGTERM, old_term_);
+    std::signal(SIGINT, old_int_);
+  }
+ private:
+  using Handler = void (*)(int);
+  Handler old_int_, old_term_;
+};
 void CheckName(const std::string& name) {
   const fs::path path(name);
   Require(!path.empty() && !path.is_absolute() && !path.has_root_path(),
@@ -109,7 +142,11 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
   const auto entry = mvs::NativeRunDeadline::Clock::now();
   try {
     fs::path workspace_path, output_path, photo_config_path, geo_config_path;
-    fs::path report_path;
+    fs::path report_path, approved_multi_gpu_plan;
+    std::string stereo_devices;
+    std::optional<owned::MultiGpuFixedCohortPlan> multi_gpu_plan;
+    std::optional<dense_plan::Json> multi_gpu_placement;
+    std::optional<MultiGpuSignalGuard> multi_gpu_signals;
     bool resolve_workspace_plan = false;
     bool prepare_only = false, auto_active_owners = false;
     bool observe_capacities = false, auto_phase_active_owners = false;
@@ -135,7 +172,11 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
         "sources; no global depth inference");
     options.AddDefaultOption(
         "report_path", &report_path,
-        "Optional fresh typed execution report; never written for prepare_only");
+        "Optional fresh typed execution report; multi-device prepare_only writes the approval plan");
+    options.AddDefaultOption("stereo_devices", &stereo_devices,
+        "Explicit approved ordinal:UUID:capacity-bytes CSV; at least two devices; host-map PHOTO/GEO exchange");
+    options.AddDefaultOption("approved_multi_gpu_plan", &approved_multi_gpu_plan,
+        "Required exact plan JSON from multi-device prepare_only before execution");
     options.AddDefaultOption("photo_config_path", &photo_config_path);
     options.AddDefaultOption("geo_config_path", &geo_config_path);
     options.AddDefaultOption(
@@ -196,6 +237,7 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
     add_bytes("reserve_device_bytes", &declarations.headroom_reserve.device);
     options.AddPatchMatchStereoOptions();
     if (!options.Parse(argc, argv)) return EXIT_FAILURE;
+    if (!stereo_devices.empty()) multi_gpu_signals.emplace();
     const auto cap_present = [&](const char* name) {
       return supplied_caps.count(name) != 0;
     };
@@ -232,6 +274,7 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
             std::chrono::seconds(deadline_seconds)),
         entry);
     const auto check_deadline = [&] {
+      Require(!multi_gpu_signals || !multi_gpu_cancelled.load(), "multi-GPU command cancelled");
       Require(deadline.Remaining().count() > 0,
               "fixed-cohort command deadline expired");
     };
@@ -343,10 +386,59 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
         owned::BuildFixedCohortLogicalInventory(shapes, jobs, declarations);
     // Common invocation validation must not become a capacity refusal or a
     // reason to try another storage mode. This checks metadata only.
-    if (auto_storage)
+    if (auto_storage || !stereo_devices.empty())
       owned::ValidateFixedCohortShape(model.images, references, budget);
+    if (!stereo_devices.empty()) {
+      Require(observe_capacities && auto_active_owners && host_cap && max_load_image_size == -1,
+              "multi-GPU requires explicit host cap, observed capacities, automatic owners and full resolution");
+      Require(!report_path.empty(), "multi-GPU requires report_path");
+      Require(auto_storage || photo_source_storage == "shared",
+              "multi-GPU PHOTO requires shared or auto source storage");
+      std::vector<owned::PhasePlanDevice> devices;
+      for (const auto& token : CSVToVector<std::string>(stereo_devices)) {
+        const auto first = token.find(':');
+        const auto second = token.find(':', first == std::string::npos ? 0 : first + 1);
+        Require(first != std::string::npos && second != std::string::npos &&
+                    token.find(':', second + 1) == std::string::npos,
+                "invalid approved stereo device token");
+        const auto ordinal = owned::ParseBytes(token.substr(0, first));
+        Require(ordinal <= static_cast<uint64_t>(std::numeric_limits<int>::max()),
+                "invalid approved stereo ordinal");
+        const auto uuid = token.substr(first + 1, second - first - 1);
+        Require(uuid.size() == 32 && uuid.find_first_not_of("0123456789abcdef") == std::string::npos,
+                "invalid approved stereo UUID");
+        owned::PhasePlanDevice device;
+        device.ordinal = static_cast<int>(ordinal);
+        device.uuid = uuid;
+        device.capacity_bytes = owned::ParseBytes(token.substr(second + 1));
+        devices.push_back(std::move(device));
+      }
+      multi_gpu_plan = owned::PlanMultiGpuFixedCohort(shapes, references, declarations,
+          devices, capacity.host, active_owners_ceiling ? active_owners_ceiling : references.size(),
+          loader_scratch_host);
+      owned::ValidateMultiGpuFixedCohortPlan(model.images, references, budget, *multi_gpu_plan);
+      {
+        mvs::NativeRunDeadlineGuard observation_guard(deadline);
+        owned::CheckMultiGpuFixedCohortAvailable(*multi_gpu_plan);
+      }
+      check_deadline();
+      multi_gpu_placement = dense_plan::MultiGpuPlanJson(*multi_gpu_plan, references, model.images);
+      const auto placement = multi_gpu_placement->Dump() + "\n";
+      std::cout << "Approved-device multi-GPU phase placement (before payload allocations): " << placement;
+      if (prepare_only) {
+        dense_plan::WriteNewAtomic(report_path, placement);
+        return EXIT_SUCCESS;
+      }
+      Require(!approved_multi_gpu_plan.empty(), "multi-GPU execution requires approved phase plan");
+      std::ifstream approved(approved_multi_gpu_plan, std::ios::binary);
+      Require(approved.is_open(), "cannot read approved multi-GPU plan");
+      std::string approved_bytes((std::istreambuf_iterator<char>(approved)), std::istreambuf_iterator<char>());
+      Require(approved_bytes == placement, "multi-GPU placement/scientific inputs changed since approval");
+    } else {
+      Require(approved_multi_gpu_plan.empty(), "approved multi-GPU plan requires stereo_devices");
+    }
     model = mvs::Model();  // Release the extra sparse model before decoding.
-    if (observe_capacities) {
+    if (observe_capacities && !multi_gpu_plan) {
       check_deadline();
       // A blocking CUDA initialization/query shares the original deadline;
       // never reset its budget or wait forever inside the driver.
@@ -374,7 +466,7 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
     std::string count_reason = "manual";
     std::array<owned::FixedCohortActiveSelection, 2> phase_selection;
     std::string storage_reason = "explicit storage";
-    if (auto_storage) {
+    if (auto_storage && !multi_gpu_plan) {
       auto selected = owned::SelectFixedCohortPhotoSourceStorage(
           shapes,
           jobs,
@@ -385,7 +477,11 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
       budget = std::move(selected.budget);
       storage_reason = std::move(selected.reason);
     }
-    if (auto_phase_active_owners) {
+    if (multi_gpu_plan) {
+      budget.max_active_owners = 1;
+      count_reason = "per-device phase plan; immutable host PHOTO exchange";
+      storage_reason = "admitted per-cohort PHOTO unions; private host-map GEO";
+    } else if (auto_phase_active_owners) {
       phase_selection = owned::SelectFixedCohortPhaseActiveOwners(
           budget, capacity, active_owners_ceiling);
       budget.phase_active_owners = {phase_selection[0].count,
@@ -399,12 +495,12 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
       budget.max_active_owners = selection.count;
       count_reason = selection.reason;
     }
-    const char* effective_storage =
+    const char* effective_storage = multi_gpu_plan ? "shared_per_cohort" :
         budget.photo_source_storage ==
                 owned::FixedCohortPhotoSourceStorage::kShared
             ? "shared"
             : "private";
-    if (auto_storage)
+    if (auto_storage && !multi_gpu_plan)
       std::cout << "requested_photo_source_storage=auto; "
                    "effective_photo_source_storage="
                 << effective_storage
@@ -415,12 +511,17 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
                 << owned::FixedCohortPhaseActiveOwners(budget, true) << '\n';
     // Selection/refusal precedes workspace decode, frozen pixels, banks and
     // private solver allocation. Never probe fit by attempting allocations.
-    owned::AdmitFixedCohortBudget(budget, capacity);
-    std::cout << "active_owners=" << budget.max_active_owners
-              << "; selection=" << (auto_active_owners ? "automatic" : "manual")
-              << "; limiting_reason=" << count_reason
-              << "; memory admissibility only, not throughput optimum\n";
-    if (auto_phase_active_owners) {
+    if (!multi_gpu_plan) owned::AdmitFixedCohortBudget(budget, capacity);
+    if (multi_gpu_plan) {
+      std::cout << "multi-GPU owner limits: see approved per-device/per-phase cohorts; "
+                   "no pooled VRAM or measured overlap claim\n";
+    } else {
+      std::cout << "active_owners=" << budget.max_active_owners
+                << "; selection=" << (auto_active_owners ? "automatic" : "manual")
+                << "; limiting_reason=" << count_reason
+                << "; memory admissibility only, not throughput optimum\n";
+    }
+    if (auto_phase_active_owners && !multi_gpu_plan) {
       for (size_t i = 0; i < 2; ++i)
         std::cout << (i ? "GEO" : "PHOTO")
                   << " active_owners=" << phase_selection[i].count
@@ -439,15 +540,30 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
                                                        loader_scratch_host,
                                                        deadline,
                                                        dispatch,
-                                                       tile_threads);
+                                                       tile_threads,
+                                                       multi_gpu_plan ? &*multi_gpu_plan : nullptr);
     check_deadline();
-    const auto admitted = owned::AdmitFixedCohortBudget(budget, capacity);
-    std::cout << "photo_source_storage=" << effective_storage
-              << "; logical PHOTO union host=" << budget.photo_shared.host
-              << " device=" << budget.photo_shared.device << " bytes\n";
-    std::cout << "experimental unqualified logical envelope; admitted host="
-              << admitted.host << " device=" << admitted.device
-              << " bytes (single 3% margin); no physical-fit guarantee\n";
+    if (multi_gpu_plan) {
+      const auto prepared_binding = dense_plan::MultiGpuPlanJson(*multi_gpu_plan,
+          prepared.References(), prepared.Images());
+      Require(prepared_binding.Dump() == multi_gpu_placement->Dump(),
+              "multi-GPU image identity/calibration changed during preparation");
+    }
+    const auto admitted = multi_gpu_plan
+        ? owned::ByteCharge{owned::MarginBytes(multi_gpu_plan->host_peak_raw), 0}
+        : owned::AdmitFixedCohortBudget(budget, capacity);
+    if (multi_gpu_plan) {
+      std::cout << "experimental multi-GPU aggregate admitted host=" << admitted.host
+                << " bytes (single 3% margin); per-device VRAM and PHOTO unions "
+                   "are reported separately in the approved plan; no physical-fit guarantee\n";
+    } else {
+      std::cout << "photo_source_storage=" << effective_storage
+                << "; logical PHOTO union host=" << budget.photo_shared.host
+                << " device=" << budget.photo_shared.device << " bytes\n";
+      std::cout << "experimental unqualified logical envelope; admitted host="
+                << admitted.host << " device=" << admitted.device
+                << " bytes (single 3% margin); no physical-fit guarantee\n";
+    }
     if (prepare_only) {
       if (observe_capacities)
         std::cout << "PREPARE ONLY: CUDA capacity query only; NO solver execution, "
@@ -471,8 +587,8 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
         "output parent must exist without symlink components");
     // Atomic no-clobber ownership: never remove/reuse a preexisting path.
     Require(fs::create_directory(output_path), "fresh output_path required");
-    const auto result = prepared.Run();
-    if (auto_storage)
+    const auto result = prepared.Run(multi_gpu_signals ? &multi_gpu_cancelled : nullptr);
+    if (auto_storage && !multi_gpu_plan)
       std::cout << "executed PHOTO owner_limit=" << result.phase_owner_limits[0]
                 << "; GEO owner_limit=" << result.phase_owner_limits[1]
                 << "; actual PHOTO union host=" << result.actual_photo_shared.host
@@ -514,15 +630,22 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
       std::vector<std::pair<std::string, Json>> phases;
       for (const bool geo : {false, true}) {
         std::vector<Json> records;
-        for (const auto& ref : references) {
+        for (size_t job = 0; job < references.size(); ++job) {
+          const auto& ref = references[job];
+          auto executed_options = geo ? ref.geo_options : ref.photo_options;
+          if (multi_gpu_plan) {
+            for (const auto& group : multi_gpu_plan->phases[geo].groups)
+              for (const auto& cohort : group.cohorts)
+                if (std::find(cohort.jobs.begin(), cohort.jobs.end(), job) != cohort.jobs.end())
+                  executed_options.gpu_index = std::to_string(group.device.ordinal);
+          }
           std::vector<Json> sources;
           for (int idx : geo ? ref.geo_sources : ref.photo_sources)
             sources.emplace_back(idx);
           records.push_back(Json::Object({
               {"reference", Json(ref.reference_image_idx)},
               {"sources", Json::Array(sources)},
-              {"options", dense_plan::OptionsJson(
-                              geo ? ref.geo_options : ref.photo_options)}}));
+              {"options", dense_plan::OptionsJson(executed_options)}}));
         }
         phases.emplace_back(geo ? "geo" : "photo", Json::Array(records));
       }
@@ -537,12 +660,13 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
           {"storage_reason", Json(storage_reason)},
           {"selection", Json(auto_active_owners ? "automatic" : "manual")},
           {"host_capacity_bytes", Json(std::to_string(capacity.host))},
-          {"device_capacity_bytes", Json(std::to_string(capacity.device))},
+          {"device_capacity_bytes", multi_gpu_plan ? Json() : Json(std::to_string(capacity.device))},
           {"effective_storage", Json(effective_storage)},
           {"photo_active_owners",
-           Json(static_cast<int>(result.phase_owner_limits[0]))},
+           multi_gpu_plan ? Json() : Json(static_cast<int>(result.phase_owner_limits[0]))},
           {"geo_active_owners",
-           Json(static_cast<int>(result.phase_owner_limits[1]))},
+           multi_gpu_plan ? Json() : Json(static_cast<int>(result.phase_owner_limits[1]))},
+          {"multi_gpu_plan", multi_gpu_placement ? *multi_gpu_placement : Json()},
           {"phases", Json::Object(phases)}}).Dump() + "\n");
     }
     std::cout

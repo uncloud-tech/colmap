@@ -49,7 +49,7 @@ set(COLMAP_EXE_PUBLIC_LIBS
     colmap_util
 )
 if(MVS_ENABLED)
-    list(APPEND COLMAP_EXE_SRCS mvs.h mvs.cc fixed_cohort.h fixed_cohort.cc)
+    list(APPEND COLMAP_EXE_SRCS mvs.h mvs.cc fixed_cohort.h fixed_cohort.cc multi_gpu_plan_json.h)
     list(APPEND COLMAP_EXE_PUBLIC_LIBS colmap_mvs)
 endif()
 

@@ -61,6 +61,9 @@ COLMAP_ADD_LIBRARY(
         normal_map.h normal_map.cc
         owned_input_bank.h owned_input_bank.cc
         owned_fixed_cohort_inventory.h
+        multi_gpu_phase_plan.h multi_gpu_phase_plan.cc
+        multi_gpu_workers.h
+        multi_gpu_fixed_cohort.h multi_gpu_fixed_cohort.cc
         owned_fixed_cohort_validation.h owned_fixed_cohort_validation.cc
         owned_fixed_cohort_workspace.h owned_fixed_cohort_workspace.cc
         owned_cohort.h
@@ -297,6 +300,7 @@ if(CUDA_ENABLED)
             owned_geo_photo_input.h owned_geo_photo_input.cu
             owned_fixed_cohort_budget.h
             owned_fixed_cohort_pipeline.h owned_fixed_cohort_pipeline.cu
+            multi_gpu_fixed_cohort.cu
             owned_rotation_storage.h
             owned_selection_scratch.h
             owned_tile.h
@@ -354,6 +358,7 @@ if(CUDA_ENABLED)
     COLMAP_ADD_TEST(
         NAME owned_fixed_cohort_pipeline_test
         SRCS owned_fixed_cohort_pipeline_test.cu
+             multi_gpu_fixed_cohort_test.cu
              owned_fixed_cohort_workspace_execution_test.cu
         LINK_LIBS colmap_mvs_cuda
     )
@@ -616,8 +621,18 @@ if(TESTS_ENABLED)
     endforeach()
 endif()
 
+COLMAP_ADD_TEST(
+    NAME multi_gpu_fixed_cohort_test
+    SRCS multi_gpu_fixed_cohort_test.cc
+    LINK_LIBS colmap_mvs
+)
+
 # Uses real coordinator and owner threads; POSIX subprocess death diagnostics.
 if(TESTS_ENABLED AND UNIX)
+    add_test(NAME "mvs/multi_gpu_workers_test"
+        COMMAND ${Python3_EXECUTABLE} -I
+            "${PROJECT_SOURCE_DIR}/scripts/resident/test_multi_gpu_workers.py")
+    set_tests_properties(mvs/multi_gpu_workers_test PROPERTIES TIMEOUT 30)
     add_executable(colmap_mvs_native_run_deadline_test native_run_deadline_test.cc)
     target_include_directories(colmap_mvs_native_run_deadline_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
     target_link_libraries(colmap_mvs_native_run_deadline_test PRIVATE Threads::Threads)
@@ -628,6 +643,10 @@ endif()
 
 # Dependency-free topology/argument packing regression, including CUDA-off builds.
 if(TESTS_ENABLED)
+    COLMAP_ADD_TEST(
+        NAME multi_gpu_phase_plan_test
+        SRCS multi_gpu_phase_plan.cc multi_gpu_phase_plan_test.cc
+    )
     add_executable(owned_fixed_cohort_budget_test owned_fixed_cohort_budget_test.cc)
     target_include_directories(owned_fixed_cohort_budget_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
     target_compile_features(owned_fixed_cohort_budget_test PRIVATE cxx_std_17)

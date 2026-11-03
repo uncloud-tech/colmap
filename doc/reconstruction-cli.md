@@ -50,10 +50,16 @@ fit remain **UNKNOWN**. Actual post-SfM geometry, depths, source graph and remai
 native dense options resolve later under the displayed contract, not a fabricated
 final dense plan before SfM. CPU model remains UNKNOWN; threads still default to 1.
 
-With `--gpu-index` omitted, selection uses the usable observed CUDA device with
-**most available memory**, breaking ties by lowest process-visible ordinal.
-`--gpu-index N` selects exactly that nonnegative visible ordinal or refuses,
-never falls back. `CUDA_VISIBLE_DEVICES` remapping is honored: these are CUDA
+With `--gpu-index` omitted, extraction and matching select the usable observed
+CUDA device with **most available memory**, breaking ties by lowest process-visible
+ordinal. Stereo separately uses the usable device set shown in the approval plan.
+Automatic selection refuses a usable set with mixed compute capabilities: heterogeneous
+output equivalence is not qualified. Select one device explicitly with `--gpu-index N`
+and rerun; the frontend does not silently filter devices or fall back. Matching compute
+capability alone does not qualify numerical equivalence or guarantee kernel support.
+`--gpu-index N` keeps the exact original single-device stereo implementation as
+well as selecting that nonnegative visible ordinal for extraction/matching; it
+refuses rather than falling back. `CUDA_VISIBLE_DEVICES` remapping is honored: these are CUDA
 runtime ordinals, not management-tool or physical slot indices. Preview and
 reports include each ordinal, UUID, name, compute capability, total/FREE bytes,
 and observation status/reason; a failed device observation does not hide healthy
@@ -86,6 +92,40 @@ Failure logs and partial outputs remain for diagnosis, without `result.json`.
 Controller SIGKILL cannot be handled: use an external service/cgroup for
 controller-death containment or hard memory enforcement. Native children are
 trusted not to detach from their process groups.
+
+## Multi-device stereo
+
+The default approval preview discloses the stereo device ordinals/UUIDs separately
+from the extraction/matching device. After SfM, native metadata planning shows the
+actual per-GPU PHOTO and GEO cohorts, owner limits, VRAM budgets and bounded host
+shares before stereo execution. Interactive execution requests approval of this
+resolved plan; `--yes` explicitly approves it noninteractively. Execution and the
+completed report must match the exact approved placement and scientific options.
+
+One native process owns all device workers. Deterministic placement balances work
+with incremental padded PHOTO source-bank bytes; scientific source lists,
+duplicates, seeds and arithmetic are not reordered or reduced. PHOTO source
+images are shared only within admitted cohorts; cohorts on a GPU drain and release
+their bank before the next. GEO uses the existing private host-map input path;
+there is no GEO or cross-cohort cache claim. Every PHOTO producer finishes and
+all device workers drain/join before any GEO consumer reads the immutable host
+exchange. References have one output writer in each phase.
+
+Admission includes caller plus frozen images, all host PHOTO depth/normal maps,
+retained GEO outputs, padded banks and private/transient storage, including padded
+float GEO source staging with duplicate source ordinals. Each device has a separate
+VRAM cap; four 16 GB GPUs are not a 64 GB pool. Host admission covers simultaneous
+devices using static shares, one aggregate 3% convention and separate reserve.
+Oversized scenes refuse without resizing, dropping sources or disk spill. Failure
+fans cancellation out to every registered device coordinator/graph control and
+drains launched workers before returning an error; no completed report is emitted.
+The existing owned-child termination and hard deadline remain final containment
+if graceful drain cannot complete.
+
+These are experimental logical estimates, not physical-fit, quality, speedup or
+cost guarantees. Actual two-GPU output equivalence and useful kernel overlap need
+native qualification; Blackwell and heterogeneous bitwise equivalence are not
+inferred from device visibility.
 
 ## Actual path and limits
 

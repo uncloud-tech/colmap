@@ -95,7 +95,22 @@ void Mat<float>::Write(const std::filesystem::path& path) const {
   THROW_CHECK_FILE_OPEN(file, path);
   SetFullPrecTextStream(file);
   file << width_ << "&" << height_ << "&" << depth_ << "&";
-  WriteBinaryLittleEndian<float>(&file, {data_.data(), data_.size()});
+  if (IsLittleEndian()) {
+    // Preserve the object representations (including NaN payloads) without
+    // an ostream sentry/write call for every float. Bound each write both
+    // for streamsize and to a small fixed chunk; no extra payload copy.
+    const size_t chunk_floats =
+        std::min<size_t>(1024 * 1024, std::numeric_limits<std::streamsize>::max()) /
+        sizeof(float);
+    for (size_t offset = 0; offset < data_.size();) {
+      const size_t count = std::min(chunk_floats, data_.size() - offset);
+      file.write(reinterpret_cast<const char*>(data_.data() + offset),
+                 static_cast<std::streamsize>(count * sizeof(float)));
+      offset += count;
+    }
+  } else {
+    WriteBinaryLittleEndian<float>(&file, {data_.data(), data_.size()});
+  }
   file.close();
 }
 
