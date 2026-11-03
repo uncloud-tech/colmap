@@ -21,8 +21,18 @@
 #include "colmap/util/cuda.h"
 #include "thirdparty/SiftGPU/GlobalUtil.h"
 #include "thirdparty/SiftGPU/GLTexImage.h"
+#include "thirdparty/SiftGPU/CuTexImage.h"
+// SiftGPU's directory-private definition also guards its public declarations.
+#ifndef SIFTGPU_CUDA_ENABLED
+#define SIFTGPU_CUDA_ENABLED
+#include "thirdparty/SiftGPU/ProgramCU.h"
+#undef SIFTGPU_CUDA_ENABLED
+#else
+#include "thirdparty/SiftGPU/ProgramCU.h"
+#endif
 #endif
 
+#include <algorithm>
 #include <functional>
 #include <limits>
 #include <stdexcept>
@@ -272,6 +282,65 @@ TEST(ExtractSiftFeaturesGPU, InputDomainAndImmutability) {
       }
     }
   });
+}
+
+TEST(ExtractSiftFeaturesGPU, ExactDomainCudaUpsampling) {
+  if (GetNumCudaDevices() == 0) {
+    GTEST_SKIP() << "No CUDA or HIP devices available";
+  }
+  ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+  for (int width : {1, 2, 3, 4, 5, 257, 258, 259, 260}) {
+    for (int height : {1, 3}) {
+      SCOPED_TRACE(::testing::Message() << "width=" << width
+                                      << " height=" << height);
+      CuTexImage src;
+      // Populate oversized, rounded capacity before reducing the logical size.
+      // Rows are tightly packed: none of this tail is image content, even on
+      // the last row. Poison makes accidental texture fetches observable.
+      const int capacity_width = (width + 3) / 4 * 4;
+      ASSERT_TRUE(src.InitTexture(capacity_width, height + 1));
+      std::vector<float> input(capacity_width * (height + 1), -8192.0f);
+      for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+          input[y * width + x] = 8.0f + 4.0f * x + 64.0f * y;
+        }
+      }
+      src.CopyFromHost(input.data());
+      src.SetImageSize(width, height);
+      src._exactDomain = true;
+      for (int log_scale : {1, 2, 3}) {
+        SCOPED_TRACE(::testing::Message() << "log_scale=" << log_scale);
+        const int scale = 1 << log_scale;
+        const int dst_width = width * scale;
+        const int dst_height = height * scale;
+        CuTexImage dst;
+        ASSERT_TRUE(dst.InitTexture(dst_width, dst_height));
+        std::vector<float> output(dst_width * dst_height, -8192.0f);
+        dst.CopyFromHost(output.data());
+        ProgramCU::SampleImageU(&dst, &src, log_scale);
+        ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        dst.CopyToHost(output.data());
+        ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+        for (int y = 0; y < dst_height; ++y) {
+          for (int x = 0; x < dst_width; ++x) {
+            // Bilinear interpolation reproduces an affine plane exactly.
+            // Constant extension clamps continuous coordinates independently,
+            // not flattened texture indices. All values are binary-exact.
+            const float sample_x =
+                std::min(static_cast<float>(x) / scale,
+                         static_cast<float>(width - 1));
+            const float sample_y =
+                std::min(static_cast<float>(y) / scale,
+                         static_cast<float>(height - 1));
+            const float expected = 8.0f + 4.0f * sample_x + 64.0f * sample_y;
+            ASSERT_EQ(output[y * dst_width + x], expected)
+                << "x=" << x << " y=" << y;
+          }
+        }
+      }
+    }
+  }
 }
 
 TEST(ExtractSiftFeaturesGPU, ArbitraryWidthsAndReuse) {
