@@ -357,29 +357,46 @@ TEST(ExtractSiftFeaturesGPU, ArbitraryWidthsAndReuse) {
       reused = CreateSiftFeatureExtractor(options);
       for (int width : {259, 260, 257, 258, 260, 257, 1, 2, 3, 4, 5}) {
         for (bool rotated : {false, true}) {
-          SCOPED_TRACE(::testing::Message() << "width=" << width
-                                          << " rotated=" << rotated
-                                          << " first_octave=" << octave);
-          const int height = width < 6 ? 3 : 129;
-          Bitmap bitmap(width, height, false);
-          for (int y = 0; y < height; ++y) {
-            for (int x = 0; x < width; ++x) {
-              bitmap.SetPixel(x, y, BitmapColor<uint8_t>(
-                  ((x / 5 + y / 7) % 2) * 255));
+          for (bool square : {false, true}) {
+            if (square && width < 257) continue;
+            SCOPED_TRACE(::testing::Message()
+                         << "width=" << width << " rotated=" << rotated
+                         << " first_octave=" << octave
+                         << " fixture=" << (square ? "square" : "checker"));
+            const int height = width < 6 ? 3 : 129;
+            Bitmap bitmap(width, height, false);
+            if (square) {
+              // Match Nominal's 64-pixel square on a black background.
+              // Unlike the fine checker, it has structure at coarse octaves.
+              bitmap.Fill(BitmapColor<uint8_t>(0));
+              for (int y = height / 2 - 32; y < height / 2 + 32; ++y) {
+                for (int x = width / 2 - 32; x < width / 2 + 32; ++x) {
+                  bitmap.SetPixel(x, y, BitmapColor<uint8_t>(255));
+                }
+              }
+            } else {
+              for (int y = 0; y < height; ++y) {
+                for (int x = 0; x < width; ++x) {
+                  bitmap.SetPixel(x, y, BitmapColor<uint8_t>(
+                      ((x / 5 + y / 7) % 2) * 255));
+                }
+              }
             }
+            if (rotated) bitmap.Rot90(1);
+            FeatureKeypoints keypoints, control_keypoints;
+            FeatureDescriptors descriptors, control_descriptors;
+            auto fresh = CreateSiftFeatureExtractor(options);
+            ASSERT_NE(fresh, nullptr);
+            ASSERT_TRUE(reused->Extract(bitmap, &keypoints, &descriptors));
+            ASSERT_TRUE(fresh->Extract(bitmap, &control_keypoints, &control_descriptors));
+            ValidateKeypoints(keypoints, bitmap);
+            EXPECT_EQ(keypoints, control_keypoints);
+            ASSERT_EQ(descriptors.data.rows(), control_descriptors.data.rows());
+            EXPECT_TRUE((descriptors.data.array() == control_descriptors.data.array()).all());
+            // The checker remains a reuse/immutability regression even when
+            // smoothing and scale-space extrema rejection leave no features.
+            if (square) EXPECT_FALSE(keypoints.empty());
           }
-          if (rotated) bitmap.Rot90(1);
-          FeatureKeypoints keypoints, control_keypoints;
-          FeatureDescriptors descriptors, control_descriptors;
-          auto fresh = CreateSiftFeatureExtractor(options);
-          ASSERT_NE(fresh, nullptr);
-          ASSERT_TRUE(reused->Extract(bitmap, &keypoints, &descriptors));
-          ASSERT_TRUE(fresh->Extract(bitmap, &control_keypoints, &control_descriptors));
-          ValidateKeypoints(keypoints, bitmap);
-          EXPECT_EQ(keypoints, control_keypoints);
-          ASSERT_EQ(descriptors.data.rows(), control_descriptors.data.rows());
-          EXPECT_TRUE((descriptors.data.array() == control_descriptors.data.array()).all());
-          if (width >= 257) EXPECT_FALSE(keypoints.empty());
         }
       }
     }
