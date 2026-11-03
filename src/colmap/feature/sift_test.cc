@@ -357,6 +357,9 @@ TEST(ExtractSiftFeaturesGPU, ArbitraryWidthsAndReuse) {
       reused = CreateSiftFeatureExtractor(options);
       for (int width : {259, 260, 257, 258, 260, 257, 1, 2, 3, 4, 5}) {
         for (bool rotated : {false, true}) {
+          SCOPED_TRACE(::testing::Message() << "width=" << width
+                                          << " rotated=" << rotated
+                                          << " first_octave=" << octave);
           const int height = width < 6 ? 3 : 129;
           Bitmap bitmap(width, height, false);
           for (int y = 0; y < height; ++y) {
