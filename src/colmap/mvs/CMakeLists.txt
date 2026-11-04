@@ -552,6 +552,19 @@ if(CUDA_ENABLED)
     endif()
 
     COLMAP_ADD_TEST(
+        NAME gpu_mat_ref_image_test
+        SRCS gpu_mat_ref_image_test.cu
+        LINK_LIBS colmap_mvs_cuda
+    )
+    if(TESTS_ENABLED)
+        # Exercise the same frontend architecture as the production header's
+        # callers, including native Blackwell when explicitly enabled.
+        get_target_property(_ref_image_test_archs colmap_mvs_cuda CUDA_ARCHITECTURES)
+        set_target_properties(colmap_mvs_gpu_mat_ref_image_test PROPERTIES
+            CUDA_ARCHITECTURES "${_ref_image_test_archs}")
+    endif()
+
+    COLMAP_ADD_TEST(
         NAME gpu_mat_test
         SRCS gpu_mat_test.cu
         LINK_LIBS colmap_mvs_cuda
