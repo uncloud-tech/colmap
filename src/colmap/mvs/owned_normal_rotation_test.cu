@@ -15,6 +15,86 @@
 namespace colmap::mvs::owned {
 namespace {
 
+__global__ __launch_bounds__(32) void LimitedLaunchKernel() {}
+
+TEST(OwnedKernelLaunch, SuccessfulLaunchPreservesUsableStream) {
+  OwnedCudaStream stream;
+  LimitedLaunchKernel<<<1, 32, 0, stream.Get()>>>();
+  EXPECT_NO_THROW(CheckKernelLaunch(
+      LimitedLaunchKernel, "LimitedLaunchKernel", dim3(1), dim3(32)));
+  stream.Synchronize();
+}
+
+TEST(OwnedKernelLaunch, ResourceFailureIdentifiesKernelAndLimits) {
+  OwnedCudaStream stream;
+  // Exceed this kernel's declared limit, not the device's block limit.
+  LimitedLaunchKernel<<<1, 64, 0, stream.Get()>>>();
+  try {
+    CheckKernelLaunch(
+        LimitedLaunchKernel, "LimitedLaunchKernel", dim3(1), dim3(64));
+    FAIL() << "Expected the launch resource failure";
+  } catch (const std::exception& error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find("LimitedLaunchKernel"), std::string::npos);
+    EXPECT_NE(message.find("block=(64,1,1)"), std::string::npos);
+    EXPECT_NE(message.find("grid=(1,1,1)"), std::string::npos);
+    EXPECT_NE(message.find("maxThreadsPerBlock=32"), std::string::npos);
+    EXPECT_NE(message.find("numRegs="), std::string::npos);
+    EXPECT_NE(message.find("regsPerBlock="), std::string::npos);
+    EXPECT_NE(message.find("sharedMemPerBlock="), std::string::npos);
+  }
+  // The check consumed the launch error; stream cleanup must still be usable.
+  EXPECT_EQ(cudaGetLastError(), cudaSuccess);
+  stream.Synchronize();
+}
+
+TEST(OwnedNormalInitialization, PixelNormalsAndSubsequentDrawsMatchSmallBlocks) {
+  OwnedCudaStream stream;
+  const ReferenceCalibration calibration{{700.0f, 18.0f, 710.0f, 9.0f},
+                                          {1.0f / 700.0f, -18.0f / 700.0f,
+                                           1.0f / 710.0f, -9.0f / 710.0f}};
+  const std::pair<int, int> shapes[] = {
+      {37, 19}, {19, 37}, {1, 65}, {65, 1}, {1, 1}};
+  for (const auto& shape : shapes) {
+    const int width = shape.first, height = shape.second;
+    for (int seed : {-1, 0, 7}) {
+      SCOPED_TRACE(::testing::Message()
+                   << width << "x" << height << " seed=" << seed);
+      auto actual_states = MakeOwnedPrng(width, height, stream.Get(), seed);
+      auto reference_states = MakeOwnedPrng(width, height, stream.Get(), seed);
+      GpuMat<float> actual(width, height, 3), reference(width, height, 3);
+      const dim3 block(8, 8);
+      const dim3 grid((width + 7) / 8, (height + 7) / 8);
+      // Independent small-block invocation of the unchanged numerical kernel.
+      InitNormalMap<<<grid, block, 0, stream.Get()>>>(
+          calibration, reference.View(), reference_states->View());
+      CUDA_CHECK();
+      LaunchNormalMapInitialization(
+          calibration, actual.View(), actual_states->View(), stream.Get());
+      std::vector<float> observed(width * height * 3);
+      std::vector<float> expected(observed.size());
+      actual.CopyToHost(observed.data(), width * sizeof(float), stream.Get());
+      reference.CopyToHost(expected.data(), width * sizeof(float), stream.Get());
+      EXPECT_EQ(std::memcmp(observed.data(), expected.data(),
+                            observed.size() * sizeof(float)), 0);
+      GpuMat<float> actual_draws(width, height), reference_draws(width, height);
+      observed.resize(width * height);
+      expected.resize(observed.size());
+      for (int draw = 0; draw < 4; ++draw) {
+        actual_draws.FillWithRandomNumbers(
+            0.0f, 1.0f, *actual_states, stream.Get());
+        reference_draws.FillWithRandomNumbers(
+            0.0f, 1.0f, *reference_states, stream.Get());
+        actual_draws.CopyToHost(
+            observed.data(), width * sizeof(float), stream.Get());
+        reference_draws.CopyToHost(
+            expected.data(), width * sizeof(float), stream.Get());
+        EXPECT_EQ(observed, expected);
+      }
+    }
+  }
+}
+
 // Frozen pre-fusion basis pass; spatial rotation uses the independent generic
 // CudaRotate kernel, once per plane, just as the previous solver did.
 __global__ void OldNormalBasis(GpuMatView<float> normal) {

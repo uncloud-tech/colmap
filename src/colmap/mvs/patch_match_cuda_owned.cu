@@ -995,6 +995,21 @@ __global__ void InitNormalMap(const ReferenceCalibration calibration,
 
 namespace {
 
+// The native SM120 kernel uses 94 registers/thread: 32x32 exceeds its
+// 65536-register block budget. 32x16 fits without changing the kernel's math,
+// per-pixel PRNG state, or draw order. PRNG initialization keeps its own layout.
+void LaunchNormalMapInitialization(const ReferenceCalibration calibration,
+                                   GpuMatView<float> normal_map,
+                                   GpuMatView<curandState> rand_state_map,
+                                   const cudaStream_t stream) {
+  const dim3 block(32, 16);
+  const dim3 grid((normal_map.GetWidth() + 31) / 32,
+                  (normal_map.GetHeight() + 15) / 16);
+  InitNormalMap<<<grid, block, 0, stream>>>(
+      calibration, normal_map, rand_state_map);
+  CheckKernelLaunch(InitNormalMap, "owned::InitNormalMap", grid, block);
+}
+
 constexpr int kNormalRotationTile = 32;
 constexpr int kNormalRotationRows = 8;
 
@@ -2556,12 +2571,10 @@ void PatchMatchCuda::InitWorkspaceMemory() {
                                 stream_->Get());
     }
   } else {
-    InitNormalMap<<<elem_wise_grid_size_,
-                    elem_wise_block_size_,
-                    0,
-                    stream_->Get()>>>(CurrentCalibration(),
-                                      normal_map_->View(),
-                                      init_rand_state_map_->View());
+    LaunchNormalMapInitialization(CurrentCalibration(),
+                                  normal_map_->View(),
+                                  init_rand_state_map_->View(),
+                                  stream_->Get());
   }
 }
 
