@@ -483,6 +483,11 @@ struct PhotoConsistencyCostComputer {
   const float* normal = nullptr;
 
   __device__ inline void Read(const int row) {
+    // Both callers advance row uniformly, including inactive border columns.
+    // Finish previous-row readers before shifting their shared reference tile.
+    if (row > 0) {
+      __syncthreads();
+    }
     local_ref_image.Read(row);
     __syncthreads();
   }
