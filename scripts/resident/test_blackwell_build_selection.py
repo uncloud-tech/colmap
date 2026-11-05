@@ -15,7 +15,7 @@ class BlackwellBuildSelectionTest(unittest.TestCase):
             source = pathlib.Path(tmp)
             (source / "empty.cc").write_text("// Configure-only target.\n")
             # Read the real root option declaration, without configuring its
-            # heavyweight dependencies. Missing options must not default to ON.
+            # heavyweight dependencies. Exercise the public option default.
             options = "\n".join(
                 line
                 for line in (ROOT / "CMakeLists.txt").read_text().splitlines()
@@ -56,14 +56,35 @@ file(WRITE "${{CMAKE_BINARY_DIR}}/architectures" "${{archs}}")
             )
             return (build / "architectures").read_text(), result.stderr
 
-    def test_native_sm120_is_explicit_experimental_opt_in(self):
-        selected, warnings = self.configure("120")
+    def test_native_sm120_is_default_with_explicit_compatibility_fallback(self):
+        for option in (None, "ON"):
+            with self.subTest(option=option):
+                selected, warnings = self.configure("120", option)
+                self.assertEqual(selected, "120")
+                self.assertIn("correctness", warnings)
+        selected, warnings = self.configure("120", "OFF")
         self.assertEqual(selected, "90-virtual")
         self.assertIn("compiler bug", warnings)
-        selected, warnings = self.configure("120", "ON")
-        self.assertEqual(selected, "120")
-        self.assertIn("experimental", warnings)
-        self.assertIn("correctness", warnings)
+
+    def test_architecture_selection_does_not_equate_sm100_with_sm120(self):
+        for architecture in (
+            "100-real",
+            "120-real",
+            "100;120",
+            "86;89;120-real",
+        ):
+            with self.subTest(architecture=architecture):
+                selected, warnings = self.configure(architecture)
+                self.assertEqual(selected, architecture)
+                self.assertIn("SM100", warnings)
+                self.assertIn("unqualified", warnings)
+                self.assertIn("SM120", warnings)
+                self.assertIn("bounded", warnings)
+                self.assertIn("MVS_NATIVE_BLACKWELL_ENABLED=OFF", warnings)
+        for architecture in ("100-real", "120-real", "100;120"):
+            with self.subTest(compatibility=architecture):
+                selected, _ = self.configure(architecture, "OFF")
+                self.assertEqual(selected, "90-virtual")
 
     def test_pre_blackwell_targets_are_unchanged(self):
         for opt_in in (None, "OFF", "ON"):

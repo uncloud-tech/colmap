@@ -119,6 +119,18 @@ configuration, specify ``-DCMAKE_CUDA_ARCHITECTURES=native``, if you want to run
 COLMAP only on your current machine (default), "all"/"all-major" to be able to
 distribute to other machines, or a specific CUDA architecture like "75", etc.
 
+Blackwell MVS uses native code generation by default
+(``MVS_NATIVE_BLACKWELL_ENABLED=ON``), preserving the requested architectures,
+including ``100-real`` and ``120-real``. Bounded native SM120 validation does
+not qualify SM100, other toolkits, or heterogeneous bitwise equivalence. Verify
+actual target SASS and output correctness on the intended hardware. To restore
+the historical NVCC compatibility workaround, configure
+``-DMVS_NATIVE_BLACKWELL_ENABLED=OFF``: only the MVS CUDA target replaces
+Blackwell targets with ``90-virtual`` PTX for driver JIT compilation, retaining
+explicit pre-Blackwell targets. This fallback is not a correctness guarantee.
+Existing CMake caches retain their explicit setting; reconfigure with ``ON`` to
+switch a previously configured ``OFF`` build to native code generation.
+
 To compile with **HIP / ROCm support** instead of CUDA (for AMD GPUs), install
 ROCm following the `AMD ROCm installation guide
 <https://rocm.docs.amd.com/projects/install-on-linux/en/latest/>`__ and ensure

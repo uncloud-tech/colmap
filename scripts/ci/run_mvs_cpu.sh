@@ -38,7 +38,7 @@ for name in "${contracts[@]}"; do
     -pthread -Isrc -I"$work/include" "src/colmap/mvs/$name.cc" -o "$work/$name"
   timeout 30s "$work/$name"
 done
-for test in test_photo_phase_fingerprint test_generated_header_install test_windows_checkout; do
+for test in test_blackwell_build_selection test_photo_phase_fingerprint test_generated_header_install test_windows_checkout; do
   echo "Resident regression: $test (install plumbing is not a full SDK build)"
   python3 -I "scripts/resident/$test.py"
 done

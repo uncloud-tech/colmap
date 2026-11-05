@@ -25,8 +25,8 @@ void CheckKernelLaunch(Kernel kernel,
   if (error == cudaSuccess) return;
 
   cudaFuncAttributes attributes{};
-  const cudaError_t attributes_status = cudaFuncGetAttributes(
-      &attributes, reinterpret_cast<const void*>(kernel));
+  const cudaError_t attributes_status =
+      cudaFuncGetAttributes(&attributes, reinterpret_cast<const void*>(kernel));
   int device = -1;
   cudaDeviceProp properties{};
   const cudaError_t device_status = cudaGetDevice(&device);
@@ -36,8 +36,8 @@ void CheckKernelLaunch(Kernel kernel,
           : device_status;
   LOG(FATAL_THROW)
       << "CUDA launch failed: kernel=" << name
-      << " error=" << cudaGetErrorString(error)
-      << " grid=(" << grid.x << "," << grid.y << "," << grid.z << ")"
+      << " error=" << cudaGetErrorString(error) << " grid=(" << grid.x << ","
+      << grid.y << "," << grid.z << ")"
       << " block=(" << block.x << "," << block.y << "," << block.z << ")"
       << " dynamicSharedBytes=0"
       << " funcAttributesStatus=" << cudaGetErrorString(attributes_status)
@@ -46,8 +46,7 @@ void CheckKernelLaunch(Kernel kernel,
       << " sharedSizeBytes=" << attributes.sharedSizeBytes
       << " localSizeBytes=" << attributes.localSizeBytes
       << " binaryVersion=" << attributes.binaryVersion
-      << " ptxVersion=" << attributes.ptxVersion
-      << " device=" << device
+      << " ptxVersion=" << attributes.ptxVersion << " device=" << device
       << " devicePropertiesStatus=" << cudaGetErrorString(properties_status)
       << " computeCapability=" << properties.major << "." << properties.minor
       << " deviceMaxThreadsPerBlock=" << properties.maxThreadsPerBlock

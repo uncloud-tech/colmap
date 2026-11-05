@@ -1002,7 +1002,8 @@ namespace {
 
 // The native SM120 kernel uses 94 registers/thread: 32x32 exceeds its
 // 65536-register block budget. 32x16 fits without changing the kernel's math,
-// per-pixel PRNG state, or draw order. PRNG initialization keeps its own layout.
+// per-pixel PRNG state, or draw order. PRNG initialization keeps its own
+// layout.
 void LaunchNormalMapInitialization(const ReferenceCalibration calibration,
                                    GpuMatView<float> normal_map,
                                    GpuMatView<curandState> rand_state_map,

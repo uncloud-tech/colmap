@@ -48,11 +48,12 @@ TEST(OwnedKernelLaunch, ResourceFailureIdentifiesKernelAndLimits) {
   stream.Synchronize();
 }
 
-TEST(OwnedNormalInitialization, PixelNormalsAndSubsequentDrawsMatchSmallBlocks) {
+TEST(OwnedNormalInitialization,
+     PixelNormalsAndSubsequentDrawsMatchSmallBlocks) {
   OwnedCudaStream stream;
-  const ReferenceCalibration calibration{{700.0f, 18.0f, 710.0f, 9.0f},
-                                          {1.0f / 700.0f, -18.0f / 700.0f,
-                                           1.0f / 710.0f, -9.0f / 710.0f}};
+  const ReferenceCalibration calibration{
+      {700.0f, 18.0f, 710.0f, 9.0f},
+      {1.0f / 700.0f, -18.0f / 700.0f, 1.0f / 710.0f, -9.0f / 710.0f}};
   const std::pair<int, int> shapes[] = {
       {37, 19}, {19, 37}, {1, 65}, {65, 1}, {1, 1}};
   for (const auto& shape : shapes) {
@@ -74,9 +75,12 @@ TEST(OwnedNormalInitialization, PixelNormalsAndSubsequentDrawsMatchSmallBlocks) 
       std::vector<float> observed(width * height * 3);
       std::vector<float> expected(observed.size());
       actual.CopyToHost(observed.data(), width * sizeof(float), stream.Get());
-      reference.CopyToHost(expected.data(), width * sizeof(float), stream.Get());
-      EXPECT_EQ(std::memcmp(observed.data(), expected.data(),
-                            observed.size() * sizeof(float)), 0);
+      reference.CopyToHost(
+          expected.data(), width * sizeof(float), stream.Get());
+      EXPECT_EQ(std::memcmp(observed.data(),
+                            expected.data(),
+                            observed.size() * sizeof(float)),
+                0);
       GpuMat<float> actual_draws(width, height), reference_draws(width, height);
       observed.resize(width * height);
       expected.resize(observed.size());
