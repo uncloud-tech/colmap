@@ -391,10 +391,10 @@ if(CUDA_ENABLED)
         LINK_LIBS colmap_mvs_cuda
     )
 
-    # Work around NVCC miscompilation on Blackwell GPUs (sm_100+).
-    # The PatchMatch kernels are miscompiled at -O2/-O3 when generating native
-    # SASS for sm_100+. Instead, we emit sm_90 PTX which Blackwell GPUs
-    # JIT-compile at first launch, bypassing the buggy codegen path.
+    # Optional compatibility workaround for historical Blackwell miscompilation.
+    # Native codegen is now the default with bounded SM120 validation only.
+    # Explicit OFF emits sm_90 PTX for Blackwell to JIT-compile at first launch;
+    # it does not qualify SM100 or guarantee equivalent results across targets.
     # See: https://github.com/colmap/colmap/issues/3514
     #      https://github.com/ggml-org/llama.cpp/issues/18331
     set(_COLMAP_BLACKWELL_TARGET FALSE)
@@ -459,7 +459,16 @@ if(CUDA_ENABLED)
         endif()
     endif()
 
-    if(_COLMAP_BLACKWELL_TARGET)
+    if(_COLMAP_BLACKWELL_TARGET AND MVS_NATIVE_BLACKWELL_ENABLED)
+        message(WARNING
+            "Using native Blackwell MVS codegen for '${CMAKE_CUDA_ARCHITECTURES}'. "
+            "SM120 validation is bounded; SM100 remains unqualified and is not "
+            "equivalent qualification. This is NOT a correctness or hardware "
+            "support guarantee. Set -DMVS_NATIVE_BLACKWELL_ENABLED=OFF for the "
+            "compute90 PTX compatibility workaround. Verify target SASS and run "
+            "native output exactness tests before accepting results "
+            "(see https://github.com/colmap/colmap/issues/3514).")
+    elseif(_COLMAP_BLACKWELL_TARGET)
         message(WARNING
             "Blackwell GPU (sm_100+) detected. Replacing sm_100+ architectures "
             "with 90-virtual (PTX) for colmap_mvs_cuda to work around an NVCC "
@@ -542,6 +551,19 @@ if(CUDA_ENABLED)
             PROPERTIES CUDA_ARCHITECTURES "${_owned_cache_test_archs}")
         set_target_properties(colmap_mvs_owned_distinct_source_cache_trace_test
             PROPERTIES CUDA_ARCHITECTURES "${_owned_cache_test_archs}")
+    endif()
+
+    COLMAP_ADD_TEST(
+        NAME gpu_mat_ref_image_test
+        SRCS gpu_mat_ref_image_test.cu
+        LINK_LIBS colmap_mvs_cuda
+    )
+    if(TESTS_ENABLED)
+        # Exercise the same frontend architecture as the production header's
+        # callers, including native Blackwell under the default configuration.
+        get_target_property(_ref_image_test_archs colmap_mvs_cuda CUDA_ARCHITECTURES)
+        set_target_properties(colmap_mvs_gpu_mat_ref_image_test PROPERTIES
+            CUDA_ARCHITECTURES "${_ref_image_test_archs}")
     endif()
 
     COLMAP_ADD_TEST(
@@ -629,6 +651,10 @@ COLMAP_ADD_TEST(
 
 # Uses real coordinator and owner threads; POSIX subprocess death diagnostics.
 if(TESTS_ENABLED AND UNIX)
+    add_test(NAME "mvs/blackwell_build_selection_test"
+        COMMAND ${Python3_EXECUTABLE} -I
+            "${PROJECT_SOURCE_DIR}/scripts/resident/test_blackwell_build_selection.py")
+    set_tests_properties(mvs/blackwell_build_selection_test PROPERTIES TIMEOUT 60)
     add_test(NAME "mvs/multi_gpu_workers_test"
         COMMAND ${Python3_EXECUTABLE} -I
             "${PROJECT_SOURCE_DIR}/scripts/resident/test_multi_gpu_workers.py")

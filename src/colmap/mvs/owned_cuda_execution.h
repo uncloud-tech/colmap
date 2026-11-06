@@ -13,6 +13,47 @@ namespace colmap {
 namespace mvs {
 namespace owned {
 
+// Check immediately after submission so a launch failure is attributed to its
+// kernel, not a later stream fence. Query resources only on failure; successful
+// launches remain asynchronous and do not acquire any new device-wide fence.
+template <typename Kernel>
+void CheckKernelLaunch(Kernel kernel,
+                       const char* name,
+                       const dim3 grid,
+                       const dim3 block) {
+  const cudaError_t error = cudaGetLastError();
+  if (error == cudaSuccess) return;
+
+  cudaFuncAttributes attributes{};
+  const cudaError_t attributes_status =
+      cudaFuncGetAttributes(&attributes, reinterpret_cast<const void*>(kernel));
+  int device = -1;
+  cudaDeviceProp properties{};
+  const cudaError_t device_status = cudaGetDevice(&device);
+  const cudaError_t properties_status =
+      device_status == cudaSuccess
+          ? cudaGetDeviceProperties(&properties, device)
+          : device_status;
+  LOG(FATAL_THROW)
+      << "CUDA launch failed: kernel=" << name
+      << " error=" << cudaGetErrorString(error) << " grid=(" << grid.x << ","
+      << grid.y << "," << grid.z << ")"
+      << " block=(" << block.x << "," << block.y << "," << block.z << ")"
+      << " dynamicSharedBytes=0"
+      << " funcAttributesStatus=" << cudaGetErrorString(attributes_status)
+      << " numRegs=" << attributes.numRegs
+      << " maxThreadsPerBlock=" << attributes.maxThreadsPerBlock
+      << " sharedSizeBytes=" << attributes.sharedSizeBytes
+      << " localSizeBytes=" << attributes.localSizeBytes
+      << " binaryVersion=" << attributes.binaryVersion
+      << " ptxVersion=" << attributes.ptxVersion << " device=" << device
+      << " devicePropertiesStatus=" << cudaGetErrorString(properties_status)
+      << " computeCapability=" << properties.major << "." << properties.minor
+      << " deviceMaxThreadsPerBlock=" << properties.maxThreadsPerBlock
+      << " regsPerBlock=" << properties.regsPerBlock
+      << " sharedMemPerBlock=" << properties.sharedMemPerBlock;
+}
+
 inline void SynchronizeStream(const cudaStream_t stream) {
   CUDA_SAFE_CALL(cudaStreamSynchronize(stream));
   CUDA_CHECK();

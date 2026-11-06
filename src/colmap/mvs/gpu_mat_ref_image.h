@@ -69,8 +69,17 @@ struct BilateralWeightComputer {
     const float spatial_dist_squared =
         row_diff * row_diff + col_diff * col_diff;
     const float color_dist = color1 - color2;
+#if defined(__CUDA_ARCH__)
+    // Fix the local contraction order: round the color term before spatial FMA.
+    const float color_term =
+        __fmul_rn(__fmul_rn(color_dist, color_dist), color_normalization_);
+    const float exponent =
+        __fmaf_rn(-spatial_dist_squared, spatial_normalization_, -color_term);
+    return exp(exponent);
+#else
     return exp(-spatial_dist_squared * spatial_normalization_ -
                color_dist * color_dist * color_normalization_);
+#endif
   }
 
  private:

@@ -1,0 +1,142 @@
+name: PR Agent
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+  issue_comment:
+    types: [created, edited]
+
+permissions:
+  checks: write
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  review:
+    # For pull_request events this native job IS the required `review` check.
+    # Only issue_comment needs a separate head-bound check: its native job runs
+    # on the default branch, not the PR head.
+    # Fork PR events lack provider secrets. Maintainers can request reviews via
+    # PR comments after this workflow is on the repository's default branch.
+    # Restrict comment-triggered API spending to repository collaborators.
+    if: >-
+      github.event.sender.type != 'Bot' &&
+      ((github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository) ||
+       (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+        startsWith(github.event.comment.body, '/')))
+    # One eligible review per PR, shared by automatic and manual triggers.
+    # Keep this job-level so ignored bot/unrelated events cannot cancel reviews.
+    concurrency:
+      group: ${{ github.workflow }}-pr-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    # Request < agent step < job: leave time to publish failure after a timeout.
+    timeout-minutes: 20
+    steps:
+      - name: Start required review check on PR head
+        id: review-check
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            // Automatic PR jobs already publish `review` on the correct commit.
+            // Other slash commands must not satisfy the required review check.
+            if (context.eventName !== 'issue_comment' ||
+                !/^\/review(?:\s|$)/.test(context.payload.comment.body)) return;
+            const pull_number = context.payload.pull_request?.number ?? context.payload.issue.number;
+            const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number });
+            if (pr.state !== 'open') {
+              core.setFailed('Cannot review a closed pull request.');
+              return;
+            }
+            const { data: check } = await github.rest.checks.create({
+              ...context.repo,
+              name: 'review',
+              head_sha: pr.head.sha,
+              status: 'in_progress',
+              details_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              output: {
+                title: 'PR-Agent review running',
+                summary: 'Review execution only; this check does not approve the pull request.',
+              },
+            });
+            core.setOutput('check-id', check.id);
+            core.setOutput('head-sha', pr.head.sha);
+            core.setOutput('pr-number', pull_number);
+      # No checkout or execution of PR-head code. This upstream action uses an
+      # ephemeral Docker runtime on the GitHub-hosted runner, not a hosted service.
+      # The release pins the wrapper, NOT its rolling github_action image digest.
+      - name: Run PR-Agent
+        id: agent
+        timeout-minutes: 16
+        uses: The-PR-Agent/pr-agent@v0.49.0
+        env:
+          # Ollama Cloud's OpenAI-compatible API; no local Ollama server.
+          OPENAI_KEY: ${{ secrets.OLLAMA_API_KEY }}
+          OPENAI__API_BASE: https://ollama.com/v1
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CONFIG__MODEL: openai/glm-5.3-flash
+          CONFIG__FALLBACK_MODELS: '[]'
+          # Ollama /api/show, model glm-5.3-flash (verified 2026-11-05):
+          # model_info.glm5_next.context_length = 1048576 (input + output).
+          # https://ollama.com/library/glm-5.3-flash
+          CONFIG__CUSTOM_MODEL_MAX_TOKENS: "1048576"
+          CONFIG__MAX_MODEL_TOKENS: "1048576"
+          # Ollama does not publish a separate output maximum in /api/show.
+          # The model author's documentation specifies 128K output tokens:
+          # https://docs.z.ai/guides/vlm/glm-5.3-flash
+          # Use a bounded 32K reasoning+output budget for CI, not the 128K maximum.
+          # This is separate from the full context limit; no input files need be
+          # dropped for PR39. PR-Agent reserves output space when packing input.
+          CONFIG__MAX_OUTPUT_TOKENS: "32768"
+          # Full-diff review needs longer than the default 120s request timeout.
+          # Disable both client and same-model timeout retries: their defaults
+          # multiplied into four ~6-minute attempts across review and improve.
+          CONFIG__AI_TIMEOUT: "900"
+          CONFIG__NUM_RETRIES: "0"
+          CONFIG__RETRY_SAME_MODEL_ON_TIMEOUT: "false"
+          CONFIG__RETRY_SAME_MODEL_ON_LENGTH: "false"
+          # Report the actual model used without dumping configuration/secrets.
+          CONFIG__LOG_LEVEL: INFO
+          CONFIG__OUTPUT_RUN_DETAILS: "true"
+          # Only review is required. Avoid rewriting the PR description or
+          # running a second AI tool after a failed review.
+          GITHUB_ACTION_CONFIG__AUTO_DESCRIBE: "false"
+          GITHUB_ACTION_CONFIG__AUTO_REVIEW: "true"
+          GITHUB_ACTION_CONFIG__AUTO_IMPROVE: "false"
+          GITHUB_ACTION_CONFIG__PR_ACTIONS: '["opened", "reopened", "ready_for_review", "synchronize"]'
+          GITHUB_ACTION_CONFIG__FAIL_ON_TOOL_ERRORS: "true"
+      - name: Complete required review check
+        id: review-result
+        if: always() && steps.review-check.outputs.check-id != ''
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          CHECK_ID: ${{ steps.review-check.outputs.check-id }}
+          REVIEW_HEAD_SHA: ${{ steps.review-check.outputs.head-sha }}
+          PR_NUMBER: ${{ steps.review-check.outputs.pr-number }}
+          AGENT_OUTCOME: ${{ steps.agent.outcome }}
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              ...context.repo, pull_number: Number(process.env.PR_NUMBER),
+            });
+            const unchanged = pr.head.sha === process.env.REVIEW_HEAD_SHA;
+            const outcome = process.env.AGENT_OUTCOME;
+            const conclusion = !unchanged || outcome === 'cancelled' ? 'cancelled' :
+              outcome === 'success' ? 'success' : 'failure';
+            await github.rest.checks.update({
+              ...context.repo,
+              check_run_id: Number(process.env.CHECK_ID),
+              status: 'completed',
+              conclusion,
+              output: {
+                title: `PR-Agent review: ${conclusion}`,
+                summary: !unchanged ? 'PR head changed during review; request a new /review.' :
+                  outcome === 'success' ?
+                    'PR-Agent completed. See its PR comments for findings and coverage; this is not an approval.' :
+                    `PR-Agent did not complete successfully (${outcome}). See the workflow logs.`,
+              },
+            });
