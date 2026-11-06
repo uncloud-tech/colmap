@@ -14,8 +14,10 @@ VERSION = "experimental-stereo-v1"
 # extractor remains resident. This binding does not enable automatic streaming
 # selection or qualify whole-pipeline streaming/fit or native numerical results.
 # Conservative allowances/reserves remain unchanged: no staging savings credit.
+# Text-only closure refresh: corrected streaming CLI help/domain comments;
+# native kernels, allowances/reserves and external containment are unchanged.
 ALLOCATION_FINGERPRINT = (
-    "12067da160255267bc0cbb033f410b41e5e8443d2147bc817ba22a11ab96bdc3"
+    "888c428002121faa2bb8d8951ba4a867cb12cb3e46ec74993b11aa9a86468fd9"
 )
 DEFAULTS = {
     "loader_scratch_host_bytes": 512 * 1024**2,

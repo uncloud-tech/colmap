@@ -324,10 +324,11 @@ void OptionManager::AddFeatureExtractionOptions() {
       "results; "
       "decoder/allocator/charged page cache require external aggregate job "
       "containment. "
-      "Temporary domain: first_octave 0, or -1 with non-4-aligned width only; "
-      "aligned 6048/default -1 unsupported. Affine/DSP/covariant/darkness "
-      "modes and more than 2 orientations are unsupported. POSIX disk "
-      "required. "
+      "Supported domain: first_octave -1 or 0, including aligned widths. "
+      "Nonzero single-root tiny domains fail closed. Affine/DSP/covariant/"
+      "darkness modes and more than 2 orientations are unsupported. "
+      "POSIX disk required; Windows streaming is unsupported and fails closed. "
+      "This experimental path does not qualify whole-workflow streaming. "
       "No silent resizing or option changes.");
   AddDefaultByteOption("SiftExtraction.streaming_gpu_bytes",
                        &feature_extraction->sift->streaming_gpu_bytes);

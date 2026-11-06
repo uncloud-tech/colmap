@@ -96,6 +96,7 @@ class GeneratedPolicyBindingTest(unittest.TestCase):
         )
         for fingerprint in (
             unknown, previous, gaussian_only, pre_installed_streaming,
+            "12067da160255267bc0cbb033f410b41e5e8443d2147bc817ba22a11ab96bdc3",
             "18ba1102892dc048ae8f3ec5c43d5eeb81c986986acecd1821500e2c014adf83",
         ):
             with self.subTest(fingerprint=fingerprint), self.assertRaisesRegex(

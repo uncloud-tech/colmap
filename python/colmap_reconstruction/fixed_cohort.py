@@ -37,8 +37,10 @@ from .model import _add, _mul, current_owned_shape_minimum, exact_int
 # adapter is experimental and explicit opt-in only; the default stays resident.
 # This repin does not select streaming or alter any fixed-cohort shape term:
 # no allowance, reserve or safety policy is reduced and no savings are credited.
+# Text-only closure refresh: corrected streaming CLI help/domain comments;
+# native kernels, allowances/reserves and external containment are unchanged.
 _FIXED_COHORT_FINGERPRINT = (
-    '12067da160255267bc0cbb033f410b41e5e8443d2147bc817ba22a11ab96bdc3'
+    '888c428002121faa2bb8d8951ba4a867cb12cb3e46ec74993b11aa9a86468fd9'
 )
 _PROFILE = 'fresh-fixed-cohort/current-owned-shape-lower-bound-v1/unqualified'
 _ROOT = Path(__file__).resolve().parents[2]

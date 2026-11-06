@@ -88,8 +88,8 @@ class PyramidCU:public SiftPyramid
     GLTexImage* _bufferTEX;
 public:
     // Does not call InitPyramid/ResizePyramid and cannot report extraction
-    // success. Temporary constraint: first octave 0 or exact-domain -1 only. In
-    // particular aligned 6048-wide/default -1 remains unsupported.
+    // success. Supports first octave -1 or 0, including aligned widths and
+    // retained input allocation history; not whole-extraction qualification.
     static siftgpu::StreamPyramidResult BuildGaussianPyramidStreamed(
         SiftParam& parameters,
         siftgpu::StreamedPlane& input,

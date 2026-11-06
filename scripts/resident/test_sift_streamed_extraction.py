@@ -52,6 +52,18 @@ class StreamedExtractionTest(unittest.TestCase):
                     )
                     self.assertIn("FILESYSTEM_HEADER", headers)
 
+    def test_streaming_help_describes_current_bounded_domain(self):
+        source = (ROOT / "src/colmap/controllers/option_manager.cc").read_text()
+        help_text = source.split('"SiftExtraction.streaming",', 1)[1].split(
+            "AddDefaultByteOption", 1
+        )[0]
+        self.assertIn("first_octave -1 or 0, including aligned widths", help_text)
+        self.assertIn("Nonzero single-root", help_text)
+        self.assertIn("Windows", help_text)
+        self.assertIn("fail closed", help_text)
+        self.assertNotIn("non-4-aligned width only", help_text)
+        self.assertNotIn("default -1 unsupported", help_text)
+
     def test_checked_live_payload(self):
         code = r'''
 #include "src/colmap/feature/sift_streaming.h"
