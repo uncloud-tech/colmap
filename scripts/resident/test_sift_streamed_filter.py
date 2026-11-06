@@ -11,6 +11,106 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
 class StreamedFilterTest(unittest.TestCase):
+    def test_sampler_queries_float_linear_texture_limit(self):
+        # Compile the actual sampler admission against the CUDA 13 property
+        # shape (no removed member). API doubles check refusal, not native CUDA.
+        source = (ROOT / "src/thirdparty/SiftGPU/ProgramCU.cu").read_text()
+        sampler = source.split("ProgramCU::SampleImageStreamed(", 1)[1]
+        admission = sampler.split("  int device;", 1)[1].split(
+            "  CheckStreamCancellation", 1
+        )[0]
+        code = (
+            r"""
+#include "src/thirdparty/SiftGPU/StreamedPlane.h"
+#include <cassert>
+#include <string>
+#include <type_traits>
+using namespace siftgpu;
+enum { cudaSuccess, cudaFailure, cudaChannelFormatKindFloat };
+struct cudaDeviceProp { size_t textureAlignment; };
+struct cudaChannelFormatDesc { int x, y, z, w, f; };
+template<class T> cudaChannelFormatDesc cudaCreateChannelDesc() {
+  static_assert(std::is_same<T, float>::value, "float sampler format");
+  return {32, 0, 0, 0, cudaChannelFormatKindFloat};
+}
+static int fail_stage = 0;
+static int calls = 0;
+static size_t limit = 328;
+int cudaGetDevice(int* device) {
+  ++calls; *device = 2;
+  return fail_stage == 1 ? cudaFailure : cudaSuccess;
+}
+int cudaGetDeviceProperties(cudaDeviceProp* properties, int device) {
+  ++calls; assert(device == 2); properties->textureAlignment = 256;
+  return fail_stage == 2 ? cudaFailure : cudaSuccess;
+}
+int cudaDeviceGetTexture1DLinearMaxWidth(
+    size_t* width, const cudaChannelFormatDesc* format, int device) {
+  ++calls; assert(device == 2);
+  assert(format->x == 32 && format->y == 0 && format->z == 0 &&
+         format->w == 0 && format->f == cudaChannelFormatKindFloat);
+  *width = limit;
+  return fail_stage == 3 ? cudaFailure : cudaSuccess;
+}
+struct Input {
+  int Width() const { return 132; }
+  int Height() const { return 9; }
+  size_t CapacityValues() const { return 132 * 9; }
+};
+void Admit() {
+  Input input;
+  const int width = 264, height = 18;
+  const bool up = true, exact = false;
+  StreamFilterOptions options;
+  options.gpu_bytes = 4096; options.host_bytes = 4096;
+  int device;
+"""
+            + admission
+            + r"""
+}
+int main() {
+  // Literal SamplePlan source extent: 2W+1 plus 63 alignment elements.
+  for (size_t capacity : {size_t(328), size_t(329)}) {
+    limit = capacity; calls = 0; Admit(); assert(calls == 3);
+  }
+  limit = 327;
+  bool refused = false;
+  try { Admit(); } catch (const std::runtime_error& error) {
+    refused = std::string(error.what()) ==
+        "SIFT sampling CUDA linear texture limit";
+  }
+  assert(refused);
+  for (fail_stage = 1; fail_stage <= 3; ++fail_stage) {
+    limit = 328; calls = 0; refused = false;
+    try { Admit(); } catch (const std::runtime_error& error) {
+      refused = std::string(error.what()) == "SIFT sampling CUDA properties";
+    }
+    assert(refused && calls == fail_stage);
+  }
+}
+"""
+        )
+        with tempfile.TemporaryDirectory(dir=ROOT.parent) as directory:
+            test = pathlib.Path(directory) / "sampler.cc"
+            binary = pathlib.Path(directory) / "sampler"
+            test.write_text(code)
+            subprocess.run(
+                [
+                    "c++",
+                    "-std=c++17",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-I",
+                    str(ROOT),
+                    str(test),
+                    "-o",
+                    str(binary),
+                ],
+                check=True,
+            )
+            subprocess.run([str(binary)], check=True)
+
     def test_aligned_sampling_extent_and_history(self):
         # Agreed seams: native sampler admission/windows and per-extractor
         # history.
