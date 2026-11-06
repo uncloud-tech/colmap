@@ -52,7 +52,11 @@ void GraphBuilder::Update(const cudaKernelNodeParams& params, bool filtered) {
       condition.conditional.type = cudaGraphCondTypeIf;
       condition.conditional.size = 1;
       cudaGraphNode_t node;
+#if CUDART_VERSION >= 13000
+      Check(cudaGraphAddNode(&node, graph_, nullptr, nullptr, 0, &condition));
+#else
       Check(cudaGraphAddNode(&node, graph_, nullptr, 0, &condition));
+#endif
       body = condition.conditional.phGraph_out[0];
     }
 #endif
@@ -123,8 +127,13 @@ cudaGraph_t ComposeOwnerGraphs(
           &children[i], graph, nullptr, 0, owners[i]));
     }
     for (const auto& edge : topology.dependencies) {
+#if CUDART_VERSION >= 13000
+      Check(cudaGraphAddDependencies(
+          graph, &children[edge.first], &children[edge.second], nullptr, 1));
+#else
       Check(cudaGraphAddDependencies(
           graph, &children[edge.first], &children[edge.second], 1));
+#endif
     }
   } catch (...) {
     (void)cudaGraphDestroy(graph);
