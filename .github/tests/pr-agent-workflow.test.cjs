@@ -130,7 +130,7 @@ test('workflow preserves trigger security and explicitly separates token limits'
   assert.equal(value('CONFIG__CUSTOM_MODEL_MAX_TOKENS'), 1048576);
   assert.equal(value('CONFIG__MAX_MODEL_TOKENS'), 1048576);
   // Provider capability is not the per-review reasoning/output budget.
-  assert.equal(value('CONFIG__MAX_OUTPUT_TOKENS'), 32768);
+  assert.equal(value('CONFIG__MAX_OUTPUT_TOKENS'), 65536);
 });
 
 test('review request is bounded without multiplied timeout retries or extra AI tools', () => {
