@@ -458,17 +458,17 @@ class NativeBindingTest(unittest.TestCase):
                         * max(images[k].height for k in sources)
                         * len(sources)
                     )
+                    device_padding = (
+                        0
+                        if storage == PhotoSourceStorage.SHARED and not geometry
+                        else padded
+                    )
                     checks.append(
                         "{ auto m = ResidentPrivateLogicalMinimum("
                         f"{ref.width},{ref.height},{len(sources)},false);"
                         f" assert(m.host + {padded} == {bound.host});"
                         " assert(m.device + "
-                        f"{
-                            0
-                            if storage == PhotoSourceStorage.SHARED
-                            and not geometry
-                            else padded
-                        } + "
+                        f"{device_padding} + "
                         f"{8 * padded if geometry else 0} == "
                         f"{bound.device}); }}"
                     )
