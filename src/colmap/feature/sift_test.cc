@@ -49,11 +49,11 @@ using std::vector;
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 #include <iostream>
 #if defined(__linux__)
 #include <csignal>
-#include <filesystem>
 
 #include <sys/resource.h>
 #endif

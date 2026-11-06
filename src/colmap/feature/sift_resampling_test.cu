@@ -14,7 +14,11 @@
 // kernel/index helper is used.
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -376,7 +380,6 @@ TEST(SiftOriginalResampling, StreamedAlignedOriginalBytesAndPublishedExtent) {
     }
   }
 }
-#endif
 
 TEST(SiftOriginalResampling, AlignedFullPyramidOriginalFloatBytes) {
   int devices = 0;
@@ -507,5 +510,6 @@ TEST(SiftOriginalResampling, AlignedFullPyramidOriginalFloatBytes) {
     }
   }
 }
+#endif  // !defined(_WIN32)
 }  // namespace
 }  // namespace colmap

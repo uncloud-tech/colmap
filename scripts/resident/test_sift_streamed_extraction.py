@@ -9,6 +9,49 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
 class StreamedExtractionTest(unittest.TestCase):
+    def test_windows_cuda_keeps_resident_tests_without_posix_calls(self):
+        # Preprocess actual guards without requiring CUDA/GTest headers. This
+        # checks source selection, not native Windows compilation/qualification.
+        cases = {
+            "sift_test.cc": ["Nominal", "InputDomainAndImmutability",
+                             "ExactDomainCudaUpsampling", "ArbitraryWidthsAndReuse"],
+            "sift_resampling_test.cu": ["NonfiniteCountsPreserveBits",
+                                        "AlignedAllocationEdgesTailsAndReuse"],
+        }
+        for name, portable_tests in cases.items():
+            with self.subTest(source=name):
+                source = (ROOT / "src/colmap/feature" / name).read_text()
+                without_includes = "\n".join(
+                    line for line in source.splitlines()
+                    if not line.lstrip().startswith("#include")
+                )
+                def preprocess(*defines):
+                    return subprocess.check_output(
+                        ["c++", "-E", "-P", "-x", "c++",
+                         "-DCOLMAP_CUDA_ENABLED", *defines, "-"],
+                        input=without_includes, text=True,
+                    )
+                windows = preprocess("-D_WIN32", "-U__linux__")
+                posix = preprocess("-U_WIN32")
+                for call in ("mkdtemp(", "rmdir("):
+                    self.assertFalse(call in windows, f"Windows retained {call}")
+                self.assertIn("mkdtemp(", posix)
+                for test in portable_tests:
+                    self.assertIn(test, windows)
+                if "std::filesystem::" in posix:
+                    # macOS/POSIX also needs this header, not Linux alone.
+                    headers = subprocess.check_output(
+                        ["c++", "-E", "-P", "-x", "c++", "-U_WIN32",
+                         "-U__linux__", "-DCOLMAP_CUDA_ENABLED", "-"],
+                        input="\n".join(
+                            'FILESYSTEM_HEADER' if line == '#include <filesystem>'
+                            else line for line in source.splitlines()
+                            if not line.lstrip().startswith("#include")
+                            or line == '#include <filesystem>'
+                        ), text=True,
+                    )
+                    self.assertIn("FILESYSTEM_HEADER", headers)
+
     def test_checked_live_payload(self):
         code = r'''
 #include "src/colmap/feature/sift_streaming.h"
