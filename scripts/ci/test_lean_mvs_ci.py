@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class LeanMvsCiTest(unittest.TestCase):
-    def test_upstream_excludes_only_experimental_pr_base(self):
+    def test_windows_includes_experimental_prs_other_upstream_excludes(self):
         for name in ("docker", "mac", "pycolmap", "ubuntu", "windows"):
             with self.subTest(workflow=name):
                 text = (
@@ -21,7 +21,24 @@ class LeanMvsCiTest(unittest.TestCase):
                 pr = text.split("  pull_request:\n", 1)[1].split(
                     "  release:", 1
                 )[0]
-                self.assertIn("branches-ignore: [dev/streaming-workflow]", pr)
+                if name == "windows":
+                    # Windows CUDA and resident builds qualify this PR base.
+                    self.assertNotIn("branches-ignore:", pr)
+                    self.assertNotIn("branches:", pr)
+                    self.assertEqual(text.count("cudaEnabled: true,"), 1)
+                    self.assertEqual(text.count("cudaEnabled: false,"), 1)
+                    self.assertEqual(text.count("testsEnabled: true,"), 2)
+                    self.assertIn(
+                        "-DTESTS_ENABLED=${{ matrix.config.testsEnabled }}",
+                        text,
+                    )
+                    self.assertIn(
+                        "-DCUDA_ENABLED=${{ matrix.config.cudaEnabled }}", text
+                    )
+                else:
+                    self.assertIn(
+                        "branches-ignore: [dev/streaming-workflow]", pr
+                    )
                 self.assertIn(
                     "types: [ assigned, opened, synchronize, reopened ]", pr
                 )
