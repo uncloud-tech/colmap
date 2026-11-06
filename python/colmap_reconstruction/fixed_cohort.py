@@ -40,10 +40,10 @@ from .model import _add, _mul, current_owned_shape_minimum, exact_int
 # adapter is experimental and explicit opt-in only; the default stays resident.
 # This repin does not select streaming or alter any fixed-cohort shape term:
 # no allowance, reserve or safety policy is reduced and no savings are credited.
-# CUDA API compatibility refresh: query the float linear-texture limit.
-# Scientific math, allowances/reserves and external containment are unchanged.
+# CUDA/HIP compatibility refresh: retain HIP's property limit and CUDA's
+# checked float query. Math, allowances/reserves and containment are unchanged.
 _FIXED_COHORT_FINGERPRINT = (
-    "db80cbddf70eac7cd7bf04a4d8388802578ea215839222263de258dee3fb39d2"
+    "f81ae887315a8d8f2ea1c6b2b03a0af0860a5969a5986c26e68482f33d3364a9"
 )
 _PROFILE = "fresh-fixed-cohort/current-owned-shape-lower-bound-v1/unqualified"
 _ROOT = Path(__file__).resolve().parents[2]

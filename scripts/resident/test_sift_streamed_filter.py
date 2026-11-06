@@ -11,9 +11,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
 class StreamedFilterTest(unittest.TestCase):
-    def test_sampler_queries_float_linear_texture_limit(self):
-        # Compile the actual sampler admission against the CUDA 13 property
-        # shape (no removed member). API doubles check refusal, not native CUDA.
+    def test_sampler_texture_limits_cuda_and_hip(self):
+        # Compile actual admission for CUDA 13 (no removed property) and HIP
+        # (no CUDA-only query). API doubles are not native SDK qualification.
         source = (ROOT / "src/thirdparty/SiftGPU/ProgramCU.cu").read_text()
         sampler = source.split("ProgramCU::SampleImageStreamed(", 1)[1]
         admission = sampler.split("  int device;", 1)[1].split(
@@ -27,12 +27,24 @@ class StreamedFilterTest(unittest.TestCase):
 #include <type_traits>
 using namespace siftgpu;
 enum { cudaSuccess, cudaFailure, cudaChannelFormatKindFloat };
-struct cudaDeviceProp { size_t textureAlignment; };
+struct cudaDeviceProp {
+  size_t textureAlignment;
+#if defined(COLMAP_HIP_ENABLED)
+  int maxTexture1DLinear;
+#endif
+};
+#if !defined(COLMAP_HIP_ENABLED)
 struct cudaChannelFormatDesc { int x, y, z, w, f; };
 template<class T> cudaChannelFormatDesc cudaCreateChannelDesc() {
   static_assert(std::is_same<T, float>::value, "float sampler format");
   return {32, 0, 0, 0, cudaChannelFormatKindFloat};
 }
+#endif
+#if defined(COLMAP_HIP_ENABLED)
+constexpr int query_calls = 2;
+#else
+constexpr int query_calls = 3;
+#endif
 static int fail_stage = 0;
 static int calls = 0;
 static size_t limit = 328;
@@ -42,8 +54,12 @@ int cudaGetDevice(int* device) {
 }
 int cudaGetDeviceProperties(cudaDeviceProp* properties, int device) {
   ++calls; assert(device == 2); properties->textureAlignment = 256;
+#if defined(COLMAP_HIP_ENABLED)
+  properties->maxTexture1DLinear = int(limit);
+#endif
   return fail_stage == 2 ? cudaFailure : cudaSuccess;
 }
+#if !defined(COLMAP_HIP_ENABLED)
 int cudaDeviceGetTexture1DLinearMaxWidth(
     size_t* width, const cudaChannelFormatDesc* format, int device) {
   ++calls; assert(device == 2);
@@ -52,6 +68,7 @@ int cudaDeviceGetTexture1DLinearMaxWidth(
   *width = limit;
   return fail_stage == 3 ? cudaFailure : cudaSuccess;
 }
+#endif
 struct Input {
   int Width() const { return 132; }
   int Height() const { return 9; }
@@ -71,7 +88,7 @@ void Admit() {
 int main() {
   // Literal SamplePlan source extent: 2W+1 plus 63 alignment elements.
   for (size_t capacity : {size_t(328), size_t(329)}) {
-    limit = capacity; calls = 0; Admit(); assert(calls == 3);
+    limit = capacity; calls = 0; Admit(); assert(calls == query_calls);
   }
   limit = 327;
   bool refused = false;
@@ -80,7 +97,7 @@ int main() {
         "SIFT sampling CUDA linear texture limit";
   }
   assert(refused);
-  for (fail_stage = 1; fail_stage <= 3; ++fail_stage) {
+  for (fail_stage = 1; fail_stage <= query_calls; ++fail_stage) {
     limit = 328; calls = 0; refused = false;
     try { Admit(); } catch (const std::runtime_error& error) {
       refused = std::string(error.what()) == "SIFT sampling CUDA properties";
@@ -94,22 +111,25 @@ int main() {
             test = pathlib.Path(directory) / "sampler.cc"
             binary = pathlib.Path(directory) / "sampler"
             test.write_text(code)
-            subprocess.run(
-                [
-                    "c++",
-                    "-std=c++17",
-                    "-Wall",
-                    "-Wextra",
-                    "-Werror",
-                    "-I",
-                    str(ROOT),
-                    str(test),
-                    "-o",
-                    str(binary),
-                ],
-                check=True,
-            )
-            subprocess.run([str(binary)], check=True)
+            for backend in ("COLMAP_CUDA_ENABLED", "COLMAP_HIP_ENABLED"):
+                with self.subTest(backend=backend):
+                    subprocess.run(
+                        [
+                            "c++",
+                            "-std=c++17",
+                            "-Wall",
+                            "-Wextra",
+                            "-Werror",
+                            f"-D{backend}",
+                            "-I",
+                            str(ROOT),
+                            str(test),
+                            "-o",
+                            str(binary),
+                        ],
+                        check=True,
+                    )
+                    subprocess.run([str(binary)], check=True)
 
     def test_aligned_sampling_extent_and_history(self):
         # Agreed seams: native sampler admission/windows and per-extractor

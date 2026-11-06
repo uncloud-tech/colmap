@@ -408,13 +408,18 @@ siftgpu::StreamFilterResult ProgramCU::SampleImageStreamed(
         "SIFT sampling requires published scalar input");
   int device;
   cudaDeviceProp properties{};
+  if (cudaGetDevice(&device) != cudaSuccess ||
+      cudaGetDeviceProperties(&properties, device) != cudaSuccess)
+    throw std::runtime_error("SIFT sampling CUDA properties");
+#if defined(COLMAP_HIP_ENABLED)
+  const size_t max_texture_values = size_t(properties.maxTexture1DLinear);
+#else
   size_t max_texture_values = 0;
   const auto format = cudaCreateChannelDesc<float>();
-  if (cudaGetDevice(&device) != cudaSuccess ||
-      cudaGetDeviceProperties(&properties, device) != cudaSuccess ||
-      cudaDeviceGetTexture1DLinearMaxWidth(
+  if (cudaDeviceGetTexture1DLinearMaxWidth(
           &max_texture_values, &format, device) != cudaSuccess)
     throw std::runtime_error("SIFT sampling CUDA properties");
+#endif
   const SamplePlan plan(input.Width(),
                         input.Height(),
                         width,
