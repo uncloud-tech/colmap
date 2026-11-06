@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""Bounded CPU tests of the SIFT file-plane and stripe admission seam, not CUDA."""
+"""Bounded CPU tests of SIFT file-plane and stripe admission, not CUDA."""
 
-import sys
 import pathlib
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -12,7 +12,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 class StreamedFilterTest(unittest.TestCase):
     def test_aligned_sampling_extent_and_history(self):
-        # Agreed seams: native sampler admission/windows and per-extractor history.
+        # Agreed seams: native sampler admission/windows and per-extractor
+        # history.
         code = r"""
 #include "src/thirdparty/SiftGPU/StreamedPlane.h"
 #include <cassert>
@@ -24,7 +25,8 @@ template<class F> void Refuses(F f) {
 }
 int main() {
   SamplePlan plan(132, 9, 264, 18, true, false, 4096, 4096, 256);
-  assert(plan.source_values == 328); // 2W+1 plus worst 63-float alignment slack.
+  // 2W+1 plus worst 63-float alignment slack.
+  assert(plan.source_values == 328);
   assert(plan.gpu_bytes == (328 + 264 + 33) * 4);
   auto seam = plan.Window(3);
   assert(seam.origin == 128 && seam.values == 269); // Includes flat index 396.
@@ -50,7 +52,8 @@ int main() {
   assert(bits[0] == 0.125f && bits[1] == 0.875f && bits[2] == 0.875f);
   SamplePlan retained(128, 2, 256, 4, true, false, 4096, 4096, 256, 396);
   assert(retained.Window(3).origin == 128);
-  assert(retained.Window(3).values == 257); // Through N+W, not just two active rows.
+  // Through N+W, not just two active rows.
+  assert(retained.Window(3).values == 257);
   auto& grown = history.Begin(".", 133, 3);
   std::vector<float> newer(399, 0.25f);
   grown.WriteRows(0, 3, newer.data()); grown.Seal();
@@ -134,7 +137,8 @@ int main() {
     if (produced != n || std::memcmp(actual, expected, n*16)) return 3;
   }
   if (siftgpu::ReshapePackedOrientations(input, 0, actual) != 0) return 4;
-  std::cout << "SIFT_ORIENTATION_ORIGINAL_EXPANSION records=10 expanded=13 batches=4\n";
+  std::cout << "SIFT_ORIENTATION_ORIGINAL_EXPANSION "
+               "records=10 expanded=13 batches=4\n";
 }
 """
         with tempfile.TemporaryDirectory(dir=ROOT.parent) as directory:
@@ -170,7 +174,8 @@ int main() {
             mutations = {
                 "sentinel": ("if (orientations[0] != 65535)", "if (true)"),
                 "duplicate": (
-                    "orientations[1] != 65535 && orientations[1] != orientations[0]",
+                    "orientations[1] != 65535 && "
+                    "orientations[1] != orientations[0]",
                     "orientations[1] != 65535",
                 ),
                 "conversion": (
@@ -242,7 +247,11 @@ extern "C" ssize_t __wrap_pwrite(int fd, const void* p, size_t n, off_t o) {
   if (interrupt_io) { interrupt_io = false; errno = EINTR; return -1; }
   return __real_pwrite(fd, p, std::min(n, size_t(5)), o);
 }
-template<class F> void Refuses(F f) { bool caught = false; try { f(); } catch (const std::exception&) { caught = true; } assert(caught); }
+template<class F> void Refuses(F f) {
+  bool caught = false;
+  try { f(); } catch (const std::exception&) { caught = true; }
+  assert(caught);
+}
 int main(int argc, char** argv) {
   assert(argc == 2);
   directory = argv[1];
@@ -279,7 +288,8 @@ int main(int argc, char** argv) {
     input.WriteRows(0, 4, values); input.Seal();
     assert(open_files() == before + 1);
     owned.Invalidate();
-    assert(open_files() == before); // Unlinked reserved blocks have no owner now.
+    // Unlinked reserved blocks have no owner now.
+    assert(open_files() == before);
   }
   {
     StreamedPlane flat(directory, 3, 3);
@@ -337,8 +347,10 @@ int main(int argc, char** argv) {
   Refuses([] { KeyPlan(INT_MAX, 100, SIZE_MAX, SIZE_MAX); });
   // Literal packed-angle oracle: no reimplementation of the conversion.
   float packed_angles[16] = {1,2,3,0, 4,5,6,0, 7,8,9,0, 10,11,12,0};
-  const uint32_t angle_bits[4] = {0x80000000u, 0x40004000u, 0xffff0000u, 0xffffffffu};
-  for (int i = 0; i < 4; ++i) std::memcpy(packed_angles + i*4+3, angle_bits+i, 4);
+  const uint32_t angle_bits[4] = {
+      0x80000000u, 0x40004000u, 0xffff0000u, 0xffffffffu};
+  for (int i = 0; i < 4; ++i)
+    std::memcpy(packed_angles + i*4+3, angle_bits+i, 4);
   float expanded_angles[32] = {};
   assert(ReshapePackedOrientations(packed_angles, 4, expanded_angles) == 4);
   assert(expanded_angles[0] == 1 && expanded_angles[4] == 1 &&
@@ -364,7 +376,8 @@ int main(int argc, char** argv) {
     float copy[128]; descriptors.ReadRecord(0, 1, copy);
     assert(std::memcmp(record, copy, 512) == 0);
     Refuses([&] { descriptors.ReadRows(0, 1, copy, [] { return true; }); });
-    assert(descriptors.BytesWritten() == 1024 && descriptors.BytesRead() == 512);
+    assert(descriptors.BytesWritten() == 1024 &&
+           descriptors.BytesRead() == 512);
     StreamedPlane failed_descriptor(directory, 1, 2, 128);
     fail_io = true;
     Refuses([&] { failed_descriptor.WriteRows(0, 1, record); });
@@ -392,7 +405,8 @@ int main(int argc, char** argv) {
     expanded.Reserve();
     expanded.WriteRows(0, 2, xyso);
     expanded.SealPrefix(2);
-    assert(expanded.Complete() && expanded.Height() == 2 && expanded.Bytes() == 32);
+    assert(expanded.Complete() && expanded.Height() == 2 &&
+           expanded.Bytes() == 32);
     float copy[8]; expanded.ReadRows(0, 2, copy);
     assert(std::memcmp(copy, xyso, 32) == 0);
     Refuses([&] { expanded.SealPrefix(1); });
@@ -458,10 +472,13 @@ int main(int argc, char** argv) {
   zero_io = true;
   Refuses([&] { plane.ReadRows(0, 1, result); });
   zero_io = false;
-  assert(std::filesystem::is_empty(directory)); // scratch is unlinked immediately
+  // Scratch is unlinked immediately.
+  assert(std::filesystem::is_empty(directory));
   StreamedPlane cancelled(directory, 3, 4);
   int checks = 0;
-  Refuses([&] { cancelled.WriteRows(0, 4, values, [&] { return ++checks > 2; }); });
+  Refuses([&] {
+    cancelled.WriteRows(0, 4, values, [&] { return ++checks > 2; });
+  });
   assert(cancelled.BytesWritten() == 10 && !cancelled.Complete());
   Refuses([&] { cancelled.Seal(); });
   Refuses([&] { plane.ReadRows(3, 2, result); });

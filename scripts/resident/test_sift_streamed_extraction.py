@@ -34,7 +34,7 @@ class StreamedExtractionTest(unittest.TestCase):
                     if not line.lstrip().startswith("#include")
                 )
 
-                def preprocess(*defines):
+                def preprocess(input_source, *defines):
                     return subprocess.check_output(
                         [
                             "c++",
@@ -46,12 +46,14 @@ class StreamedExtractionTest(unittest.TestCase):
                             *defines,
                             "-",
                         ],
-                        input=without_includes,
+                        input=input_source,
                         text=True,
                     )
 
-                windows = preprocess("-D_WIN32", "-U__linux__")
-                posix = preprocess("-U_WIN32")
+                windows = preprocess(
+                    without_includes, "-D_WIN32", "-U__linux__"
+                )
+                posix = preprocess(without_includes, "-U_WIN32")
                 for call in ("mkdtemp(", "rmdir("):
                     self.assertFalse(
                         call in windows, f"Windows retained {call}"

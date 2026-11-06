@@ -69,27 +69,34 @@ struct cudaResourceDesc {
                    size_t sizeInBytes; } linear; } res;
 };
 enum { cudaSuccess, cudaResourceTypeLinear, cudaChannelFormatKindFloat,
-       cudaMemcpyHostToDevice, cudaMemcpyDeviceToHost, cudaMemcpyDeviceToDevice };
+       cudaMemcpyHostToDevice, cudaMemcpyDeviceToHost,
+       cudaMemcpyDeviceToDevice };
 inline int cudaMalloc(void** p, size_t n) {
   requests.push_back(n);
   *p = std::calloc(1, reservation_only ? 1 : n); assert(*p); live[*p] = n;
   ++linear_allocations; return 0;
 }
-inline int cudaFree(void* p) { assert(live.erase(p) == 1); std::free(p); return 0; }
-inline int cudaMallocArray(cudaArray** p, const cudaChannelFormatDesc*, int, int) {
+inline int cudaFree(void* p) {
+  assert(live.erase(p) == 1); std::free(p); return 0;
+}
+inline int cudaMallocArray(
+    cudaArray** p, const cudaChannelFormatDesc*, int, int) {
   ++array_allocations; *p = new cudaArray; return 0;
 }
 inline int cudaFreeArray(cudaArray* p) { delete p; return 0; }
 inline int cudaMemcpy(void* d, const void* s, size_t n, int) {
   std::memcpy(d, s, n); return 0;
 }
-inline int cudaMemcpyAsync(void* d, const void* s, size_t n, int k, cudaStream_t) {
+inline int cudaMemcpyAsync(
+    void* d, const void* s, size_t n, int k, cudaStream_t) {
   return cudaMemcpy(d, s, n, k);
 }
-inline int cudaMemcpy2DToArray(cudaArray*, int, int, void*, size_t, size_t, int, int) {
+inline int cudaMemcpy2DToArray(
+    cudaArray*, int, int, void*, size_t, size_t, int, int) {
   ++array_copies; return 0;
 }
-inline int cudaCreateTextureObject(cudaTextureObject_t* h, const cudaResourceDesc* r,
+inline int cudaCreateTextureObject(
+    cudaTextureObject_t* h, const cudaResourceDesc* r,
                                    const cudaTextureDesc*, void*) {
   assert(r->resType == cudaResourceTypeLinear);
   assert(live.at(r->res.linear.devPtr) == r->res.linear.sizeInBytes);
@@ -121,7 +128,8 @@ inline int cudaGLUnmapBufferObject(unsigned int) { return 0; }
                 program_header,
             ):
                 if name == "GenerateListStreamed":
-                    continue  # Exercise real host batching with CPU API doubles.
+                    # Exercise real host batching with CPU API doubles.
+                    continue
                 if name == "FilterImage" and "sigma" not in args:
                     continue  # template declaration, not a linked host call
                 args = re.sub(r"\s*=\s*\d+", "", args)
@@ -129,7 +137,10 @@ inline int cudaGLUnmapBufferObject(unsigned int) { return 0; }
                 if result.startswith("siftgpu::Stream"):
                     # This resident ownership test must never pretend to run
                     # CUDA streaming. Supply link symbols, fail if dispatched.
-                    body = 'throw std::runtime_error("streaming requires native CUDA test");'
+                    body = (
+                        'throw std::runtime_error("streaming requires '
+                        'native CUDA test");'
+                    )
                 if name == "ComputeKEY":
                     body = "RecordDenseKey(dog, key, Tdog, Tedge);"
                 if name == "ComputeOrientation":
@@ -147,20 +158,24 @@ inline int cudaGLUnmapBufferObject(unsigned int) { return 0; }
                     prefix = (
                         "histogram_slot = test_pyramid->GetHistLevelNum() - "
                         "test_pyramid->_pyramid_octave_first / 2 - 1; "
-                        "assert(hist->GetImgWidth() == (key->GetImgWidth()+3)/4); "
+                        "assert(hist->GetImgWidth() == "
+                        "(key->GetImgWidth()+3)/4); "
                         "assert(hist->GetImgHeight() == key->GetImgHeight()); "
                         "assert(key == last_key); "
                         "list_order.push_back(last_level); "
                         if name == "InitHistogram"
                         else "--histogram_slot; "
-                        "assert(hist2->GetImgWidth() == (hist1->GetImgWidth()+3)/4); "
-                        "assert(hist2->GetImgHeight() == hist1->GetImgHeight()); "
+                        "assert(hist2->GetImgWidth() == "
+                        "(hist1->GetImgWidth()+3)/4); "
+                        "assert(hist2->GetImgHeight() == "
+                        "hist1->GetImgHeight()); "
                     )
                     body = prefix + (
                         f"CheckHistogram({target}); "
                         f"vector<int> counts({target}->GetImgWidth() * "
                         f"{target}->GetImgHeight() * 4, 0); "
-                        f"assert({target}->GetDataSize() >= counts.size() * sizeof(int)); "
+                        f"assert({target}->GetDataSize() >= "
+                        "counts.size() * sizeof(int)); "
                         f"histogram_bytes[{target}] = {target}->GetDataSize(); "
                         "counts[0] = test_features; "
                         f"{target}->CopyFromHost(counts.data());"
@@ -207,7 +222,8 @@ inline int cudaGLUnmapBufferObject(unsigned int) { return 0; }
                 )[0]
             )
             # CPU loop executes the ORIGINAL kernel body, not a numerical GPU
-            # qualification. Host cursor, I/O, staging, and failure paths are real.
+            # qualification. Host cursor, I/O, staging and failure paths
+            # are real.
             list_host = re.sub(
                 r"ListGen_Kernel<<<.*?>>>",
                 "RunListKernel",
@@ -325,7 +341,8 @@ void SiftPyramid::RunSIFT(GLTexInput*) {
   vector<int> selected(_levelFeatureNum,
       _levelFeatureNum + _octave_num * param._dog_level_num);
   const int selected_total = siftgpu::LimitStreamedFeatureCounts(
-      selected, GlobalParam::_FeatureCountThreshold, GlobalParam::_TruncateMethod);
+      selected, GlobalParam::_FeatureCountThreshold,
+      GlobalParam::_TruncateMethod);
   LimitFeatureCount(0);
   assert(selected_total == _featureNum);
   assert(std::equal(selected.begin(), selected.end(), _levelFeatureNum));
@@ -394,7 +411,8 @@ int main(int argc, char** argv) {
           bool refused = false;
           try { ProgramCU::GenerateListStreamed(tiny, options); }
           catch (const std::runtime_error& e) {
-            refused = std::string(e.what()) == "SIFT nonzero single-level list is unqualified";
+            refused = std::string(e.what()) ==
+                "SIFT nonzero single-level list is unqualified";
           }
           assert(refused);
         } else {
@@ -407,10 +425,12 @@ int main(int argc, char** argv) {
       options.gpu_bytes = 132 + 32*batch;
       options.host_bytes = 64 + 32*batch;
       uint64_t reads_before = 0;
-      for (auto& plane : detection.histograms) reads_before += plane->BytesRead();
+      for (auto& plane : detection.histograms)
+        reads_before += plane->BytesRead();
       auto list = ProgramCU::GenerateListStreamed(detection, options);
       uint64_t reads_after = 0;
-      for (auto& plane : detection.histograms) reads_after += plane->BytesRead();
+      for (auto& plane : detection.histograms)
+        reads_after += plane->BytesRead();
       assert(list.stats.file_read_bytes == reads_after - reads_before);
       assert(list.count == 64 && list.records->Bytes() == 1024);
       assert(list.stats.gpu_staging_bytes <= options.gpu_bytes);
@@ -425,7 +445,9 @@ int main(int argc, char** argv) {
       assert(list.stats.file_read_bytes > 0);
       assert(list.stats.file_written_bytes == 1024);
       auto reads = detection.histograms.back()->BytesRead();
-      options.cancelled = [&] { return detection.histograms.back()->BytesRead() > reads + 64; };
+      options.cancelled = [&] {
+        return detection.histograms.back()->BytesRead() > reads + 64;
+      };
       bool refused = false;
       try { ProgramCU::GenerateListStreamed(detection, options); }
       catch (const std::runtime_error&) { refused = true; }
@@ -471,7 +493,8 @@ int main(int argc, char** argv) {
                gradient->GetImgHeight() * 2 * int(sizeof(float)));
         // Prove retained float2 storage still round-trips unchanged and binds
         // a linear resource, including after capacity reuse.
-        vector<float> input(gradient->GetImgWidth()*gradient->GetImgHeight()*2, 1.25f);
+        vector<float> input(
+            gradient->GetImgWidth()*gradient->GetImgHeight()*2, 1.25f);
         vector<float> output(input.size());
         gradient->CopyFromHost(input.data());
         gradient->CopyToHost(output.data());

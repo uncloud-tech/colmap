@@ -30,6 +30,8 @@ class FixedCohortTest(unittest.TestCase):
             ImageShape(5, 4, 1, 19)
 
     def test_four_jobs_raw_retention_and_duplicates(self):
+        from pathlib import Path
+
         from colmap_reconstruction.fixed_cohort import (
             ByteCharge,
             ImageShape,
@@ -37,7 +39,6 @@ class FixedCohortTest(unittest.TestCase):
             PhaseOptions,
             forecast_fixed_cohort,
         )
-        from pathlib import Path
 
         images = (ImageShape(5, 4, 1, 20), ImageShape(3, 3, 1, 9)) * 2
         ids = (3, 0, 2, 1)
@@ -74,6 +75,7 @@ class FixedCohortTest(unittest.TestCase):
 class RefusalAndLifetimeTest(unittest.TestCase):
     def setUp(self):
         from pathlib import Path
+
         from colmap_reconstruction.fixed_cohort import (
             ByteCharge,
             ImageShape,
@@ -240,6 +242,7 @@ class RefusalAndLifetimeTest(unittest.TestCase):
 
     def test_phase_channels_dimensions_options_device_and_order_refuse(self):
         from dataclasses import replace
+
         from colmap_reconstruction.fixed_cohort import ImageShape
 
         for args in (
@@ -392,13 +395,14 @@ class NativeBindingTest(unittest.TestCase):
         import subprocess
         import tempfile
         from pathlib import Path
+
         from colmap_reconstruction.fixed_cohort import (
             ByteCharge,
             ImageShape,
             Job,
             OutputPolicy,
-            PhotoSourceStorage,
             PhaseOptions,
+            PhotoSourceStorage,
             forecast_fixed_cohort,
         )
 
@@ -454,10 +458,22 @@ class NativeBindingTest(unittest.TestCase):
                         * max(images[k].height for k in sources)
                         * len(sources)
                     )
-                    checks.append(f"""{{ auto m = ResidentPrivateLogicalMinimum({ref.width},{ref.height},{len(sources)},false);
-                        assert(m.host + {padded} == {bound.host});
-                        assert(m.device + {0 if storage == PhotoSourceStorage.SHARED and not geometry else padded} + {8 * padded if geometry else 0} == {bound.device}); }}""")
-            # Degenerate + rotated dimensions compare canonical shape helper to native.
+                    checks.append(
+                        "{ auto m = ResidentPrivateLogicalMinimum("
+                        f"{ref.width},{ref.height},{len(sources)},false);"
+                        f" assert(m.host + {padded} == {bound.host});"
+                        " assert(m.device + "
+                        f"{
+                            0
+                            if storage == PhotoSourceStorage.SHARED
+                            and not geometry
+                            else padded
+                        } + "
+                        f"{8 * padded if geometry else 0} == "
+                        f"{bound.device}); }}"
+                    )
+            # Degenerate + rotated dimensions compare canonical shape helper
+            # to native.
             for w, h, s in (
                 (1, 1, 1),
                 (1, 9, 2),
@@ -467,7 +483,9 @@ class NativeBindingTest(unittest.TestCase):
             ):
                 host, device = current_owned_shape_minimum(w, h, s)
                 checks.append(
-                    f"{{ auto m=ResidentPrivateLogicalMinimum({w},{h},{s},false); assert(m.host=={host} && m.device=={device}); }}"
+                    "{ auto m=ResidentPrivateLogicalMinimum("
+                    f"{w},{h},{s},false); "
+                    f"assert(m.host=={host} && m.device=={device}); }}"
                 )
             checks.append("""{ auto raw = BuildFixedCohortLogicalInventory(
     {{5,4},{3,3},{5,4},{3,3}},
@@ -499,14 +517,24 @@ auto b = """
                 + "\n".join(checks)
                 + f"""
 auto p = FixedCohortPeaks(b);
-assert(p.photo.host == {budget.photo_peak.host} && p.photo.device == {budget.photo_peak.device});
-assert(p.geo.host == {budget.geo_peak.host} && p.geo.device == {budget.geo_peak.device});
-assert(p.peak.host == {budget.peak.host} && p.peak.device == {budget.peak.device});
+assert(p.photo.host == {budget.photo_peak.host} &&
+       p.photo.device == {budget.photo_peak.device});
+assert(p.geo.host == {budget.geo_peak.host} &&
+       p.geo.device == {budget.geo_peak.device});
+assert(p.peak.host == {budget.peak.host} &&
+       p.peak.device == {budget.peak.device});
 auto admitted = AdmitFixedCohortBudget(b, {{1000000,1000000}});
 assert(admitted.host == MarginBytes(p.peak.host));
 assert(admitted.device == MarginBytes(p.peak.device));
-assert(b.output_policy==FixedCohortOutputPolicy::{"kPhotoAndGeo" if policy == OutputPolicy.PHOTO_AND_GEO else "kFinalGeoOnly"});
-assert(b.host_outputs.host=={1856 if policy == OutputPolicy.PHOTO_AND_GEO else 928} && b.snapshots.device==928);
+assert(b.output_policy==FixedCohortOutputPolicy::{
+                    "kPhotoAndGeo"
+                    if policy == OutputPolicy.PHOTO_AND_GEO
+                    else "kFinalGeoOnly"
+                });
+assert(b.host_outputs.host=={
+                    1856 if policy == OutputPolicy.PHOTO_AND_GEO else 928
+                } &&
+       b.snapshots.device==928);
 auto invalid=b;
 invalid.output_policy=static_cast<FixedCohortOutputPolicy>(99);
 bool invalid_refused=false;
@@ -520,24 +548,31 @@ assert(b.caller_inputs.host==58 && b.frozen_inputs.host==58);
 assert(b.process.host==100 && b.process.device==200);
 assert(b.unknown.host==300 && b.unknown.device==400);
 assert(b.headroom_reserve.host==10 && b.headroom_reserve.device==20);
-assert(b.already_live_process[0].host==10 && b.already_live_process[0].device==20);
-assert(b.already_live_process[1].host==3 && b.already_live_process[1].device==4);
+assert(b.already_live_process[0].host==10 &&
+       b.already_live_process[0].device==20);
+assert(b.already_live_process[1].host==3 &&
+       b.already_live_process[1].device==4);
 assert(b.already_live_process_provenance[0]=="copy classified");
 assert(b.already_live_process_provenance[1]=="GEO classified");
 assert(b.unknown_provenance == std::string("explicit test-only allowance ") +
        char(0xf0) + char(0x9f) + char(0xa7) + char(0xaa));
-auto crossed=FixedCohortActivePeak({{{{100,1}},{{1,200}},{{90,2}},{{2,150}}}},2);
+auto crossed=FixedCohortActivePeak(
+    {{{{100,1}},{{1,200}},{{90,2}},{{2,150}}}},2);
 assert(crossed.host==190 && crossed.device==350);
 CheckFixedCohortPhysicalCopies(b, b.snapshots.device, b.geo_staging_device);
 // The original aggregate margin absorbs discrepancies; no second margin.
 auto slack=MarginBytes(p.geo.device)-p.geo.device;
 CheckFixedCohortPhysicalCopies(b,b.snapshots.device,{{240+slack,240,108,240}});
 bool refused=false;
-try {{ CheckFixedCohortPhysicalCopies(b,b.snapshots.device,{{241+slack,240,108,240}}); }}
+try {{
+  CheckFixedCohortPhysicalCopies(b,b.snapshots.device,{{241+slack,240,108,240}});
+}}
 catch(const std::invalid_argument&) {{ refused=true; }}
 assert(refused);
 refused=false;
-try {{ AdmitFixedCohortBudget(b,{{admitted.host+b.headroom_reserve.host-1,1000000}}); }}
+try {{
+  AdmitFixedCohortBudget(b,{{admitted.host+b.headroom_reserve.host-1,1000000}});
+}}
 catch(const std::invalid_argument&) {{ refused=true; }}
 assert(refused);
 std::cout << admitted.host << " " << admitted.device;
@@ -608,7 +643,8 @@ class WorkspaceFixtureBindingTest(unittest.TestCase):
         tool = runpy.run_path(
             str(
                 root
-                / "src/colmap/mvs/testdata/generate_fixed_cohort_workspace_fixture.py"
+                / "src/colmap/mvs/testdata"
+                / "generate_fixed_cohort_workspace_fixture.py"
             )
         )
         spec = tool["synthetic_spec"]()
@@ -654,7 +690,8 @@ class WorkspaceFixtureBindingTest(unittest.TestCase):
         tool = runpy.run_path(
             str(
                 root
-                / "src/colmap/mvs/testdata/generate_fixed_cohort_workspace_fixture.py"
+                / "src/colmap/mvs/testdata"
+                / "generate_fixed_cohort_workspace_fixture.py"
             )
         )
         spec = tool["synthetic_spec"]()
@@ -688,7 +725,8 @@ class WorkspaceFixtureBindingTest(unittest.TestCase):
         tool = runpy.run_path(
             str(
                 root
-                / "src/colmap/mvs/testdata/generate_fixed_cohort_workspace_fixture.py"
+                / "src/colmap/mvs/testdata"
+                / "generate_fixed_cohort_workspace_fixture.py"
             )
         )
         spec = tool["synthetic_spec"]()

@@ -111,6 +111,7 @@ class GeneratedPolicyBindingTest(unittest.TestCase):
             gaussian_only,
             pre_installed_streaming,
             "12067da160255267bc0cbb033f410b41e5e8443d2147bc817ba22a11ab96bdc3",
+            "888c428002121faa2bb8d8951ba4a867cb12cb3e46ec74993b11aa9a86468fd9",
             "18ba1102892dc048ae8f3ec5c43d5eeb81c986986acecd1821500e2c014adf83",
         ):
             with (

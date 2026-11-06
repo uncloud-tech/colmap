@@ -7,7 +7,8 @@ native execution/inventory binding: default retains both host phases; final-only
 returns GEO only (16 rather than 32 bytes per reference pixel). Private source
 padding preserves ordinal multiplicity. Opt-in shared PHOTO charges a padded
 host/device union once in PHOTO only; host validation-copy transients remain
-per owner. Global padding can increase memory; default stays private. Explicit unknown pitch/array/context/allocator bytes are NOT
+per owner. Global padding can increase memory; default stays private. Explicit
+unknown pitch/array/context/allocator bytes are NOT
 calibrated coefficients or physical-fit proof. Native admission applies the ONE
 aggregate 3% margin; this producer does not apply any item margins.
 
@@ -18,17 +19,18 @@ scheme. The pin includes the optional final-GEO-only disposition and existing
 workspace adapter/shared validation and native observed-FREE admission entry,
 pending independent review, NOT inherited current-phase-v1/optimized-PHOTO
 qualification. Capacity observation/selection remains native-only; this producer
-still emits the same raw inventory without any free-memory or context credit. This producer covers native
+still emits the same raw inventory without any free-memory or context credit.
+This producer covers native
 execution only; workspace decode/resize scratch and
 cache overlap require the adapter's separate explicit lifecycle admission.
 """
 
-from dataclasses import dataclass, fields
-from enum import Enum
 import math
-from pathlib import Path
 import runpy
 import subprocess
+from dataclasses import dataclass, fields
+from enum import Enum
+from pathlib import Path
 
 from .model import _add, _mul, current_owned_shape_minimum, exact_int
 
@@ -161,19 +163,23 @@ class PhaseOptions:
             exact_int(getattr(self, name), minimum, (1 << 31) - 1)
         for field in fields(self):
             v = getattr(self, field.name)
-            if field.name not in bools and field.name not in (
-                "gpu_index",
-                "random_seed",
-                "max_image_size",
-                "window_radius",
-                "window_step",
-                "num_samples",
-                "num_iterations",
-                "filter_min_num_consistent",
-                "num_threads",
+            if (
+                field.name not in bools
+                and field.name
+                not in (
+                    "gpu_index",
+                    "random_seed",
+                    "max_image_size",
+                    "window_radius",
+                    "window_step",
+                    "num_samples",
+                    "num_iterations",
+                    "filter_min_num_consistent",
+                    "num_threads",
+                )
+                and (type(v) not in (int, float) or not math.isfinite(v))
             ):
-                if type(v) not in (int, float) or not math.isfinite(v):
-                    raise ValueError("nonfinite/invalid phase numeric option")
+                raise ValueError("nonfinite/invalid phase numeric option")
         if (
             self.geom_consistency != geo
             or (geo and not self.filter)
@@ -242,7 +248,8 @@ class SourceBinding:
 def _bind_source(root):
     root = Path(root).resolve()
     # Reuse the canonical compiled resident closure verbatim (including its
-    # generator). Never execute a caller root's Python or accept a supplied hash.
+    # generator). Never execute a caller root's Python or accept a supplied
+    # hash.
     generator = runpy.run_path(
         str(
             _ROOT
@@ -357,10 +364,12 @@ class FixedCohortBudget:
         # without C++ universal-character/surrogate or quote injection issues.
         def text(value):
             return (
-                '"' + "".join("\\%03o" % b for b in value.encode("utf-8")) + '"'
+                '"' + "".join(f"\\{b:03o}" for b in value.encode("utf-8")) + '"'
             )
 
-        charge = lambda b: "{" + str(b.host) + "ULL," + str(b.device) + "ULL}"
+        def charge(b):
+            return "{" + str(b.host) + "ULL," + str(b.device) + "ULL}"
+
         lines = ["[] { colmap::mvs::owned::FixedCohortBudget b;"]
         policy = (
             "kPhotoAndGeo"
@@ -368,7 +377,8 @@ class FixedCohortBudget:
             else "kFinalGeoOnly"
         )
         lines.append(
-            f"b.output_policy = colmap::mvs::owned::FixedCohortOutputPolicy::{policy};"
+            "b.output_policy = colmap::mvs::owned::FixedCohortOutputPolicy::"
+            f"{policy};"
         )
         storage = (
             "kShared"
@@ -376,7 +386,8 @@ class FixedCohortBudget:
             else "kPrivate"
         )
         lines.append(
-            f"b.photo_source_storage = colmap::mvs::owned::FixedCohortPhotoSourceStorage::{storage};"
+            "b.photo_source_storage = "
+            f"colmap::mvs::owned::FixedCohortPhotoSourceStorage::{storage};"
         )
         for name in (
             "photo_shared",
@@ -392,7 +403,8 @@ class FixedCohortBudget:
         lines.append(f"b.unknown_provenance = {text(self.unknown_provenance)};")
         lines.append(f"b.max_active_owners = {self.max_active_owners};")
         lines.append(
-            f"b.phase_active_owners = {{{self.phase_active_owners[0]},{self.phase_active_owners[1]}}};"
+            f"b.phase_active_owners = {{{self.phase_active_owners[0]},"
+            f"{self.phase_active_owners[1]}}};"
         )
         for name in ("photo_private", "geo_private"):
             lines.append(
@@ -407,7 +419,8 @@ class FixedCohortBudget:
         )
         for i in range(2):
             lines.append(
-                f"b.already_live_process[{i}] = {charge(self.already_live_process[i])};"
+                f"b.already_live_process[{i}] = "
+                f"{charge(self.already_live_process[i])};"
             )
             lines.append(
                 f"b.already_live_process_provenance[{i}] = "
@@ -415,6 +428,10 @@ class FixedCohortBudget:
                 + ";"
             )
         return "\n".join(lines + ["return b; }()"])
+
+
+# Preserve the import-time immutable default objects and tuple identity.
+_DEFAULT_ALREADY_LIVE_PROCESS = (ByteCharge(), ByteCharge())
 
 
 def forecast_fixed_cohort(
@@ -427,13 +444,13 @@ def forecast_fixed_cohort(
     unknown,
     unknown_provenance,
     headroom_reserve,
-    already_live_process=(ByteCharge(), ByteCharge()),
+    already_live_process=_DEFAULT_ALREADY_LIVE_PROCESS,
     already_live_process_provenance=("", ""),
     output_policy=OutputPolicy.PHOTO_AND_GEO,
     photo_source_storage=PhotoSourceStorage.PRIVATE,
     phase_active_owners=(0, 0),
 ):
-    """Evaluate metadata only; capacities and the aggregate margin belong native.
+    """Evaluate metadata only; capacities and aggregate margin belong native.
 
     Process is caller-classified raw storage (not a new coefficient). Live
     process credits require independent per-observation provenance and remain
@@ -484,7 +501,7 @@ def forecast_fixed_cohort(
     )
     if len(live) != 2 or len(provenance) != 2:
         raise ValueError("two observation credits required")
-    for value, why in zip(live, provenance):
+    for value, why in zip(live, provenance, strict=False):
         if (
             not isinstance(value, ByteCharge)
             or not isinstance(why, str)
