@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """CPU payload-admission tests. These do not qualify CUDA extraction."""
+
 import pathlib
 import subprocess
 import tempfile
@@ -13,42 +14,74 @@ class StreamedExtractionTest(unittest.TestCase):
         # Preprocess actual guards without requiring CUDA/GTest headers. This
         # checks source selection, not native Windows compilation/qualification.
         cases = {
-            "sift_test.cc": ["Nominal", "InputDomainAndImmutability",
-                             "ExactDomainCudaUpsampling", "ArbitraryWidthsAndReuse"],
-            "sift_resampling_test.cu": ["NonfiniteCountsPreserveBits",
-                                        "AlignedAllocationEdgesTailsAndReuse"],
+            "sift_test.cc": [
+                "Nominal",
+                "InputDomainAndImmutability",
+                "ExactDomainCudaUpsampling",
+                "ArbitraryWidthsAndReuse",
+            ],
+            "sift_resampling_test.cu": [
+                "NonfiniteCountsPreserveBits",
+                "AlignedAllocationEdgesTailsAndReuse",
+            ],
         }
         for name, portable_tests in cases.items():
             with self.subTest(source=name):
                 source = (ROOT / "src/colmap/feature" / name).read_text()
                 without_includes = "\n".join(
-                    line for line in source.splitlines()
+                    line
+                    for line in source.splitlines()
                     if not line.lstrip().startswith("#include")
                 )
+
                 def preprocess(*defines):
                     return subprocess.check_output(
-                        ["c++", "-E", "-P", "-x", "c++",
-                         "-DCOLMAP_CUDA_ENABLED", *defines, "-"],
-                        input=without_includes, text=True,
+                        [
+                            "c++",
+                            "-E",
+                            "-P",
+                            "-x",
+                            "c++",
+                            "-DCOLMAP_CUDA_ENABLED",
+                            *defines,
+                            "-",
+                        ],
+                        input=without_includes,
+                        text=True,
                     )
+
                 windows = preprocess("-D_WIN32", "-U__linux__")
                 posix = preprocess("-U_WIN32")
                 for call in ("mkdtemp(", "rmdir("):
-                    self.assertFalse(call in windows, f"Windows retained {call}")
+                    self.assertFalse(
+                        call in windows, f"Windows retained {call}"
+                    )
                 self.assertIn("mkdtemp(", posix)
                 for test in portable_tests:
                     self.assertIn(test, windows)
                 if "std::filesystem::" in posix:
                     # macOS/POSIX also needs this header, not Linux alone.
                     headers = subprocess.check_output(
-                        ["c++", "-E", "-P", "-x", "c++", "-U_WIN32",
-                         "-U__linux__", "-DCOLMAP_CUDA_ENABLED", "-"],
+                        [
+                            "c++",
+                            "-E",
+                            "-P",
+                            "-x",
+                            "c++",
+                            "-U_WIN32",
+                            "-U__linux__",
+                            "-DCOLMAP_CUDA_ENABLED",
+                            "-",
+                        ],
                         input="\n".join(
-                            'FILESYSTEM_HEADER' if line == '#include <filesystem>'
-                            else line for line in source.splitlines()
+                            "FILESYSTEM_HEADER"
+                            if line == "#include <filesystem>"
+                            else line
+                            for line in source.splitlines()
                             if not line.lstrip().startswith("#include")
-                            or line == '#include <filesystem>'
-                        ), text=True,
+                            or line == "#include <filesystem>"
+                        ),
+                        text=True,
                     )
                     self.assertIn("FILESYSTEM_HEADER", headers)
 
@@ -57,7 +90,9 @@ class StreamedExtractionTest(unittest.TestCase):
         help_text = source.split('"SiftExtraction.streaming",', 1)[1].split(
             "AddDefaultByteOption", 1
         )[0]
-        self.assertIn("first_octave -1 or 0, including aligned widths", help_text)
+        self.assertIn(
+            "first_octave -1 or 0, including aligned widths", help_text
+        )
         self.assertIn("Nonzero single-root", help_text)
         self.assertIn("Windows", help_text)
         self.assertIn("fail closed", help_text)
@@ -65,7 +100,7 @@ class StreamedExtractionTest(unittest.TestCase):
         self.assertNotIn("default -1 unsupported", help_text)
 
     def test_checked_live_payload(self):
-        code = r'''
+        code = r"""
 #include "src/colmap/feature/sift_streaming.h"
 #include <cassert>
 #include <cstdint>
@@ -95,14 +130,25 @@ int main() {
   Refuses([] { CheckSiftStreamingPayload(0, 0, 0, 0, 0, 0,
                                          UINT64_MAX, UINT64_MAX, 1); });
 }
-'''
+"""
         with tempfile.TemporaryDirectory(dir=ROOT.parent) as tmp:
             source = pathlib.Path(tmp) / "test.cc"
             source.write_text(code)
             binary = pathlib.Path(tmp) / "test"
             subprocess.run(
-                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror", "-I", str(ROOT),
-                 str(source), "-o", str(binary)], check=True
+                [
+                    "c++",
+                    "-std=c++17",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-I",
+                    str(ROOT),
+                    str(source),
+                    "-o",
+                    str(binary),
+                ],
+                check=True,
             )
             subprocess.run([str(binary)], check=True)
 

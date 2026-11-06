@@ -20,6 +20,7 @@
 #include "colmap/util/opengl_utils.h"
 #if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
 #include "colmap/util/cuda.h"
+
 #include <vector>
 // Legacy SiftPyramid/PyramidCU headers require vector in the enclosing scope.
 using std::vector;
@@ -88,7 +89,8 @@ TEST(SiftHostAllocation, CpuOutputUnchangedAndGrowthRefuses) {
     ASSERT_NE(control, nullptr);
     FeatureKeypoints original_keypoints;
     FeatureDescriptors original_descriptors;
-    ASSERT_TRUE(control->Extract(bitmap, &original_keypoints, &original_descriptors));
+    ASSERT_TRUE(
+        control->Extract(bitmap, &original_keypoints, &original_descriptors));
     uint64_t charged = 0;
     options.reserve_host_payload = [&](uint64_t bytes) { charged += bytes; };
     auto candidate = CreateSiftFeatureExtractor(options);
@@ -98,18 +100,25 @@ TEST(SiftHostAllocation, CpuOutputUnchangedAndGrowthRefuses) {
     EXPECT_GT(charged, 0);
     EXPECT_EQ(keypoints, original_keypoints);
     ASSERT_EQ(descriptors.data.rows(), original_descriptors.data.rows());
-    EXPECT_TRUE((descriptors.data.array() == original_descriptors.data.array()).all());
-    options.reserve_host_payload = [](uint64_t) { throw std::runtime_error("growth refused"); };
+    EXPECT_TRUE(
+        (descriptors.data.array() == original_descriptors.data.array()).all());
+    options.reserve_host_payload = [](uint64_t) {
+      throw std::runtime_error("growth refused");
+    };
     auto refused = CreateSiftFeatureExtractor(options);
     FeatureKeypoints refused_keypoints;
     FeatureDescriptors refused_descriptors;
-    EXPECT_THROW(refused->Extract(bitmap, &refused_keypoints, &refused_descriptors), std::runtime_error);
+    EXPECT_THROW(
+        refused->Extract(bitmap, &refused_keypoints, &refused_descriptors),
+        std::runtime_error);
     EXPECT_TRUE(refused_keypoints.empty());
     EXPECT_EQ(refused_descriptors.data.size(), 0);
   }
   FeatureExtractionOptions options;
   options.reserve_host_payload = [](uint64_t) {};
-  EXPECT_THROW(options.ReserveHostPayload(std::numeric_limits<uint64_t>::max(), 2), std::overflow_error);
+  EXPECT_THROW(
+      options.ReserveHostPayload(std::numeric_limits<uint64_t>::max(), 2),
+      std::overflow_error);
 }
 
 // Helper to create empty descriptors for testing.
@@ -499,16 +508,16 @@ TEST(ExtractSiftFeaturesGPU, InputDomainAndImmutability) {
         std::iota(pixels.begin(), pixels.end(), 0.0f);
         const auto original = pixels;
         GLTexInput input;
-        ASSERT_TRUE(input.SetImageData(width, height, pixels.data(),
-                                      GL_LUMINANCE, GL_FLOAT));
+        ASSERT_TRUE(input.SetImageData(
+            width, height, pixels.data(), GL_LUMINANCE, GL_FLOAT));
         EXPECT_EQ(input.GetImgWidth(), width);
         EXPECT_EQ(input.GetImgHeight(), height);
         EXPECT_EQ(pixels, original);
         std::vector<uint8_t> bytes(width * height);
         for (size_t i = 0; i < bytes.size(); ++i) bytes[i] = i % 251;
         const auto original_bytes = bytes;
-        ASSERT_TRUE(input.SetImageData(width, height, bytes.data(),
-                                      GL_LUMINANCE, GL_UNSIGNED_BYTE));
+        ASSERT_TRUE(input.SetImageData(
+            width, height, bytes.data(), GL_LUMINANCE, GL_UNSIGNED_BYTE));
         ASSERT_EQ(input.GetImgWidth(), width);
         ASSERT_EQ(input.GetImgHeight(), height);
         const auto* converted = static_cast<const float*>(input._pixel_data);
@@ -528,8 +537,8 @@ TEST(ExtractSiftFeaturesGPU, ExactDomainCudaUpsampling) {
   ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
   for (int width : {1, 2, 3, 4, 5, 257, 258, 259, 260}) {
     for (int height : {1, 3}) {
-      SCOPED_TRACE(::testing::Message() << "width=" << width
-                                      << " height=" << height);
+      SCOPED_TRACE(::testing::Message()
+                   << "width=" << width << " height=" << height);
       CuTexImage src;
       // Populate oversized, rounded capacity before reducing the logical size.
       // Rows are tightly packed: none of this tail is image content, even on
@@ -564,12 +573,10 @@ TEST(ExtractSiftFeaturesGPU, ExactDomainCudaUpsampling) {
             // Bilinear interpolation reproduces an affine plane exactly.
             // Constant extension clamps continuous coordinates independently,
             // not flattened texture indices. All values are binary-exact.
-            const float sample_x =
-                std::min(static_cast<float>(x) / scale,
-                         static_cast<float>(width - 1));
-            const float sample_y =
-                std::min(static_cast<float>(y) / scale,
-                         static_cast<float>(height - 1));
+            const float sample_x = std::min(static_cast<float>(x) / scale,
+                                            static_cast<float>(width - 1));
+            const float sample_y = std::min(static_cast<float>(y) / scale,
+                                            static_cast<float>(height - 1));
             const float expected = 8.0f + 4.0f * sample_x + 64.0f * sample_y;
             ASSERT_EQ(output[y * dst_width + x], expected)
                 << "x=" << x << " y=" << y;
@@ -717,7 +724,8 @@ TEST(ExtractSiftFeaturesGPU,
           options.host_bytes = 65 * 19 * 8 + 96;
           ASSERT_LT(options.gpu_bytes, disk_gradient.Bytes());
           ASSERT_LT(options.host_bytes, disk_gradient.Bytes());
-          if (count > 1000) ASSERT_LT(options.host_bytes, input.records->Bytes());
+          if (count > 1000)
+            ASSERT_LT(options.host_bytes, input.records->Bytes());
           const uint64_t before = disk_gradient.BytesRead() +
                                   disk_key.BytesRead() +
                                   input.records->BytesRead();
@@ -1863,12 +1871,14 @@ TEST(ExtractSiftFeaturesGPU,
       options.host_bytes = 2 * staging * width * sizeof(float);
       const auto before = previous.BytesRead() + current.BytesRead();
       auto result = ProgramCU::ComputeDOGStreamed(current, previous, options);
-      EXPECT_THROW(ProgramCU::ComputeDOGStreamed(*result.gradient, previous, options),
-                   std::invalid_argument);
-      EXPECT_THROW(ProgramCU::FilterImageStreamed(*result.gradient, 1.0f, options),
-                   std::invalid_argument);
-      EXPECT_THROW(ProgramCU::SampleImageStreamed(*result.gradient, width, height,
-                                                false, true, options),
+      EXPECT_THROW(
+          ProgramCU::ComputeDOGStreamed(*result.gradient, previous, options),
+          std::invalid_argument);
+      EXPECT_THROW(
+          ProgramCU::FilterImageStreamed(*result.gradient, 1.0f, options),
+          std::invalid_argument);
+      EXPECT_THROW(ProgramCU::SampleImageStreamed(
+                       *result.gradient, width, height, false, true, options),
                    std::invalid_argument);
       EXPECT_LE(result.stats.gpu_staging_bytes, options.gpu_bytes);
       EXPECT_LE(result.stats.host_staging_bytes, options.host_bytes);
@@ -2287,8 +2297,8 @@ TEST(ExtractSiftFeaturesGPU, ArbitraryWidthsAndReuse) {
             } else {
               for (int y = 0; y < height; ++y) {
                 for (int x = 0; x < width; ++x) {
-                  bitmap.SetPixel(x, y, BitmapColor<uint8_t>(
-                      ((x / 5 + y / 7) % 2) * 255));
+                  bitmap.SetPixel(
+                      x, y, BitmapColor<uint8_t>(((x / 5 + y / 7) % 2) * 255));
                 }
               }
             }
@@ -2298,11 +2308,14 @@ TEST(ExtractSiftFeaturesGPU, ArbitraryWidthsAndReuse) {
             auto fresh = CreateSiftFeatureExtractor(options);
             ASSERT_NE(fresh, nullptr);
             ASSERT_TRUE(reused->Extract(bitmap, &keypoints, &descriptors));
-            ASSERT_TRUE(fresh->Extract(bitmap, &control_keypoints, &control_descriptors));
+            ASSERT_TRUE(fresh->Extract(
+                bitmap, &control_keypoints, &control_descriptors));
             ValidateKeypoints(keypoints, bitmap);
             EXPECT_EQ(keypoints, control_keypoints);
             ASSERT_EQ(descriptors.data.rows(), control_descriptors.data.rows());
-            EXPECT_TRUE((descriptors.data.array() == control_descriptors.data.array()).all());
+            EXPECT_TRUE(
+                (descriptors.data.array() == control_descriptors.data.array())
+                    .all());
             // The checker remains a reuse/immutability regression even when
             // smoothing and scale-space extrema rejection leave no features.
             if (square) EXPECT_FALSE(keypoints.empty());

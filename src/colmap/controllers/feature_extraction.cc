@@ -2,8 +2,8 @@
 
 #include "colmap/controllers/feature_extraction.h"
 
-#include "colmap/feature/sift.h"
 #include "colmap/controllers/extraction_resource.h"
+#include "colmap/feature/sift.h"
 #if defined(COLMAP_MVS_ENABLED)
 #include "colmap/mvs/owned_fixed_cohort_validation.h"
 #endif
@@ -80,6 +80,7 @@ struct ImageData {
 class ExtractionWorker : public Thread {
  public:
   std::function<void(std::exception_ptr)> failure;
+
  private:
   void Run() final {
     if (!failure) {
@@ -119,7 +120,8 @@ class ImageResizerThread : public ExtractionWorker {
         auto& image_data = input_job.Data();
 
         if (image_data.status == ImageReader::Status::SUCCESS) {
-          image_data.bitmap->Thumbnail(max_image_size_, Bitmap::RescaleFilter::kBilinear,
+          image_data.bitmap->Thumbnail(max_image_size_,
+                                       Bitmap::RescaleFilter::kBilinear,
                                        image_data.credit != nullptr);
         }
 
@@ -175,7 +177,8 @@ class FeatureExtractorThread : public ExtractionWorker {
     if (extractor == nullptr) {
       LOG(ERROR) << "Failed to create feature extractor.";
       SignalInvalidSetup();
-      if (failure) throw std::runtime_error("failed to create feature extractor");
+      if (failure)
+        throw std::runtime_error("failed to create feature extractor");
       return;
     }
 
@@ -318,10 +321,11 @@ class FeatureWriterThread : public ExtractionWorker {
           // SQLite's feature writer materializes a six-float keypoint matrix
           // before binding it. Descriptor binding is SQLITE_STATIC (no owned
           // product copy); SQLite page/cache internals remain policy.
-          const auto blob_bytes = ExtractionMultiply(image_data.keypoints.size(),
-                                                     6 * sizeof(float));
-          THROW_CHECK_LE(blob_bytes,
-                         static_cast<uint64_t>(std::numeric_limits<int>::max()));
+          const auto blob_bytes = ExtractionMultiply(
+              image_data.keypoints.size(), 6 * sizeof(float));
+          THROW_CHECK_LE(
+              blob_bytes,
+              static_cast<uint64_t>(std::numeric_limits<int>::max()));
           THROW_CHECK_LE(image_data.descriptors.data.size(),
                          std::numeric_limits<int>::max());
           image_data.credit->Grow(blob_bytes);
@@ -405,18 +409,21 @@ class FeatureExtractorController : public Thread {
         throw std::invalid_argument(
             "budgeted extraction supports grayscale SIFT without masks only");
 #if defined(COLMAP_MVS_ENABLED)
-      const auto capacity = std::min(extraction_options_.host_budget_bytes,
-          mvs::owned::ObserveFixedCohortHostAvailable());
+      const auto capacity =
+          std::min(extraction_options_.host_budget_bytes,
+                   mvs::owned::ObserveFixedCohortHostAvailable());
       budget_ = std::make_unique<ExtractionBudget>(
-          capacity, extraction_options_.policy_host_bytes,
+          capacity,
+          extraction_options_.policy_host_bytes,
           extraction_options_.reserve_host_bytes);
       budget_->Acquire(0, [] { return false; });
-      LOG(INFO) << "Feature extraction frozen logical host capacity: "
-                << "capacity_bytes=" << capacity
-                << " host_budget_bytes=" << extraction_options_.host_budget_bytes
-                << " policy_host_bytes=" << extraction_options_.policy_host_bytes
-                << " reserve_host_bytes=" << extraction_options_.reserve_host_bytes
-                << "; workspace/decoder/allocator UNKNOWN; full physical fit UNKNOWN";
+      LOG(INFO)
+          << "Feature extraction frozen logical host capacity: "
+          << "capacity_bytes=" << capacity
+          << " host_budget_bytes=" << extraction_options_.host_budget_bytes
+          << " policy_host_bytes=" << extraction_options_.policy_host_bytes
+          << " reserve_host_bytes=" << extraction_options_.reserve_host_bytes
+          << "; workspace/decoder/allocator UNKNOWN; full physical fit UNKNOWN";
 #else
       throw std::invalid_argument(
           "budgeted extraction needs native host observation (MVS build)");
@@ -676,14 +683,16 @@ class FeatureExtractorController : public Thread {
                                              &image_data.image,
                                              &image_data.pose_prior,
                                              image_data.bitmap.get(),
-                                             &mask, admit_header);
+                                             &mask,
+                                             admit_header);
       if (!mask.IsEmpty()) {
         image_data.mask = std::make_unique<Bitmap>(std::move(mask));
       }
 
       if (budget_ && image_data.status != ImageReader::Status::SUCCESS &&
           image_data.status != ImageReader::Status::IMAGE_EXISTS)
-        throw std::runtime_error("budgeted image read/camera validation failed");
+        throw std::runtime_error(
+            "budgeted image read/camera validation failed");
       if (image_data.status != ImageReader::Status::SUCCESS) {
         // Release the memory, since it is not used afterwards.
         *image_data.bitmap = Bitmap();

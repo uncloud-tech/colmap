@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Bounded CPU tests of the SIFT file-plane and stripe admission seam, not CUDA."""
+
 import sys
 import pathlib
 import subprocess
@@ -12,7 +13,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 class StreamedFilterTest(unittest.TestCase):
     def test_aligned_sampling_extent_and_history(self):
         # Agreed seams: native sampler admission/windows and per-extractor history.
-        code = r'''
+        code = r"""
 #include "src/thirdparty/SiftGPU/StreamedPlane.h"
 #include <cassert>
 using namespace siftgpu;
@@ -78,17 +79,30 @@ int main() {
   Refuses([&] { incomplete.Begin(".", 128, 2); });
 
 }
-'''
+"""
         with tempfile.TemporaryDirectory(dir=ROOT.parent) as tmp:
             source = pathlib.Path(tmp) / "test.cc"
             source.write_text(code)
             binary = pathlib.Path(tmp) / "test"
-            subprocess.run(["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
-                            "-I", str(ROOT), str(source), "-o", str(binary)], check=True)
+            subprocess.run(
+                [
+                    "c++",
+                    "-std=c++17",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-I",
+                    str(ROOT),
+                    str(source),
+                    "-o",
+                    str(binary),
+                ],
+                check=True,
+            )
             subprocess.run([str(binary)], check=True)
 
     def test_orientation_expansion_matches_frozen_resident(self):
-        code = r'''
+        code = r"""
 #include "StreamedPlane.h"
 #include "src/colmap/feature/sift_orientation_test_util.h"
 #include <cstring>
@@ -122,46 +136,89 @@ int main() {
   if (siftgpu::ReshapePackedOrientations(input, 0, actual) != 0) return 4;
   std::cout << "SIFT_ORIENTATION_ORIGINAL_EXPANSION records=10 expanded=13 batches=4\n";
 }
-'''
+"""
         with tempfile.TemporaryDirectory(dir=ROOT.parent) as directory:
             temp = pathlib.Path(directory)
             source, binary = temp / "test.cc", temp / "test"
             source.write_text(code)
-            candidate = (ROOT / "src/thirdparty/SiftGPU/StreamedPlane.h").read_text()
+            candidate = (
+                ROOT / "src/thirdparty/SiftGPU/StreamedPlane.h"
+            ).read_text()
             header = temp / "StreamedPlane.h"
             header.write_text(candidate)
-            subprocess.run(["c++", "-std=c++17", "-O2", "-Wall", "-Wextra", "-Werror",
-                            "-I", str(temp), "-I", str(ROOT), str(source),
-                            "-o", str(binary)], check=True)
+            subprocess.run(
+                [
+                    "c++",
+                    "-std=c++17",
+                    "-O2",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-I",
+                    str(temp),
+                    "-I",
+                    str(ROOT),
+                    str(source),
+                    "-o",
+                    str(binary),
+                ],
+                check=True,
+            )
             subprocess.run([str(binary)], check=True)
             # Mutate only private temporary copies: each acceptance concern
             # must fail against the unchanged independent original oracle.
             mutations = {
                 "sentinel": ("if (orientations[0] != 65535)", "if (true)"),
-                "duplicate": ("orientations[1] != 65535 && orientations[1] != orientations[0]",
-                              "orientations[1] != 65535"),
-                "conversion": ("float(factor * orientations[0])",
-                               "float(factor * orientations[0]) + 0.001f"),
-                "order": ("  return retained;\n}\n\n// One-feature batch:",
-                          "  if (retained > 1) for (int c = 0; c < 4; ++c) "
-                          "std::swap(des[-4+c], des[-8+c]);\n  return retained;"
-                          "\n}\n\n// One-feature batch:"),
+                "duplicate": (
+                    "orientations[1] != 65535 && orientations[1] != orientations[0]",
+                    "orientations[1] != 65535",
+                ),
+                "conversion": (
+                    "float(factor * orientations[0])",
+                    "float(factor * orientations[0]) + 0.001f",
+                ),
+                "order": (
+                    "  return retained;\n}\n\n// One-feature batch:",
+                    "  if (retained > 1) for (int c = 0; c < 4; ++c) "
+                    "std::swap(des[-4+c], des[-8+c]);\n  return retained;"
+                    "\n}\n\n// One-feature batch:",
+                ),
             }
             for concern, (old, new) in mutations.items():
                 with self.subTest(mutation=concern):
                     self.assertEqual(candidate.count(old), 1)
                     header.write_text(candidate.replace(old, new))
-                    subprocess.run(["c++", "-std=c++17", "-O2", "-Wall", "-Wextra", "-Werror",
-                                    "-I", str(temp), "-I", str(ROOT), str(source),
-                                    "-o", str(binary)], check=True)
+                    subprocess.run(
+                        [
+                            "c++",
+                            "-std=c++17",
+                            "-O2",
+                            "-Wall",
+                            "-Wextra",
+                            "-Werror",
+                            "-I",
+                            str(temp),
+                            "-I",
+                            str(ROOT),
+                            str(source),
+                            "-o",
+                            str(binary),
+                        ],
+                        check=True,
+                    )
                     result = subprocess.run([str(binary)], capture_output=True)
-                    self.assertEqual(result.returncode, 2,
-                                     f"expected byte/count mismatch for {concern}")
+                    self.assertEqual(
+                        result.returncode,
+                        2,
+                        f"expected byte/count mismatch for {concern}",
+                    )
             print("SIFT_ORIENTATION_ORACLE_MUTANTS rejected=4")
 
-    @unittest.skipUnless(sys.platform.startswith("linux"), "GNU syscall wrapping on Linux")
+    @unittest.skipUnless(
+        sys.platform.startswith("linux"), "GNU syscall wrapping on Linux"
+    )
     def test_plane_and_budget(self):
-        code = r'''
+        code = r"""
 #include "src/thirdparty/SiftGPU/StreamedPlane.h"
 #include <cassert>
 #include <climits>
@@ -435,15 +492,29 @@ int main(int argc, char** argv) {
   assert(setrlimit(RLIMIT_FSIZE, &old) == 0);
   Refuses([&] { grow_failure.Begin(directory, 1, 1); });
 }
-'''
+"""
         with tempfile.TemporaryDirectory(dir=ROOT.parent) as directory:
             temp = pathlib.Path(directory)
             source = temp / "test.cc"
             binary = temp / "test"
             source.write_text(code)
-            subprocess.run(["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
-                            "-I", str(ROOT), str(source), "-Wl,--wrap=pread",
-                            "-Wl,--wrap=pwrite", "-o", str(binary)], check=True)
+            subprocess.run(
+                [
+                    "c++",
+                    "-std=c++17",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-I",
+                    str(ROOT),
+                    str(source),
+                    "-Wl,--wrap=pread",
+                    "-Wl,--wrap=pwrite",
+                    "-o",
+                    str(binary),
+                ],
+                check=True,
+            )
             scratch = temp / "scratch"
             scratch.mkdir()
             subprocess.run([str(binary), str(scratch)], check=True)

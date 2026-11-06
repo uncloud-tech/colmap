@@ -3,6 +3,7 @@
 
 No kernels are emulated and this is not a numerical or GPU qualification.
 """
+
 import pathlib
 import re
 import subprocess
@@ -19,7 +20,7 @@ class SiftCudaStorageTest(unittest.TestCase):
             temp = pathlib.Path(directory)
             (temp / "GL").mkdir()
             (temp / "colmap/util").mkdir(parents=True)
-            (temp / "GL/glew.h").write_text(r'''
+            (temp / "GL/glew.h").write_text(r"""
 #pragma once
 #include <cstddef>
 using GLuint = unsigned int;
@@ -33,8 +34,8 @@ inline void glBufferData(GLenum, size_t, const void*, GLenum) {}
 inline void glGetBufferParameteriv(GLenum, GLenum, GLint* n) { *n = 0; }
 inline void glDeleteBuffers(int, const GLuint*) {}
 inline void glGenBuffers(int, GLuint*) {}
-''')
-            (temp / "colmap/util/cuda_to_hip.h").write_text(r'''
+""")
+            (temp / "colmap/util/cuda_to_hip.h").write_text(r"""
 #pragma once
 #include <cassert>
 #include <climits>
@@ -95,14 +96,14 @@ inline int cudaCreateTextureObject(cudaTextureObject_t* h, const cudaResourceDes
   *h = reinterpret_cast<size_t>(r->res.linear.devPtr); return 0;
 }
 inline int cudaDestroyTextureObject(cudaTextureObject_t) { return 0; }
-''')
-            (temp / "cuda_gl_interop.h").write_text(r'''
+""")
+            (temp / "cuda_gl_interop.h").write_text(r"""
 #pragma once
 inline int cudaGLRegisterBufferObject(unsigned int) { return 0; }
 inline int cudaGLUnregisterBufferObject(unsigned int) { return 0; }
 inline int cudaGLMapBufferObject(void**, unsigned int) { return 0; }
 inline int cudaGLUnmapBufferObject(unsigned int) { return 0; }
-''')
+""")
             # Define only external class dependencies, using their real headers.
             # Generated declarations avoid duplicating the third-party ABI.
             globals_header = (SIFT / "GlobalUtil.h").read_text()
@@ -116,7 +117,8 @@ inline int cudaGLUnmapBufferObject(unsigned int) { return 0; }
             program_header = (SIFT / "ProgramCU.h").read_text()
             program_defs = []
             for result, name, args in re.findall(
-                r"static\s+(void|int|siftgpu::Stream(?:Filter|Dog|Key|List|Descriptor)Result)\s+(\w+)\(([^;]*?)\);", program_header
+                r"static\s+(void|int|siftgpu::Stream(?:Filter|Dog|Key|List|Descriptor)Result)\s+(\w+)\(([^;]*?)\);",
+                program_header,
             ):
                 if name == "GenerateListStreamed":
                     continue  # Exercise real host batching with CPU API doubles.
@@ -149,8 +151,8 @@ inline int cudaGLUnmapBufferObject(unsigned int) { return 0; }
                         "assert(hist->GetImgHeight() == key->GetImgHeight()); "
                         "assert(key == last_key); "
                         "list_order.push_back(last_level); "
-                        if name == "InitHistogram" else
-                        "--histogram_slot; "
+                        if name == "InitHistogram"
+                        else "--histogram_slot; "
                         "assert(hist2->GetImgWidth() == (hist1->GetImgWidth()+3)/4); "
                         "assert(hist2->GetImgHeight() == hist1->GetImgHeight()); "
                     )
@@ -163,33 +165,63 @@ inline int cudaGLUnmapBufferObject(unsigned int) { return 0; }
                         "counts[0] = test_features; "
                         f"{target}->CopyFromHost(counts.data());"
                     )
-                program_defs.append(f"{result} ProgramCU::{name}({args}) {{{body}}}")
+                program_defs.append(
+                    f"{result} ProgramCU::{name}({args}) {{{body}}}"
+                )
             # Unused GL display and base-class entrypoints are inert. They are
             # linked because PyramidCU has a vtable, not exercised as a backend.
             gl_defs = []
-            header = (SIFT / "GLTexImage.h").read_text().split("class GLTexInput:")[0]
-            for name, args in re.findall(r"virtual void\s+(\w+)\(([^;]*?)\)\s*;", header):
+            header = (
+                (SIFT / "GLTexImage.h")
+                .read_text()
+                .split("class GLTexInput:")[0]
+            )
+            for name, args in re.findall(
+                r"virtual void\s+(\w+)\(([^;]*?)\)\s*;", header
+            ):
                 args = re.sub(r"\s*=\s*\d+", "", args)
                 gl_defs.append(f"void GLTexImage::{name}({args}) {{}}")
             # Exercise the unchanged real global limiter at both call sites.
             base_source = (SIFT / "SiftPyramid.cpp").read_text()
-            limiter = base_source.split("void SiftPyramid::LimitFeatureCount(", 1)[1]
-            limiter = "void SiftPyramid::LimitFeatureCount(" + limiter.split(
-                "void SiftPyramid::PrepareBuffer()", 1
-            )[0]
+            limiter = base_source.split(
+                "void SiftPyramid::LimitFeatureCount(", 1
+            )[1]
+            limiter = (
+                "void SiftPyramid::LimitFeatureCount("
+                + limiter.split("void SiftPyramid::PrepareBuffer()", 1)[0]
+            )
             cuda_source = (SIFT / "ProgramCU.cu").read_text()
-            list_kernel = cuda_source.split("void __global__ ListGen_Kernel", 1)[1]
-            list_kernel = "void ListGen_Kernel" + list_kernel.split("//input list", 1)[0]
-            list_host = cuda_source.split("siftgpu::StreamListResult ProgramCU::GenerateListStreamed", 1)[1]
-            list_host = "siftgpu::StreamListResult ProgramCU::GenerateListStreamed" + list_host.split("void __global__ ComputeOrientation_Kernel", 1)[0]
+            list_kernel = cuda_source.split(
+                "void __global__ ListGen_Kernel", 1
+            )[1]
+            list_kernel = (
+                "void ListGen_Kernel" + list_kernel.split("//input list", 1)[0]
+            )
+            list_host = cuda_source.split(
+                "siftgpu::StreamListResult ProgramCU::GenerateListStreamed", 1
+            )[1]
+            list_host = (
+                "siftgpu::StreamListResult ProgramCU::GenerateListStreamed"
+                + list_host.split(
+                    "void __global__ ComputeOrientation_Kernel", 1
+                )[0]
+            )
             # CPU loop executes the ORIGINAL kernel body, not a numerical GPU
             # qualification. Host cursor, I/O, staging, and failure paths are real.
-            list_host = re.sub(r"ListGen_Kernel<<<.*?>>>", "RunListKernel", list_host, flags=re.S)
-            list_cpu = r'''
+            list_host = re.sub(
+                r"ListGen_Kernel<<<.*?>>>",
+                "RunListKernel",
+                list_host,
+                flags=re.S,
+            )
+            list_cpu = (
+                r"""
 #define IMUL(X,Y) ((X)*(Y))
 struct { int x = 0; } blockIdx, blockDim, threadIdx;
 static cudaTextureDesc texDataDesc;
-''' + list_kernel + r'''
+"""
+                + list_kernel
+                + r"""
 void RunListKernel(cudaTextureObject_t list, cudaTextureObject_t hist,
                    int4* output, int n, int width, bool packed) {
   blockDim.x = 1;
@@ -197,8 +229,11 @@ void RunListKernel(cudaTextureObject_t list, cudaTextureObject_t hist,
   for (blockIdx.x = 0; blockIdx.x < n; ++blockIdx.x)
     ListGen_Kernel(list, hist, output, n, width, packed);
 }
-''' + list_host
-            source = r'''
+"""
+                + list_host
+            )
+            source = (
+                r"""
 #include "GL/glew.h"
 #include <vector>
 #include <algorithm>
@@ -269,7 +304,15 @@ void CheckHistogram(CuTexImage* hist) {
         assert(address + 4 <= old_width * old_height * 16);
       }
 }
-''' + globals_defs + "\n" + "\n".join(program_defs + gl_defs) + "\n" + limiter + "\n" + list_cpu + r'''
+"""
+                + globals_defs
+                + "\n"
+                + "\n".join(program_defs + gl_defs)
+                + "\n"
+                + limiter
+                + "\n"
+                + list_cpu
+                + r"""
 void GlobalUtil::InitGLParam(int) {}
 double ClockTimer::CLOCK() { return 0; }
 GLTexImage::GLTexImage() {}
@@ -611,7 +654,8 @@ int main(int argc, char** argv) {
   assert(array_allocations == 0);
   assert(array_copies == 0);
 }
-'''
+"""
+            )
             (temp / "storage.cc").write_text(source)
             binary = temp / "storage"
             for flags in ([], ["-DSIFTGPU_ENABLE_LINEAR_TEX2D"]):

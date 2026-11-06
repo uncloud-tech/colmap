@@ -22,9 +22,10 @@ void ThrowUnknownFeatureExtractorType(FeatureExtractorType type) {
 }  // namespace
 
 void FeatureExtractionOptions::ReserveHostPayload(uint64_t count,
-                                                   uint64_t element_size) const {
+                                                  uint64_t element_size) const {
   if (!reserve_host_payload) return;
-  if (element_size && count > std::numeric_limits<uint64_t>::max() / element_size)
+  if (element_size &&
+      count > std::numeric_limits<uint64_t>::max() / element_size)
     throw std::overflow_error("SIFT host allocation overflow");
   reserve_host_payload(count * element_size);
 }

@@ -23,7 +23,7 @@
 #if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
 #include <vector>
 using std::vector;
-// Legacy SIFT headers require base classes and GL types in this order.
+// clang-format off: legacy base-class and GL header dependency order.
 #include "thirdparty/SiftGPU/GlobalUtil.h"
 #include "thirdparty/SiftGPU/GLTexImage.h"
 #include "thirdparty/SiftGPU/SiftPyramid.h"
@@ -34,6 +34,7 @@ using std::vector;
 #else
 #include "thirdparty/SiftGPU/PyramidCU.h"
 #endif
+// clang-format on
 #endif
 #include "colmap/util/eigen_alignment.h"
 
@@ -144,7 +145,8 @@ FeatureDescriptorsData TransformVLFeatToUBCFeatureDescriptors(
 // Allocator bookkeeping/rounding and library internals remain policy.
 template <typename T>
 void ReserveSiftVector(const FeatureExtractionOptions& options,
-                       std::vector<T>* values, size_t required) {
+                       std::vector<T>* values,
+                       size_t required) {
   if (!options.reserve_host_payload || required <= values->capacity()) return;
   if (values->capacity()) {
     if (values->capacity() > std::numeric_limits<size_t>::max() / 2)
@@ -236,7 +238,8 @@ class SiftCPUFeatureExtractor : public FeatureExtractor {
       // Extract features with different orientations per DOG level.
       size_t level_idx = 0;
       int prev_level = -1;
-      options_.ReserveHostPayload(kSiftDescriptorDim, sizeof(float) + sizeof(uint8_t));
+      options_.ReserveHostPayload(kSiftDescriptorDim,
+                                  sizeof(float) + sizeof(uint8_t));
       FeatureDescriptorsFloatData desc(1, kSiftDescriptorDim);
       for (int i = 0; i < num_keypoints; ++i) {
         if (vl_keypoints[i].is != prev_level) {
@@ -253,20 +256,27 @@ class SiftCPUFeatureExtractor : public FeatureExtractor {
           // Add containers for new DOG level.
           level_idx = 0;
           if (options_.reserve_host_payload) {
-            THROW_CHECK_LE(num_keypoints, std::numeric_limits<int>::max() /
-                                          options_.sift->max_num_orientations);
-            ReserveSiftVector(options_, &level_num_features, level_num_features.size() + 1);
-            ReserveSiftVector(options_, &level_keypoints, level_keypoints.size() + 1);
+            THROW_CHECK_LE(num_keypoints,
+                           std::numeric_limits<int>::max() /
+                               options_.sift->max_num_orientations);
+            ReserveSiftVector(
+                options_, &level_num_features, level_num_features.size() + 1);
+            ReserveSiftVector(
+                options_, &level_keypoints, level_keypoints.size() + 1);
             if (level_descriptors.size() == level_descriptors.capacity()) {
               // Eigen matrix move/copy behavior is toolchain dependent. Cover
-              // a possible deep-copy relocation before growing the outer vector.
+              // a possible deep-copy relocation before growing the outer
+              // vector.
               for (const auto& level : level_descriptors)
                 options_.ReserveHostPayload(level.size());
             }
-            ReserveSiftVector(options_, &level_descriptors, level_descriptors.size() + 1);
+            ReserveSiftVector(
+                options_, &level_descriptors, level_descriptors.size() + 1);
             options_.ReserveHostPayload(
-                static_cast<uint64_t>(options_.sift->max_num_orientations) * num_keypoints,
-                sizeof(FeatureKeypoint) + (descriptors ? kSiftDescriptorDim : 0));
+                static_cast<uint64_t>(options_.sift->max_num_orientations) *
+                    num_keypoints,
+                sizeof(FeatureKeypoint) +
+                    (descriptors ? kSiftDescriptorDim : 0));
           }
           level_num_features.push_back(0);
           level_keypoints.emplace_back(options_.sift->max_num_orientations *
@@ -340,13 +350,12 @@ class SiftCPUFeatureExtractor : public FeatureExtractor {
     int num_features_with_orientations = 0;
     for (int i = level_keypoints.size() - 1; i >= 0; --i) {
       if (options_.reserve_host_payload) {
-        THROW_CHECK_LE(
-            level_num_features[i],
-            static_cast<size_t>(std::numeric_limits<int>::max() - num_features));
-        THROW_CHECK_LE(
-            level_keypoints[i].size(),
-            static_cast<size_t>(std::numeric_limits<int>::max() -
-                                num_features_with_orientations));
+        THROW_CHECK_LE(level_num_features[i],
+                       static_cast<size_t>(std::numeric_limits<int>::max() -
+                                           num_features));
+        THROW_CHECK_LE(level_keypoints[i].size(),
+                       static_cast<size_t>(std::numeric_limits<int>::max() -
+                                           num_features_with_orientations));
       }
       num_features += level_num_features[i];
       num_features_with_orientations += level_keypoints[i].size();
@@ -373,7 +382,8 @@ class SiftCPUFeatureExtractor : public FeatureExtractor {
     if (descriptors != nullptr) {
       size_t k = 0;
       // Output plus the subsequent VLFeat->UBC transform's separate matrix.
-      options_.ReserveHostPayload(num_features_with_orientations, 2 * kSiftDescriptorDim);
+      options_.ReserveHostPayload(num_features_with_orientations,
+                                  2 * kSiftDescriptorDim);
       descriptors->data.resize(num_features_with_orientations,
                                kSiftDescriptorDim);
       for (size_t i = first_level_to_keep; i < level_keypoints.size(); ++i) {
@@ -799,7 +809,8 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
     // A bounded job must not release credits while a worker retains capacity.
     // Keep legacy reuse unchanged; bounded download storage is truly job-local.
     std::vector<SiftKeypoint> job_keypoints;
-    auto& download_keypoints = options_.reserve_host_payload ? job_keypoints : keypoints_buffer_;
+    auto& download_keypoints =
+        options_.reserve_host_payload ? job_keypoints : keypoints_buffer_;
     ReserveSiftVector(options_, &download_keypoints, num_features);
     options_.ReserveHostPayload(
         num_features, kSiftDescriptorDim * (sizeof(float) + sizeof(uint8_t)));
@@ -889,10 +900,10 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
     const uint64_t metadata = sizeof(siftgpu::StreamInputHistory) +
                               sizeof(siftgpu::StreamedPlane) +
                               uint64_t(octaves) * sift_gpu_._level_num *
-                              (4 * sizeof(siftgpu::StreamDetectionLevel) +
-                               4 * sizeof(siftgpu::StreamListResult) +
-                               4 * sizeof(siftgpu::StreamDescriptorResult) +
-                               128 * sizeof(siftgpu::StreamedPlane) + 256);
+                                  (4 * sizeof(siftgpu::StreamDetectionLevel) +
+                                   4 * sizeof(siftgpu::StreamListResult) +
+                                   4 * sizeof(siftgpu::StreamDescriptorResult) +
+                                   128 * sizeof(siftgpu::StreamedPlane) + 256);
     const uint64_t retained =
         uint64_t(keypoints->capacity()) * sizeof(FeatureKeypoint) +
         uint64_t(descriptors->data.size()) +
@@ -929,10 +940,10 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
       input.Seal();
     }
     LOG(INFO) << "SIFT selected_path=streamed input_history_case="
-              << streaming_input_history_.Case()
-              << " input_active_values="
+              << streaming_input_history_.Case() << " input_active_values="
               << uint64_t(bitmap.Width()) * bitmap.Height()
-              << " input_capacity_values=" << streaming_input_history_.Capacity();
+              << " input_capacity_values="
+              << streaming_input_history_.Capacity();
     auto log_stage = [](const char* name,
                         const siftgpu::StreamFilterStats& stats) {
       LOG(INFO) << "SIFT selected_path=streamed stage=" << name
@@ -1728,7 +1739,8 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
 
     if (num_matches < 0) {
       if (options_.host_budget_bytes)
-        throw std::runtime_error("budgeted GPU feature matching failed; workers must drain");
+        throw std::runtime_error(
+            "budgeted GPU feature matching failed; workers must drain");
       LOG(ERROR) << "Feature matching failed. This is probably caused by "
                     "insufficient GPU memory. Consider reducing the maximum "
                     "number of features and/or matches.";

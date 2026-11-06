@@ -24,7 +24,9 @@ from colmap_reconstruction.fixed_cohort import (
     forecast_fixed_cohort,
 )
 from colmap_reconstruction.resource_policy import (
-    ALLOCATION_FINGERPRINT, DEFAULTS, select_policy,
+    ALLOCATION_FINGERPRINT,
+    DEFAULTS,
+    select_policy,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -38,11 +40,16 @@ class GeneratedPolicyBindingTest(unittest.TestCase):
             subprocess.run(
                 [
                     sys.executable,
-                    str(ROOT / "scripts/resident/"
-                        "generate_resident_allocation_fingerprint.py"),
-                    "--repo-root", str(ROOT),
-                    "--output", str(header),
-                    "--depfile", str(Path(directory) / "allocation.d"),
+                    str(
+                        ROOT / "scripts/resident/"
+                        "generate_resident_allocation_fingerprint.py"
+                    ),
+                    "--repo-root",
+                    str(ROOT),
+                    "--output",
+                    str(header),
+                    "--depfile",
+                    str(Path(directory) / "allocation.d"),
                 ],
                 check=True,
                 capture_output=True,
@@ -89,20 +96,32 @@ class GeneratedPolicyBindingTest(unittest.TestCase):
 
     def test_unknown_identity_refuses_defaults_but_not_complete_expert(self):
         unknown = "0" * 64
-        previous = "a2b88f947d71bc1adbab0f54ee71bfafb382fa3e9e0ea852ec7352b89b312b54"
-        gaussian_only = "e5a6a377b7f0042e7ab1421321738c9e37883125489563f142a445614c711dc2"
+        previous = (
+            "a2b88f947d71bc1adbab0f54ee71bfafb382fa3e9e0ea852ec7352b89b312b54"
+        )
+        gaussian_only = (
+            "e5a6a377b7f0042e7ab1421321738c9e37883125489563f142a445614c711dc2"
+        )
         pre_installed_streaming = (
             "291996962f62c34e7c087a7c0cfd5317f7d1eb2646b70acde15b8bc4af2bbe63"
         )
         for fingerprint in (
-            unknown, previous, gaussian_only, pre_installed_streaming,
+            unknown,
+            previous,
+            gaussian_only,
+            pre_installed_streaming,
             "12067da160255267bc0cbb033f410b41e5e8443d2147bc817ba22a11ab96bdc3",
             "18ba1102892dc048ae8f3ec5c43d5eeb81c986986acecd1821500e2c014adf83",
         ):
-            with self.subTest(fingerprint=fingerprint), self.assertRaisesRegex(
-                ValueError, "no supported allocation binding"
+            with (
+                self.subTest(fingerprint=fingerprint),
+                self.assertRaisesRegex(
+                    ValueError, "no supported allocation binding"
+                ),
             ):
-                select_policy(self.args(), {"allocation_fingerprint": fingerprint})
+                select_policy(
+                    self.args(), {"allocation_fingerprint": fingerprint}
+                )
         args = self.args()
         for name, value in DEFAULTS.items():
             setattr(args, name, value)
@@ -117,8 +136,9 @@ class GeneratedPolicyBindingTest(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as directory:
                     root = Path(directory)
                     reconstruction = Reconstruction(
-                        parse_args(["--photos", str(root),
-                                    "--workspace", str(root)]),
+                        parse_args(
+                            ["--photos", str(root), "--workspace", str(root)]
+                        ),
                         sys.executable,
                     )
                     reconstruction.assets.mkdir()
@@ -127,17 +147,30 @@ class GeneratedPolicyBindingTest(unittest.TestCase):
                         "allocation_fingerprint": fingerprint,
                     }
                     summary = dict(
-                        schema_version=1, image_path=str(root), photo_count=1,
-                        photos=[dict(path="photo.jpg", width=6201, height=4130,
-                                     orientation=None)],
-                        problems=[], non_image_files=[], header_only=True,
+                        schema_version=1,
+                        image_path=str(root),
+                        photo_count=1,
+                        photos=[
+                            dict(
+                                path="photo.jpg",
+                                width=6201,
+                                height=4130,
+                                orientation=None,
+                            )
+                        ],
+                        problems=[],
+                        non_image_files=[],
+                        header_only=True,
                         orientation_applied=False,
                         build=dict(revision="a" * 8, cuda_compiled=True),
                     )
                     # Only image-header discovery is synthetic. The build
                     # identity above came from the canonical source generator.
-                    with patch.object(reconstruction, "native",
-                                      return_value=json.dumps(summary)):
+                    with patch.object(
+                        reconstruction,
+                        "native",
+                        return_value=json.dumps(summary),
+                    ):
                         if fingerprint == self.fingerprint:
                             self.assertEqual(
                                 reconstruction.inspect_photos(), 6201
@@ -154,8 +187,7 @@ class GeneratedPolicyBindingTest(unittest.TestCase):
         geo = PhaseOptions(True, True, "0", 1, 5, 5)
         budget = forecast_fixed_cohort(
             (ImageShape(5, 4, 1, 20), ImageShape(3, 3, 1, 9)),
-            (Job(0, (1,), (1,), photo, geo),
-             Job(1, (0,), (0,), photo, geo)),
+            (Job(0, (1,), (1,), photo, geo), Job(1, (0,), (0,), photo, geo)),
             max_active_owners=1,
             source_root=ROOT,
             process=ByteCharge(100, 200),

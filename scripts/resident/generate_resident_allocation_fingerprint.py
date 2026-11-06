@@ -502,7 +502,6 @@ CLOSURE = (
     "src/colmap/estimators/bundle_adjustment_ceres.cc",
     "src/colmap/exe/sfm.h",
     "src/colmap/exe/sfm.cc",
-
 )
 
 HEADER_COMMENT = """// GENERATED FILE - DO NOT EDIT.
