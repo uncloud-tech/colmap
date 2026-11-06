@@ -154,6 +154,11 @@ class FeatureExtractorThread : public ExtractionWorker {
       };
     }
 
+    if (extraction_options_.sift->streaming) {
+      extraction_options_.sift->streaming_cancelled = [this] {
+        return IsStopped();
+      };
+    }
     if (extraction_options_.RequiresOpenGL()) {
       opengl_context_ = std::make_unique<OpenGLContextManager>();
     }
@@ -641,6 +646,11 @@ class FeatureExtractorController : public Thread {
       if (budget_)
         admit_header = [&](int w, int h, int channels) {
           const int max_size = extraction_options_.EffMaxImageSize();
+          if (extraction_options_.sift->streaming &&
+              (w > max_size || h > max_size))
+            throw std::invalid_argument(
+                "SIFT streaming refuses implicit image resizing; input exceeds "
+                "FeatureExtraction.max_image_size");
           const bool cpu_staging =
               !extraction_options_.use_gpu ||
               extraction_options_.sift->estimate_affine_shape ||

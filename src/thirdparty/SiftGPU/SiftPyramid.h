@@ -97,7 +97,10 @@ public:
 	vector<float>	_descriptor_buffer;
 private:
 	inline  void PrepareBuffer();
-	inline  void LimitFeatureCount(int have_keylist = 0);
+protected:
+    // Original whole-level boundary; protected also permits native oracles
+    // to exercise its unmodified semantics without running detection again.
+	void LimitFeatureCount(int have_keylist = 0);
 public:
 	//shared by all implementations
 	virtual void RunSIFT(GLTexInput*input);

@@ -22,7 +22,6 @@
 
 #if defined(SIFTGPU_CUDA_ENABLED)
 
-
 #include "GL/glew.h"
 #include <iostream>
 #include <vector>
@@ -30,6 +29,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <chrono>
+#include <cmath>
 using namespace std;
 
 #include "GlobalUtil.h"
@@ -41,6 +42,24 @@ using namespace std;
 #include "PyramidCU.h"
 #include "CudaImageDomain.h"
 
+
+namespace {
+// Storage reservation and fitting must use the same slot order and reductions.
+// Rows are not reduced: all kernels address packed row * width + column.
+template <typename Visit>
+int TraverseHistogram(int width, int height, bool exact_domain, int levels,
+                      Visit visit) {
+    int w = exact_domain ? siftgpu::HistogramWidth(width) : (width + 2) >> 2;
+    int count = 0;
+    for (int slot = levels - 1; slot >= 0; --slot) {
+        visit(slot, w, height);
+        ++count;
+        if (w == 1) break;
+        w = (w + 3) >> 2;
+    }
+    return count;
+}
+}  // namespace
 
 //#include "imdebug/imdebuggl.h"
 //#pragma comment (lib, "../lib/imdebug.lib")
@@ -56,6 +75,7 @@ using namespace std;
 PyramidCU::PyramidCU(SiftParam& sp) : SiftPyramid(sp)
 {
 	_allPyramid = NULL;
+	_denseKey = NULL;
 	_histoPyramidTex = NULL;
 	_featureTex = NULL;
 	_descriptorTex = NULL;
@@ -236,7 +256,7 @@ void PyramidCU::ResizePyramid(int w, int h)
 	{
 		int wa = ((w + 3) / 4) * 4;
 
-		totalkb += ((nlev *8 -19)* (wa * h) * 4 / 1024);
+		totalkb += (size_t(wa) * h * (nlev * 4 - 7) * 4 / 1024);
 		for( j = 0; j< nlev; j++, gus++, dog++, got++, key++)
 		{
 			gus->InitTexture(wa, h);
@@ -246,20 +266,25 @@ void PyramidCU::ResizePyramid(int w, int h)
             dog->SetImageSize(siftgpu::LevelWidth(w, _exact_domain), h);  //nlev -1
 			if(	j >= 1 && j < 1 + param._dog_level_num)
 			{
+				// Orientation, descriptors and display bind this linear float2 storage.
 				got->InitTexture(wa, h, 2);
                 got->SetImageSize(siftgpu::LevelWidth(w, _exact_domain), h); //2 * nlev - 6
-				got->InitTexture2D();
 			}
 			if(j > 1 && j < nlev -1) {
-                key->InitTexture(wa, h, 4);
                 key->SetImageSize(siftgpu::LevelWidth(w, _exact_domain), h);
-            } // nlev -3 ; 4 * nlev - 12
+            } // Shape metadata only; the sole dense owner is _denseKey.
 		}
 		w>>=1;
 		h>>=1;
         if(_exact_domain) { w = siftgpu::LevelWidth(w, true); h = max(1, h); }
 	}
 
+	// Reserve once at the largest octave; fits below only change logical shape.
+	CuTexImage* base = GetBaseLevel(_octave_min);
+	if(_denseKey == NULL) _denseKey = new CuTexImage;
+	_denseKey->InitTexture((base->GetImgWidth() + 3) / 4 * 4,
+	                       base->GetImgHeight(), 4);
+	totalkb += _denseKey->GetDataSize() / 1024;
 	totalkb += ResizeFeatureStorage();
 
 	if(ProgramCU::CheckErrorCUDA("ResizePyramid")) SetFailStatus(); 
@@ -312,14 +337,13 @@ void PyramidCU::FitPyramid(int w, int h)
             dog->SetImageSize(siftgpu::LevelWidth(w, _exact_domain), h);  //nlev -1
 			if(	j >= 1 && j < 1 + param._dog_level_num)
 			{
+				// Orientation, descriptors and display bind this linear float2 storage.
 				got->InitTexture(wa, h, 2);
                 got->SetImageSize(siftgpu::LevelWidth(w, _exact_domain), h); //2 * nlev - 6
-				got->InitTexture2D();
 			}
 			if(j > 1 && j < nlev -1) {
-                key->InitTexture(wa, h, 4);
                 key->SetImageSize(siftgpu::LevelWidth(w, _exact_domain), h);
-            } // nlev -3 ; 4 * nlev - 12
+            } // Shape metadata only; the sole dense owner is _denseKey.
 		}
 		w>>=1;
 		h>>=1;
@@ -347,7 +371,7 @@ int PyramidCU::ResizeFeatureStorage()
 	int wmax = GetBaseLevel(_octave_min)->GetImgWidth();
 	int hmax = GetBaseLevel(_octave_min)->GetImgHeight();
 	int whmax = max(wmax, hmax);
-	int w,  i;
+	int i;
 
 	//
 	int num = max(1, (int)ceil(log(double(whmax))/log(4.0)));
@@ -359,14 +383,29 @@ int PyramidCU::ResizeFeatureStorage()
 		_histoPyramidTex = new CuTexImage[_hpLevelNum];
 	}
 
-	for(i = 0, w = 1; i < _hpLevelNum; i++)
-	{
-		_histoPyramidTex[i].InitTexture(w, whmax, 4);
-		w<<=2;
-	}
-
-	// (4 ^ (_hpLevelNum) -1 / 3) pixels
-	totalkb += (((1 << (2 * _hpLevelNum)) -1) / 3 * 16 / 1024);
+    // A smaller input can reuse any retained octave as its first octave.
+    // Fitting shifts the histogram's starting slot by floor(first / 2).
+    // Bound each such traversal, including exact/rounded domain transitions:
+    // ceil(raw_width / 4) also equals the legacy rounded width's first
+    // reduction. Later active octaves are no larger than that first octave.
+    vector<pair<int, int>> shapes(_hpLevelNum, {0, 0});
+    int width = _pyramid_width, height = _pyramid_height;
+    for (int first = 0; first < _pyramid_octave_num; ++first) {
+        TraverseHistogram(width, height, true, _hpLevelNum - first / 2,
+                          [&](int slot, int w, int h) {
+            auto& shape = shapes[slot];
+            if (size_t(w) * h > size_t(shape.first) * shape.second)
+                shape = {w, h};
+        });
+        width = max(1, width >> 1);
+        height = max(1, height >> 1);
+    }
+    for (i = 0; i < _hpLevelNum; ++i) {
+        const auto shape = shapes[i];
+        // InitTexture retains the existing overflow/index-limit checks.
+        _histoPyramidTex[i].InitTexture(shape.first, shape.second, 4);
+        totalkb += size_t(shape.first) * shape.second * 16 / 1024;
+    }
 
 	//initialize the feature texture
 	int idx = 0, n = _octave_num * param._dog_level_num;
@@ -551,33 +590,9 @@ void PyramidCU::ReshapeFeatureListCPU()
 		if(_levelFeatureNum[i]==0)continue;
 
 		_featureTex[i].CopyToHost(buffer1);
-		
-		int fcount =0;
-		float * src = buffer1;
-		float * des = buffer2;
-		const static double factor  = 2.0*3.14159265358979323846/65535.0;
-		for(int j = 0; j < _levelFeatureNum[i]; j++, src+=4)
-		{
-			unsigned short * orientations = (unsigned short*) (&src[3]);
-			if(orientations[0] != 65535)
-			{
-				des[0] = src[0];
-				des[1] = src[1];
-				des[2] = src[2];
-				des[3] = float( factor* orientations[0]);
-				fcount++;
-				des += 4;
-				if(orientations[1] != 65535 && orientations[1] != orientations[0])
-				{
-					des[0] = src[0];
-					des[1] = src[1];
-					des[2] = src[2];
-					des[3] = float(factor* orientations[1]);	
-					fcount++;
-					des += 4;
-				}
-			}
-		}
+
+		int fcount = siftgpu::ReshapePackedOrientations(
+            buffer1, _levelFeatureNum[i], buffer2);
 		//texture size
 		SetLevelFeatureNum(i, fcount);
 		_featureTex[i].CopyFromHost(buffer2);
@@ -692,6 +707,8 @@ void PyramidCU::DestroyPerLevelData()
 
 void PyramidCU::DestroyPyramidData()
 {
+	delete _denseKey;
+	_denseKey = NULL;
 	if(_allPyramid)
 	{
 		delete [] _allPyramid;
@@ -766,7 +783,7 @@ void PyramidCU::GenerateFeatureList(int i, int j, int reduction_count, vector<in
 	CuTexImage * htex, * ftex, * tex, *got;
 	ftex = _featureTex + idx;
 	htex = _histoPyramidTex + hist_level_num -1;
-	tex = GetBaseLevel(_octave_min + i, DATA_KEYPOINT) + 2 + j;
+	tex = RegenerateDenseKey(_octave_min + i, 2 + j);
 	got = GetBaseLevel(_octave_min + i, DATA_GRAD) + 2 + j;
 
 	ProgramCU::InitHistogram(tex, htex);
@@ -865,9 +882,6 @@ void PyramidCU::GenerateFeatureList()
 			std::cout << "| \t" << int(ocount) << " :\t(" << (t2 - t1) << ")\n";
 		}
 	}
-	/////
-	CopyGradientTex();
-	/////
 	if(GlobalUtil::_timingS)ProgramCU::FinishCUDA();
 
 	if(GlobalUtil::_verbose)
@@ -883,7 +897,7 @@ GLTexImage* PyramidCU::GetLevelTexture(int octave, int level)
 	return GetLevelTexture(octave, level, DATA_GAUSSIAN);
 }
 
-GLTexImage* PyramidCU::ConvertTexCU2GL(CuTexImage* tex, int dataName)
+GLTexImage* PyramidCU::ConvertTexCU2GL(CuTexImage* tex, int dataName, CuTexImage* dog)
 {
 	
 	GLenum format = GL_LUMINANCE;
@@ -913,7 +927,6 @@ GLTexImage* PyramidCU::ConvertTexCU2GL(CuTexImage* tex, int dataName)
 		}
 	case DATA_KEYPOINT:
 		{
-			CuTexImage * dog = tex - param._level_num * _pyramid_octave_num;
 			format = GL_RGBA;
 			CuTexImage texPBO(tex->GetImgWidth(), tex->GetImgHeight(), 4, _bufferPBO);
 			if(texPBO._cuData == 0 || tex->_cuData == NULL) convert_done = 0;
@@ -939,6 +952,15 @@ GLTexImage* PyramidCU::ConvertTexCU2GL(CuTexImage* tex, int dataName)
 
 GLTexImage* PyramidCU::GetLevelTexture(int octave, int level, int dataName) 
 {
+	if(dataName == DATA_KEYPOINT && level - param._level_min > 1 &&
+       level - param._level_min < param._level_num - 1)
+    {
+        // Display is a late dense-key consumer too. Do not infer the DoG
+        // address from the reusable plane's unrelated storage address.
+        CuTexImage* key = RegenerateDenseKey(octave, level - param._level_min);
+        return ConvertTexCU2GL(key, dataName,
+            GetBaseLevel(octave, DATA_DOG) + (level - param._level_min));
+    }
 	CuTexImage* tex = GetBaseLevel(octave, dataName) + (level - param._level_min);
 	//CuTexImage* gus = GetBaseLevel(octave, DATA_GAUSSIAN) + (level - param._level_min); 
 	return ConvertTexCU2GL(tex, dataName);
@@ -972,6 +994,536 @@ void PyramidCU::ConvertInputToCU(GLTexInput* input)
     }
 }
 
+siftgpu::StreamPyramidResult PyramidCU::BuildGaussianPyramidStreamed(
+    SiftParam& parameters,
+    siftgpu::StreamedPlane& input,
+    int first_octave,
+    int octave_count,
+    const siftgpu::StreamFilterOptions& options) {
+  using namespace siftgpu;
+  const bool exact = input.Width() % 4 != 0;
+  if (input.Channels() != 1 || !input.Complete() ||
+      (first_octave != 0 && first_octave != -1) || octave_count < 1 ||
+      octave_count > 32 || parameters._level_num < 2 ||
+      parameters._level_num > 64 ||
+      int64_t(parameters._level_max) - parameters._level_min + 1 !=
+          parameters._level_num ||
+      parameters._sigma_num != parameters._level_num - 1 ||
+      !parameters._sigma || parameters._level_ds < parameters._level_min ||
+      parameters._level_ds > parameters._level_max)
+    throw std::invalid_argument(
+        "SIFT partial Gaussian phase requires parsed levels, octave 0 or "
+        "-1, at most 32 octaves/64 levels");
+  const float initial_sigma = parameters.GetInitialSmoothSigma(first_octave);
+  auto validate_filter = [&](int w, int h, float sigma) {
+    if (!std::isfinite(sigma) || sigma <= 0 ||
+        !std::isfinite(GlobalUtil::_FilterWidthFactor) ||
+        GlobalUtil::_FilterWidthFactor <= 0 ||
+        double(sigma) * GlobalUtil::_FilterWidthFactor >
+            (std::numeric_limits<int>::max() - 1) / 2)
+      throw std::invalid_argument("SIFT partial Gaussian sigma");
+    float coefficients[33];
+    int fw;
+    ProgramCU::CreateFilterKernel(sigma, coefficients, fw);
+    StripePlan plan(w, h, fw, options.gpu_bytes, options.host_bytes);
+  };
+  // Validate every original domain and minimum live payload before creating
+  // scratch or launching CUDA. Legacy rounded widths use the unrounded base
+  // width at each shift, exactly as ResizePyramid, not the preceding texture.
+  int base_w = input.Width(), base_h = input.Height();
+  if (first_octave == -1) {
+    if (base_w >= (1 << 21) || base_h >= (1 << 21))
+      throw std::invalid_argument("SIFT partial Gaussian upsample range");
+    base_w *= 2;
+    base_h *= 2;
+    SamplePlan plan(input.Width(),
+                    input.Height(),
+                    base_w,
+                    base_h,
+                    true,
+                    exact,
+                    options.gpu_bytes,
+                    options.host_bytes);
+  }
+  int previous_w = input.Width(), previous_h = input.Height();
+  int w = base_w, h = base_h;
+  for (int octave = 0; octave < octave_count; ++octave) {
+    const int domain_w = LevelWidth(w, exact);
+    if (h <= 0 || domain_w <= 0)
+      throw std::invalid_argument("SIFT partial Gaussian empty legacy octave");
+    if (octave) {
+      SamplePlan plan(previous_w,
+                      previous_h,
+                      domain_w,
+                      h,
+                      false,
+                      exact,
+                      options.gpu_bytes,
+                      options.host_bytes);
+    }
+    if (!octave)
+      validate_filter(domain_w, h, initial_sigma);
+    else if (parameters._sigma_skip1 > 0)
+      validate_filter(domain_w, h, parameters._sigma_skip1);
+    for (int level = 0; level < parameters._sigma_num; ++level)
+      validate_filter(domain_w, h, parameters._sigma[level]);
+    previous_w = domain_w;
+    previous_h = h;
+    w >>= 1;
+    h >>= 1;
+    if (exact) {
+      w = std::max(1, w);
+      h = std::max(1, h);
+    }
+  }
+  CheckStreamCancellation(options.cancelled);
+  StreamPyramidResult result;
+  result.first_octave = first_octave;
+  result.exact_domain = exact;
+  result.level_min = parameters._level_min;
+  result.level_num = parameters._level_num;
+  uint64_t retained = input.Bytes();
+  auto collect = [&](const StreamFilterResult& stage, uint64_t extra) {
+    auto& a = result.stats;
+    const auto& b = stage.stats;
+    a.gpu_staging_bytes = std::max(a.gpu_staging_bytes, b.gpu_staging_bytes);
+    a.host_staging_bytes = std::max(a.host_staging_bytes, b.host_staging_bytes);
+    a.scratch_bytes =
+        std::max(a.scratch_bytes, retained + extra + b.scratch_bytes);
+    a.file_read_bytes += b.file_read_bytes;
+    a.file_written_bytes += b.file_written_bytes;
+    a.h2d_bytes += b.h2d_bytes;
+    a.d2h_bytes += b.d2h_bytes;
+    a.file_seconds += b.file_seconds;
+    a.h2d_seconds += b.h2d_seconds;
+    a.d2h_seconds += b.d2h_seconds;
+    a.kernel_seconds += b.kernel_seconds;
+  };
+  const auto start = std::chrono::steady_clock::now();
+  w = base_w;
+  h = base_h;
+  for (int octave = 0; octave < octave_count; ++octave) {
+    const int domain_w = LevelWidth(w, exact);
+    std::unique_ptr<StreamedPlane> seed;
+    if (octave || first_octave == -1) {
+      StreamedPlane& source =
+          octave ? *result.levels[(octave - 1) * parameters._level_num +
+                                  parameters._level_ds - parameters._level_min]
+                 : input;
+      auto sampled = ProgramCU::SampleImageStreamed(
+          source, domain_w, h, !octave, exact, options);
+      collect(sampled, 0);
+      seed = std::move(sampled.output);
+    }
+    if (!octave || parameters._sigma_skip1 > 0) {
+      auto filtered = ProgramCU::FilterImageStreamed(
+          seed ? *seed : input,
+          octave ? parameters._sigma_skip1 : initial_sigma,
+          options);
+      collect(filtered, seed ? seed->Bytes() : 0);
+      seed = std::move(filtered.output);
+    }
+    retained += seed->Bytes();
+    result.levels.push_back(std::move(seed));
+    for (int level = 0; level < parameters._sigma_num; ++level) {
+      auto filtered = ProgramCU::FilterImageStreamed(
+          *result.levels.back(), parameters._sigma[level], options);
+      collect(filtered, 0);
+      retained += filtered.output->Bytes();
+      result.levels.push_back(std::move(filtered.output));
+    }
+    w >>= 1;
+    h >>= 1;
+    if (exact) {
+      w = std::max(1, w);
+      h = std::max(1, h);
+    }
+  }
+  CheckStreamCancellation(options.cancelled);
+  result.stats.seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+          .count();
+  return result;
+}
+
+siftgpu::StreamPyramidResult PyramidCU::BuildPyramidStreamed(
+    SiftParam& parameters,
+    siftgpu::StreamedPlane& input,
+    int first_octave,
+    int octave_count,
+    const siftgpu::StreamFilterOptions& options) {
+  const auto start = std::chrono::steady_clock::now();
+  // Validate the largest DoG row/halo payload before Gaussian I/O or CUDA
+  // work. Subsequent octave domains never exceed this domain; their tiny
+  // heights reduce the minimum halo requirement rather than increasing it.
+  const int64_t factor = first_octave == -1 ? 2 : 1;
+  if (int64_t(input.Width()) * factor >= (1 << 23) ||
+      int64_t(input.Height()) * factor > INT32_MAX)
+    throw std::invalid_argument("SIFT streamed pyramid dimensions");
+  siftgpu::DogPlan minimum(int(input.Width() * factor),
+                           int(input.Height() * factor),
+                           options.gpu_bytes,
+                           options.host_bytes);
+  auto result = BuildGaussianPyramidStreamed(
+      parameters, input, first_octave, octave_count, options);
+  uint64_t retained = input.Bytes();
+  for (const auto& plane : result.levels) retained += plane->Bytes();
+  for (int octave = 0; octave < octave_count; ++octave) {
+    for (int level = 1; level < result.level_num; ++level) {
+      const size_t index = size_t(octave) * result.level_num + level;
+      auto stage = ProgramCU::ComputeDOGStreamed(
+          *result.levels[index], *result.levels[index - 1], options);
+      auto& a = result.stats;
+      const auto& b = stage.stats;
+      a.gpu_staging_bytes = std::max(a.gpu_staging_bytes, b.gpu_staging_bytes);
+      a.host_staging_bytes =
+          std::max(a.host_staging_bytes, b.host_staging_bytes);
+      retained += b.scratch_bytes;
+      a.scratch_bytes = std::max(a.scratch_bytes, retained);
+      a.file_read_bytes += b.file_read_bytes;
+      a.file_written_bytes += b.file_written_bytes;
+      a.h2d_bytes += b.h2d_bytes;
+      a.d2h_bytes += b.d2h_bytes;
+      a.file_seconds += b.file_seconds;
+      a.h2d_seconds += b.h2d_seconds;
+      a.d2h_seconds += b.d2h_seconds;
+      a.kernel_seconds += b.kernel_seconds;
+      result.dogs.push_back(std::move(stage.dog));
+      result.gradients.push_back(std::move(stage.gradient));
+    }
+  }
+  siftgpu::CheckStreamCancellation(options.cancelled);
+  result.stats.seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+          .count();
+  return result;
+}
+
+siftgpu::StreamDetectionPyramidResult PyramidCU::BuildDetectionPyramidStreamed(
+    SiftParam& parameters,
+    siftgpu::StreamedPlane& input,
+    int first_octave,
+    int octave_count,
+    const siftgpu::StreamFilterOptions& options) {
+  using namespace siftgpu;
+  const auto start = std::chrono::steady_clock::now();
+  if (parameters._dog_level_num < 1 || parameters._dog_level_num > 61 ||
+      parameters._level_num < parameters._dog_level_num + 3)
+    throw std::invalid_argument(
+        "SIFT streamed detection requires DoG triplets");
+  const int64_t factor = first_octave == -1 ? 2 : 1;
+  if (int64_t(input.Width()) * factor >= (1 << 23) ||
+      int64_t(input.Height()) * factor > INT32_MAX)
+    throw std::invalid_argument("SIFT streamed detection dimensions");
+  KeyPlan minimum(int(input.Width() * factor),
+                  int(input.Height() * factor),
+                  options.gpu_bytes,
+                  options.host_bytes);
+  StreamDetectionPyramidResult result;
+  result.pyramid = BuildPyramidStreamed(
+      parameters, input, first_octave, octave_count, options);
+  auto& pyramid = result.pyramid;
+  uint64_t retained = input.Bytes();
+  for (const auto& plane : pyramid.levels) retained += plane->Bytes();
+  for (const auto& plane : pyramid.dogs) retained += plane->Bytes();
+  for (const auto& plane : pyramid.gradients) retained += plane->Bytes();
+  const bool reverse = GlobalUtil::_TruncateMethod == 1;
+  // Exactly FOR_EACH_OCTAVE / FOR_EACH_LEVEL, without constructing any lists
+  // or applying an approximate tile-local/global feature-count limiter.
+  for (int oi = 0; oi < octave_count; ++oi) {
+    const int octave = reverse ? octave_count - 1 - oi : oi;
+    for (int li = 0; li < parameters._dog_level_num; ++li) {
+      const int level = reverse ? parameters._dog_level_num - 1 - li : li;
+      const size_t previous = size_t(octave) * (pyramid.level_num - 1) + level;
+      auto stage = ProgramCU::ComputeKEYStreamed(*pyramid.dogs[previous],
+                                                 *pyramid.dogs[previous + 1],
+                                                 *pyramid.dogs[previous + 2],
+                                                 parameters._dog_threshold,
+                                                 parameters._edge_threshold,
+                                                 pyramid.exact_domain,
+                                                 options);
+      auto& a = pyramid.stats;
+      const auto& b = stage.stats;
+      a.gpu_staging_bytes = std::max(a.gpu_staging_bytes, b.gpu_staging_bytes);
+      a.host_staging_bytes =
+          std::max(a.host_staging_bytes, b.host_staging_bytes);
+      retained += b.scratch_bytes;
+      a.scratch_bytes = std::max(a.scratch_bytes, retained);
+      a.file_read_bytes += b.file_read_bytes;
+      a.file_written_bytes += b.file_written_bytes;
+      a.h2d_bytes += b.h2d_bytes;
+      a.d2h_bytes += b.d2h_bytes;
+      a.file_seconds += b.file_seconds;
+      a.h2d_seconds += b.h2d_seconds;
+      a.d2h_seconds += b.d2h_seconds;
+      a.kernel_seconds += b.kernel_seconds;
+      result.detections.push_back(
+          {first_octave + octave, 2 + level, std::move(stage)});
+    }
+  }
+  CheckStreamCancellation(options.cancelled);
+  pyramid.stats.seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+          .count();
+  return result;
+}
+
+siftgpu::StreamFeatureListsResult PyramidCU::GenerateFeatureListsStreamed(
+    siftgpu::StreamDetectionPyramidResult& detection,
+    int truncate_method,
+    int threshold,
+    const siftgpu::StreamFilterOptions& options) {
+  using namespace siftgpu;
+  CheckStreamCancellation(options.cancelled);
+  ListPlan minimum(options.gpu_bytes, options.host_bytes);
+  const int dog_levels = detection.pyramid.level_num - 3;
+  if (dog_levels <= 0 || detection.detections.empty() ||
+      detection.detections.size() % dog_levels)
+    throw std::invalid_argument("SIFT streamed feature-list level metadata");
+  const size_t octaves = detection.detections.size() / dog_levels;
+  StreamFeatureListsResult result;
+  result.levels.resize(detection.detections.size());
+  result.level_counts.resize(detection.detections.size(), 0);
+  const bool reverse = truncate_method == 1;
+  int64_t generated = 0;
+  for (size_t oi = 0; oi < octaves; ++oi) {
+    const size_t octave = reverse ? octaves - 1 - oi : oi;
+    for (int li = 0; li < dog_levels; ++li) {
+      const int level = reverse ? dog_levels - 1 - li : li;
+      const size_t index = octave * dog_levels + level;
+      // Detection may have been built under a different traversal setting;
+      // select by metadata without changing scientific feature order.
+      StreamDetectionLevel* selected = nullptr;
+      for (auto& record : detection.detections)
+        if (record.octave == detection.pyramid.first_octave + int(octave) &&
+            record.level == level + 2) {
+          if (selected)
+            throw std::invalid_argument("duplicate SIFT detection level");
+          selected = &record;
+        }
+      if (!selected)
+        throw std::invalid_argument("missing SIFT detection level");
+      if (truncate_method && threshold > 0 && generated > threshold) continue;
+      auto stage =
+          ProgramCU::GenerateListStreamed(selected->detection, options);
+      generated += stage.count;
+      if (generated > INT32_MAX)
+        throw std::overflow_error("SIFT streamed total feature count");
+      result.level_counts[index] = stage.count;
+      auto& a = result.stats;
+      const auto& b = stage.stats;
+      a.gpu_staging_bytes = std::max(a.gpu_staging_bytes, b.gpu_staging_bytes);
+      a.host_staging_bytes =
+          std::max(a.host_staging_bytes, b.host_staging_bytes);
+      a.file_read_bytes += b.file_read_bytes;
+      a.file_written_bytes += b.file_written_bytes;
+      a.h2d_bytes += b.h2d_bytes;
+      a.d2h_bytes += b.d2h_bytes;
+      a.scratch_bytes += b.scratch_bytes;
+      a.seconds += b.seconds;
+      a.file_seconds += b.file_seconds;
+      a.h2d_seconds += b.h2d_seconds;
+      a.d2h_seconds += b.d2h_seconds;
+      a.kernel_seconds += b.kernel_seconds;
+      result.levels[index] = std::move(stage);
+    }
+  }
+  result.count = LimitStreamedFeatureCounts(
+      result.level_counts, threshold, truncate_method);
+  for (size_t i = 0; i < result.levels.size(); ++i)
+    if (!result.level_counts[i]) {
+      result.levels[i].records.reset();
+      result.levels[i].count = 0;
+    }
+  CheckStreamCancellation(options.cancelled);
+  return result;
+}
+
+siftgpu::StreamFeatureListsResult PyramidCU::GetFeatureOrientationsStreamed(
+    SiftParam& parameters,
+    siftgpu::StreamDetectionPyramidResult& detection,
+    siftgpu::StreamFeatureListsResult& lists,
+    int truncate_method,
+    int threshold,
+    const siftgpu::StreamFilterOptions& options) {
+  using namespace siftgpu;
+  CheckStreamCancellation(options.cancelled);
+  const auto start = std::chrono::steady_clock::now();
+  auto& pyramid = detection.pyramid;
+  const int dog_levels = parameters._dog_level_num;
+  if (dog_levels <= 0 || pyramid.level_num != dog_levels + 3 ||
+      pyramid.level_min != parameters._level_min || lists.levels.empty() ||
+      lists.levels.size() % dog_levels ||
+      lists.level_counts.size() != lists.levels.size() ||
+      detection.detections.size() != lists.levels.size() ||
+      pyramid.gradients.size() !=
+          lists.levels.size() / dog_levels * (pyramid.level_num - 1))
+    throw std::invalid_argument("SIFT streamed orientation level metadata");
+  StreamFeatureListsResult result;
+  result.levels.resize(lists.levels.size());
+  result.level_counts.resize(lists.levels.size(), 0);
+  const float sigma_step = powf(2.0f, 1.0f / dog_levels);
+  uint64_t retained = 0;
+  for (size_t index = 0; index < lists.levels.size(); ++index) {
+    auto& source = lists.levels[index];
+    if (source.count != lists.level_counts[index])
+      throw std::invalid_argument("SIFT streamed orientation retained count");
+    if (!source.count) continue;
+    const int octave = int(index) / dog_levels;
+    const int level = int(index) % dog_levels;
+    StreamDetectionLevel* selected = nullptr;
+    for (auto& record : detection.detections)
+      if (record.octave == pyramid.first_octave + octave &&
+          record.level == level + 2) {
+        if (selected)
+          throw std::invalid_argument("duplicate SIFT orientation KEY");
+        selected = &record;
+      }
+    const size_t gradient_index =
+        size_t(octave) * (pyramid.level_num - 1) + level;
+    if (!selected || !selected->detection.key ||
+        !pyramid.gradients[gradient_index])
+      throw std::invalid_argument("missing SIFT orientation plane");
+    const float sigma =
+        parameters.GetLevelSigma(level + parameters._level_min + 1);
+    auto stage = ProgramCU::ComputeOrientationStreamed(
+        source,
+        *pyramid.gradients[gradient_index],
+        *selected->detection.key,
+        sigma,
+        sigma_step,
+        options);
+    auto& a = result.stats;
+    const auto& b = stage.stats;
+    a.gpu_staging_bytes = std::max(a.gpu_staging_bytes, b.gpu_staging_bytes);
+    a.host_staging_bytes = std::max(a.host_staging_bytes, b.host_staging_bytes);
+    a.file_read_bytes += b.file_read_bytes;
+    a.file_written_bytes += b.file_written_bytes;
+    a.h2d_bytes += b.h2d_bytes;
+    a.d2h_bytes += b.d2h_bytes;
+    a.scratch_bytes = std::max(a.scratch_bytes, retained + b.scratch_bytes);
+    a.file_seconds += b.file_seconds;
+    a.h2d_seconds += b.h2d_seconds;
+    a.d2h_seconds += b.d2h_seconds;
+    a.kernel_seconds += b.kernel_seconds;
+    if (stage.records) retained += stage.records->Bytes();
+    result.level_counts[index] = stage.count;
+    result.levels[index] = std::move(stage);
+  }
+  // Original RunSIFT only performs its second limiter after multi-orientation
+  // reshape; single/fixed orientation retains the first boundary unchanged.
+  result.count = LimitStreamedFeatureCounts(
+      result.level_counts,
+      GlobalUtil::_MaxOrientation > 1 && !GlobalUtil::_FixedOrientation
+          ? threshold
+          : 0,
+      truncate_method);
+  for (size_t i = 0; i < result.levels.size(); ++i)
+    if (!result.level_counts[i]) {
+      result.levels[i].records.reset();
+      result.levels[i].count = 0;
+    }
+  CheckStreamCancellation(options.cancelled);
+  result.stats.seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+          .count();
+  return result;
+}
+
+siftgpu::StreamExtractionResult PyramidCU::GetFeatureDescriptorsStreamed(
+    SiftParam& parameters,
+    siftgpu::StreamDetectionPyramidResult& detection,
+    siftgpu::StreamFeatureListsResult& orientations,
+    const siftgpu::StreamFilterOptions& options) {
+  using namespace siftgpu;
+  CheckStreamCancellation(options.cancelled);
+  const auto start = std::chrono::steady_clock::now();
+  auto& pyramid = detection.pyramid;
+  const int levels = parameters._dog_level_num;
+  if (levels <= 0 || pyramid.level_num != levels + 3 ||
+      pyramid.level_min != parameters._level_min ||
+      orientations.levels.size() != orientations.level_counts.size() ||
+      orientations.levels.size() % levels ||
+      pyramid.gradients.size() !=
+          orientations.levels.size() / levels * (pyramid.level_num - 1) ||
+      pyramid.first_octave < -1 || pyramid.first_octave > 30 ||
+      orientations.levels.size() / levels > size_t(31 - pyramid.first_octave))
+    throw std::invalid_argument("SIFT streamed descriptor level metadata");
+  StreamExtractionResult result;
+  result.features.levels.resize(orientations.levels.size());
+  result.features.level_counts = orientations.level_counts;
+  result.descriptors.resize(orientations.levels.size());
+  uint64_t retained = 0;
+  int64_t total = 0;
+  float os = pyramid.first_octave >= 0 ? float(1 << pyramid.first_octave)
+                                       : 1.0f / (1 << (-pyramid.first_octave));
+  const float offset = GlobalUtil::_LoweOrigin ? 0 : 0.5f;
+  const double twopi = 2.0 * 3.14159265358979323846;
+  for (size_t index = 0; index < orientations.levels.size(); ++index) {
+    if (index && index % levels == 0) os *= 2.0f;
+    auto& source = orientations.levels[index];
+    if (source.count < 0 || source.count != orientations.level_counts[index])
+      throw std::invalid_argument("SIFT streamed descriptor retained count");
+    if (!source.count) continue;
+    const size_t gradient_index =
+        index / levels * (pyramid.level_num - 1) + index % levels;
+    if (!pyramid.gradients[gradient_index])
+      throw std::invalid_argument("missing SIFT descriptor gradient");
+    auto stage = ProgramCU::ComputeDescriptorStreamed(
+        source, *pyramid.gradients[gradient_index], options);
+    auto& a = result.stats;
+    const auto& b = stage.stats;
+    a.gpu_staging_bytes = std::max(a.gpu_staging_bytes, b.gpu_staging_bytes);
+    a.host_staging_bytes = std::max(a.host_staging_bytes, b.host_staging_bytes);
+    a.file_read_bytes += b.file_read_bytes;
+    a.file_written_bytes += b.file_written_bytes;
+    a.h2d_bytes += b.h2d_bytes;
+    a.d2h_bytes += b.d2h_bytes;
+    a.file_seconds += b.file_seconds;
+    a.h2d_seconds += b.h2d_seconds;
+    a.d2h_seconds += b.d2h_seconds;
+    a.kernel_seconds += b.kernel_seconds;
+    retained += stage.records->Bytes();
+    auto& converted = result.features.levels[index];
+    converted.records = std::make_unique<StreamedPlane>(
+        options.scratch_directory, 1, source.count, 4);
+    converted.records->Reserve();
+    retained += converted.records->Bytes();
+    a.scratch_bytes = std::max(a.scratch_bytes, retained);
+    const auto time = std::chrono::steady_clock::now();
+    for (int row = 0; row < source.count; ++row) {
+      float key[4];
+      source.records->ReadRows(row, 1, key, options.cancelled);
+      // Original DownloadKeypoints arithmetic, with no implicit image
+      // downsampling in this native pipeline. Descriptor used unconverted xyso.
+      key[0] = os * (key[0] - 0.5f) + offset;
+      key[1] = os * (key[1] - 0.5f) + offset;
+      key[2] = os * key[2];
+      key[3] = (float)fmod(twopi - key[3], twopi);
+      converted.records->WriteRows(row, 1, key, options.cancelled);
+      a.file_read_bytes += 16;
+      a.file_written_bytes += 16;
+    }
+    a.file_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - time)
+            .count();
+    converted.records->Seal();
+    converted.count = source.count;
+    total += source.count;
+    if (total > INT32_MAX)
+      throw std::overflow_error("SIFT streamed descriptor total overflow");
+    result.descriptors[index] = std::move(stage);
+  }
+  if (total != orientations.count)
+    throw std::invalid_argument("SIFT streamed descriptor total count");
+  result.features.count = int(total);
+  CheckStreamCancellation(options.cancelled);
+  result.stats.seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+          .count();
+  return result;
+}
+
 void PyramidCU::BuildPyramid(GLTexInput * input)
 {
 
@@ -984,7 +1536,7 @@ void PyramidCU::BuildPyramid(GLTexInput * input)
 
 		float* filter_sigma = param._sigma;
 		CuTexImage *tex = GetBaseLevel(i);
-		CuTexImage *buf = GetBaseLevel(i, DATA_KEYPOINT) +2;
+		CuTexImage *buf = FitDenseKey(i);
 		j = param._level_min + 1;
 
 		OCTAVE_START();
@@ -1031,7 +1583,7 @@ void PyramidCU::DetectKeypointsEX()
 
 
 	int i, j;
-	double t0, t, ts, t1, t2;
+	double ts, t1, t2;
 
 	if(GlobalUtil::_timingS && GlobalUtil::_verbose)ts = CLOCK();
 
@@ -1054,33 +1606,8 @@ void PyramidCU::DetectKeypointsEX()
 		t1 = CLOCK();
 	}
 
-	for ( i = _octave_min; i < _octave_min + _octave_num; i++)
-	{
-		if(GlobalUtil::_timingO)
-		{
-			t0 = CLOCK();
-			std::cout<<"#"<<(i + _down_sample_factor)<<"\t";
-		}
-		CuTexImage * dog = GetBaseLevel(i, DATA_DOG) + 2;
-		CuTexImage * key = GetBaseLevel(i, DATA_KEYPOINT) +2;
-
-
-		for( j = param._level_min +2; j <  param._level_max ; j++, dog++, key++)
-		{
-			if(GlobalUtil::_timingL)t = CLOCK();
-			//input, dog, dog + 1, dog -1
-			//output, key
-			ProgramCU::ComputeKEY(dog, key, param._dog_threshold, param._edge_threshold);
-			if(GlobalUtil::_timingL)
-			{
-				std::cout<<(CLOCK()-t)<<"\t";
-			}
-		}
-		if(GlobalUtil::_timingO)
-		{
-			std::cout<<"|\t"<<(CLOCK()-t0)<<"\n";
-		}
-	}
+    // Dense keys are produced immediately before their consumers. All DoGs
+    // and gradients remain immutable, including across the two global limits.
 
 	if(GlobalUtil::_timingS)
 	{
@@ -1089,34 +1616,8 @@ void PyramidCU::DetectKeypointsEX()
 		{	
 			t2 = CLOCK();
 			std::cout	<<"<Gradient, DOG  >\t"<<(t1-ts)<<"\n"
-						<<"<Get Keypoints  >\t"<<(t2-t1)<<"\n";
+						<<"<Deferred Keys  >\t"<<(t2-t1)<<"\n";
 		}				
-	}
-}
-
-void PyramidCU::CopyGradientTex()
-{
-	double ts, t1;
-
-	if(GlobalUtil::_timingS && GlobalUtil::_verbose)ts = CLOCK();
-
-	for(int i = 0, idx = 0; i < _octave_num; i++)
-	{
-		CuTexImage * got = GetBaseLevel(i + _octave_min, DATA_GRAD) +  1;
-		//compute the gradient
-		for(int j = 0; j <  param._dog_level_num ; j++, got++, idx++)
-		{
-			if(_levelFeatureNum[idx] > 0)	got->CopyToTexture2D();
-		}
-	}
-	if(GlobalUtil::_timingS)
-	{
-		ProgramCU::FinishCUDA();
-		if(GlobalUtil::_verbose)
-		{
-			t1 = CLOCK();
-			std::cout	<<"<Copy Grad/Orientation>\t"<<(t1-ts)<<"\n";
-		}
 	}
 }
 
@@ -1153,23 +1654,12 @@ void PyramidCU::ComputeGradient()
 
 int PyramidCU::FitHistogramPyramid(CuTexImage* tex)
 {
-	CuTexImage *htex;
-	int hist_level_num = _hpLevelNum - _pyramid_octave_first / 2; 
-	htex = _histoPyramidTex + hist_level_num - 1;
-	int w = _exact_domain ? siftgpu::HistogramWidth(tex->GetImgWidth())
-                          : (tex->GetImgWidth() + 2) >> 2;
-	int h = tex->GetImgHeight();
-	int count = 0; 
-	for(int k = 0; k < hist_level_num; k++, htex--)
-	{
-		//htex->SetImageSize(w, h);	
-		htex->InitTexture(w, h, 4); 
-		++count;
-		if(w == 1)
-            break;
-		w = (w + 3)>>2; 
-	}
-	return count;
+    return TraverseHistogram(
+        tex->GetImgWidth(), tex->GetImgHeight(), _exact_domain,
+        _hpLevelNum - _pyramid_octave_first / 2,
+        [&](int slot, int w, int h) {
+            _histoPyramidTex[slot].InitTexture(w, h, 4);
+        });
 }
 
 void PyramidCU::GetFeatureOrientations() 
@@ -1182,14 +1672,18 @@ void PyramidCU::GetFeatureOrientations()
 	for(int i = 0; i < _octave_num; i++)
 	{
 		CuTexImage* got = GetBaseLevel(i + _octave_min, DATA_GRAD) + 1;
-		CuTexImage* key = GetBaseLevel(i + _octave_min, DATA_KEYPOINT) + 2;
+		CuTexImage* key = FitDenseKey(i + _octave_min);
 
-		for(int j = 0; j < param._dog_level_num; j++, ftex++, count++, got++, key++)
+		for(int j = 0; j < param._dog_level_num; j++, ftex++, count++, got++)
 		{
 			if(*count<=0)continue;
 
 			//if(ftex->GetImgWidth() < *count) ftex->InitTexture(*count, 1, 4);
 
+            // Supplied/rectangular keys and non-subpixel orientation never
+            // read the dense plane. Otherwise regenerate after global limiting.
+            if(!_existing_keypoints && GlobalUtil::_SubpixelLocalization)
+                key = RegenerateDenseKey(i + _octave_min, j + 2);
 			sigma = param.GetLevelSigma(j+param._level_min+1);
 
 			ProgramCU::ComputeOrientation(ftex, got, key, sigma, sigma_step, _existing_keypoints);		
@@ -1205,6 +1699,21 @@ void PyramidCU::GetSimplifiedOrientation()
 {
 	//no simplified orientation
 	GetFeatureOrientations();
+}
+
+CuTexImage* PyramidCU::FitDenseKey(int octave)
+{
+    CuTexImage* base = GetBaseLevel(octave);
+    _denseKey->SetImageSize(base->GetImgWidth(), base->GetImgHeight());
+    return _denseKey;
+}
+
+CuTexImage* PyramidCU::RegenerateDenseKey(int octave, int level)
+{
+    CuTexImage* key = FitDenseKey(octave);
+    ProgramCU::ComputeKEY(GetBaseLevel(octave, DATA_DOG) + level, key,
+                          param._dog_threshold, param._edge_threshold);
+    return key;
 }
 
 CuTexImage* PyramidCU::GetBaseLevel(int octave, int dataName)

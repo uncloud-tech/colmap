@@ -312,6 +312,32 @@ void OptionManager::AddFeatureExtractionOptions() {
   AddDefaultOption("FeatureExtraction.max_image_size",
                    &feature_extraction->max_image_size);
 
+  AddDefaultOption(
+      "SiftExtraction.streaming",
+      &feature_extraction->sift->streaming,
+      "Experimental explicit native CUDA file-backed extraction only; no auto "
+      "selection/fallback. streaming_gpu_bytes/streaming_host_bytes are "
+      "COMPONENT "
+      "staging caps, not aggregate VRAM/RAM. Requires "
+      "FeatureExtraction.host_budget_bytes "
+      "for decoded Bitmap, retained outputs, staging and complete public "
+      "results; "
+      "decoder/allocator/charged page cache require external aggregate job "
+      "containment. "
+      "Temporary domain: first_octave 0, or -1 with non-4-aligned width only; "
+      "aligned 6048/default -1 unsupported. Affine/DSP/covariant/darkness "
+      "modes and more than 2 orientations are unsupported. POSIX disk "
+      "required. "
+      "No silent resizing or option changes.");
+  AddDefaultByteOption("SiftExtraction.streaming_gpu_bytes",
+                       &feature_extraction->sift->streaming_gpu_bytes);
+  AddDefaultByteOption("SiftExtraction.streaming_host_bytes",
+                       &feature_extraction->sift->streaming_host_bytes);
+  AddDefaultOption(
+      "SiftExtraction.streaming_scratch_path",
+      &feature_extraction->sift->streaming_scratch_path,
+      "Explicit disk-backed scratch directory; disk errors/cancellation "
+      "fail extraction without fallback. Files are owned and removed.");
   AddDefaultOption("SiftExtraction.max_num_features",
                    &feature_extraction->sift->max_num_features);
   AddDefaultOption("SiftExtraction.first_octave",

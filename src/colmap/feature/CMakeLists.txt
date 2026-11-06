@@ -28,6 +28,7 @@ COLMAP_ADD_LIBRARY(
         matcher.h matcher.cc
         onnx_matchers.h onnx_matchers.cc
         sift.h sift.cc
+        sift_streaming.h
         types.h types.cc
         utils.h utils.cc
     PUBLIC_LINK_LIBS
@@ -115,6 +116,14 @@ COLMAP_ADD_TEST(
         colmap_feature
         colmap_util
 )
+if(CUDA_ENABLED)
+    # Independent pre-streaming SampleImageU oracle; never linked into product.
+    COLMAP_ADD_TEST(
+        NAME sift_resampling_test
+        SRCS sift_resampling_test.cu
+        LINK_LIBS colmap_feature colmap_sift_gpu colmap_util_cuda GLEW::GLEW
+    )
+endif()
 if(TESTS_ENABLED AND GUI_ENABLED)
     target_link_libraries(colmap_feature_sift_test Qt${QT_VERSION_MAJOR}::Widgets)
 endif()

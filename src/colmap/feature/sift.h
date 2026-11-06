@@ -70,6 +70,20 @@ struct SiftExtractionOptions {
   MAKE_ENUM_CLASS(Normalization, 0, L1_ROOT, L2);
   Normalization normalization = Normalization::L1_ROOT;
 
+  // Experimental explicit native CUDA route only. Defaults stay resident.
+  // Component staging caps are not total VRAM/RAM caps. Decoded Bitmap and
+  // complete public result arrays remain resident; the existing extraction
+  // host budget admits known payloads, not decoder/allocator/page-cache RSS.
+  // Claimed aggregate ceilings require external job containment (including
+  // charged page cache). No automatic planner or CPU fallback is enabled.
+  bool streaming = false;
+  uint64_t streaming_gpu_bytes = 0;
+  uint64_t streaming_host_bytes = 0;
+  std::string streaming_scratch_path;
+
+  // Internal cancellation seam, installed controller binds worker stop state.
+  std::function<bool()> streaming_cancelled;
+
   bool Check() const;
 };
 

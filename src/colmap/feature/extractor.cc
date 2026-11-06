@@ -115,6 +115,15 @@ int FeatureExtractionOptions::EffMaxImageSize() const {
 
 bool FeatureExtractionOptions::Check() const {
   CHECK_OPTION_GT(EffMaxImageSize(), 0);
+  if (sift && sift->streaming) {
+    CHECK_OPTION(type == FeatureExtractorType::SIFT);
+    CHECK_OPTION_EQ(use_gpu, true);
+    CHECK_OPTION_GT(host_budget_bytes, 0);
+#if !defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
+    LOG(ERROR) << "SIFT streaming requires a CUDA/HIP build; no CPU fallback";
+    return false;
+#endif
+  }
   if (use_gpu) {
     CHECK_OPTION_GT(CSVToVector<int>(gpu_index).size(), 0);
 #if !defined(COLMAP_GPU_ENABLED)

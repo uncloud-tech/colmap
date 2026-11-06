@@ -352,6 +352,30 @@ TEST(OptionManager, ParseWithOptions) {
   EXPECT_EQ(options.feature_extraction->sift->max_num_features, 2048);
 }
 
+TEST(OptionManager, SiftStreamingControlsRemainExplicit) {
+  OptionManager options;
+  options.AddFeatureExtractionOptions();
+  EXPECT_FALSE(options.feature_extraction->sift->streaming);
+  const std::vector<std::string> args = {
+      "colmap",
+      "--SiftExtraction.streaming",
+      "0",
+      "--SiftExtraction.streaming_gpu_bytes",
+      "65536",
+      "--SiftExtraction.streaming_host_bytes",
+      "32768",
+      "--SiftExtraction.streaming_scratch_path",
+      "scratch"};
+  std::vector<char*> argv;
+  for (const auto& arg : args) argv.push_back(const_cast<char*>(arg.c_str()));
+  ASSERT_TRUE(options.Parse(argv.size(), argv.data()));
+  EXPECT_FALSE(options.feature_extraction->sift->streaming);
+  EXPECT_EQ(options.feature_extraction->sift->streaming_gpu_bytes, 65536);
+  EXPECT_EQ(options.feature_extraction->sift->streaming_host_bytes, 32768);
+  EXPECT_EQ(options.feature_extraction->sift->streaming_scratch_path,
+            "scratch");
+}
+
 TEST(OptionManager, ParseWithProjectPath) {
   const auto test_dir = CreateTestDir();
   const auto config_path = test_dir / "config.ini";

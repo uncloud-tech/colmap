@@ -31,7 +31,15 @@ import subprocess
 
 from .model import _add, _mul, current_owned_shape_minimum, exact_int
 
-_FIXED_COHORT_FINGERPRINT = '95c166c94a0cf31dd4ba7b8e311f2e2d2b4bf0c5a1db932fba204adaf11a6d15'
+# Same canonical native allocation closure, but a distinct compatibility
+# contract: unchanged conservative stereo shape budgets, not SIFT workspace
+# prediction or execution qualification. The installed native SIFT streaming
+# adapter is experimental and explicit opt-in only; the default stays resident.
+# This repin does not select streaming or alter any fixed-cohort shape term:
+# no allowance, reserve or safety policy is reduced and no savings are credited.
+_FIXED_COHORT_FINGERPRINT = (
+    '12067da160255267bc0cbb033f410b41e5e8443d2147bc817ba22a11ab96bdc3'
+)
 _PROFILE = 'fresh-fixed-cohort/current-owned-shape-lower-bound-v1/unqualified'
 _ROOT = Path(__file__).resolve().parents[2]
 
