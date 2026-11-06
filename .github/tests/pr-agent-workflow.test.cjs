@@ -66,10 +66,13 @@ test('manual /review publishes the exact required check on the PR head', async (
   assert.equal(f.calls[1][1].conclusion, 'success');
 });
 
-test('automatic review uses the same head-bound check', async () => {
+test('automatic reviews use the native review job without a duplicate check', async () => {
   const f = fixture('pull_request');
   await start(f);
-  assert.equal(f.calls[0][1].head_sha, f.state.head);
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.outputs['check-id'], undefined);
+  assert.match(workflow, /^  review:\n/m);
+  assert.doesNotMatch(workflow, /^    name:/m);
 });
 
 test('other commands cannot satisfy the review requirement', async () => {
@@ -119,12 +122,30 @@ test('workflow preserves trigger security and explicitly separates token limits'
   assert.match(workflow, /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/);
   assert.match(workflow, /comment\.author_association/);
   assert.doesNotMatch(workflow, /uses: actions\/checkout/);
-  assert.match(workflow, /name: PR Agent execution/);
+  assert.doesNotMatch(workflow, /name: PR Agent execution/);
   assert.match(workflow, /if: always\(\) && steps\.review-check\.outputs\.check-id != ''/);
   assert.match(workflow, /AGENT_OUTCOME: \$\{\{ steps\.agent\.outcome \}\}/);
   assert.match(workflow, /FAIL_ON_TOOL_ERRORS: "true"/);
   const value = key => Number(workflow.match(new RegExp(`${key}: "(\\d+)"`))?.[1]);
   assert.equal(value('CONFIG__CUSTOM_MODEL_MAX_TOKENS'), 1048576);
   assert.equal(value('CONFIG__MAX_MODEL_TOKENS'), 1048576);
-  assert.equal(value('CONFIG__MAX_OUTPUT_TOKENS'), 131072);
+  // Provider capability is not the per-review reasoning/output budget.
+  assert.equal(value('CONFIG__MAX_OUTPUT_TOKENS'), 32768);
+});
+
+test('review request is bounded without multiplied timeout retries or extra AI tools', () => {
+  const value = key => Number(workflow.match(new RegExp(`${key}: "(\\d+)"`))?.[1]);
+  assert.equal(value('CONFIG__AI_TIMEOUT'), 900);
+  assert.equal(value('CONFIG__NUM_RETRIES'), 0);
+  assert.match(workflow, /CONFIG__RETRY_SAME_MODEL_ON_TIMEOUT: "false"/);
+  assert.match(workflow, /CONFIG__RETRY_SAME_MODEL_ON_LENGTH: "false"/);
+  assert.match(workflow, /GITHUB_ACTION_CONFIG__AUTO_DESCRIBE: "false"/);
+  assert.match(workflow, /GITHUB_ACTION_CONFIG__AUTO_REVIEW: "true"/);
+  assert.match(workflow, /GITHUB_ACTION_CONFIG__AUTO_IMPROVE: "false"/);
+  const jobMinutes = Number(workflow.match(/^    timeout-minutes: (\d+)/m)?.[1]);
+  const agentMinutes = Number(workflow.match(/^        timeout-minutes: (\d+)/m)?.[1]);
+  assert.ok(value('CONFIG__AI_TIMEOUT') < agentMinutes * 60,
+    'Agent step must leave enough time for the request to finish');
+  assert.ok(agentMinutes < jobMinutes,
+    'Job must leave time to publish a failed/cancelled manual review check');
 });
