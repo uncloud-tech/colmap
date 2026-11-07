@@ -317,7 +317,9 @@ void CheckSweeps() {
   EXPECT_TRUE(coverage.nonconsecutive);
   EXPECT_TRUE(coverage.candidate0);
   EXPECT_GE(coverage.max_distinct, 4);
-  if constexpr (!kGeometry) EXPECT_TRUE(coverage.tie);
+  if constexpr (!kGeometry) {
+    EXPECT_TRUE(coverage.tie);
+  }
   std::cout << "Observed trace coverage: geometry=" << kGeometry
             << " max_distinct=" << coverage.max_distinct
             << " skip=" << coverage.skip
