@@ -109,14 +109,14 @@ int main() {
   assert(budget.Used()==800);
   image.reset(); // Writer retires its image; native buffers remain live.
   assert(budget.Used()==700);
-  std::promise<void> waiting;
-  std::once_flag notified;
   auto reader=std::async(std::launch::async,[&] {
-    return budget.Acquire(1800, [] {return false;}, [&] {
-      std::call_once(notified,[&] {waiting.set_value();});
-    });
+    try {budget.Acquire(1800, [] {return false;});return false;}
+    catch(const std::runtime_error& e) {
+      return std::string(e.what()).find("persistent")!=std::string::npos;
+    }
   });
-  assert(waiting.get_future().wait_for(std::chrono::seconds(2))==std::future_status::ready);
+  assert(reader.wait_for(std::chrono::seconds(2))==std::future_status::ready);
+  assert(reader.get());
   {
     // The next input has a distinct image credit, not an old writer credit.
     auto next=budget.Acquire(0,[] {return false;});
@@ -134,9 +134,6 @@ int main() {
   }
   std::vector<float>().swap(values); // Actual buffer is freed BEFORE its credit.
   retained.reset();
-  auto admitted=reader.get();
-  assert(budget.Used()==1800);
-  admitted.reset();
   assert(budget.Used()==0);
 }
 '''
@@ -149,3 +146,111 @@ int main() {
                             '-I' + str(ROOT / 'src'), str(cc), '-o', str(binary)],
                            check=True, text=True)
             subprocess.run([str(binary)], check=True, text=True, timeout=10)
+
+    def test_reader_refuses_nondrainable_payload_and_rechecks_waiters(self):
+        source = r'''
+#include "thirdparty/SiftGPU/SiftRequirements.h"
+#include <future>
+#include <string>
+using namespace std::chrono_literals;
+using Credit=std::shared_ptr<colmap::ExtractionBudget::Ticket>;
+// Same ownership order as the native extractor: actual buffer dies before credit.
+struct ExtractorPayload {
+  Credit credit;
+  std::vector<float> buffer;
+  void Allocate(const Credit& image,int floats) {
+    siftgpu::SiftHostBudgetScope scope({},[&](uint64_t bytes) {return image->Fork(bytes);});
+    siftgpu::SiftResizeHostVector(buffer,floats,&credit);
+  }
+};
+int main() {
+  {
+    colmap::ExtractionBudget budget(1030,0,0);
+    auto writer=budget.Acquire(100,[] {return false;});
+    ExtractorPayload extractor;
+    extractor.Allocate(writer,175); // 700 bytes remain owned between extractions.
+    writer.reset();
+    auto reader=std::async(std::launch::async,[&] {
+      try {budget.Acquire(400,[] {return false;});return false;}
+      catch(const std::runtime_error& e) {
+        return std::string(e.what()).find("persistent")!=std::string::npos;
+      }
+    });
+    const bool ready=reader.wait_for(2s)==std::future_status::ready;
+    if(!ready) budget.Cancel(); // Bound a broken implementation, not its owners.
+    const bool refused=reader.get();
+    if(!ready || !refused || budget.Used()!=700 || extractor.buffer.size()!=175) return 21;
+    auto exact=budget.Acquire(300,[] {return false;}); // ceil((700+300)*1.03)==1030
+    if(budget.Used()!=1000) return 29;
+    bool boundary_refused=false;
+    try {budget.Acquire(301,[] {return false;});}
+    catch(const std::runtime_error& e) {
+      boundary_refused=std::string(e.what()).find("persistent")!=std::string::npos;
+    }
+    if(!boundary_refused) return 30;
+  } // No manual owner release is needed to unblock admission.
+  {
+    colmap::ExtractionBudget budget(1030,0,0);
+    auto writer=budget.Acquire(400,[] {return false;});
+    auto retained=writer->Fork(100);
+    std::promise<void> waiting;std::once_flag notified;
+    auto reader=std::async(std::launch::async,[&] {
+      try {
+        budget.Acquire(600,[] {return false;},[&] {
+          std::call_once(notified,[&] {waiting.set_value();});
+        });return false;
+      } catch(const std::runtime_error& e) {
+        return std::string(e.what()).find("persistent")!=std::string::npos;
+      }
+    });
+    if(waiting.get_future().wait_for(2s)!=std::future_status::ready) {budget.Cancel();reader.get();return 22;}
+    retained->Grow(500); // Existing extraction grows while reader already waits.
+    const bool ready=reader.wait_for(2s)==std::future_status::ready;
+    if(!ready) budget.Cancel();
+    if(!reader.get() || !ready || budget.Used()!=1000) return 23;
+  }
+  {
+    colmap::ExtractionBudget budget(1030,0,0);
+    auto writer=budget.Acquire(400,[] {return false;});
+    auto retained=writer->Fork(100);
+    std::promise<void> waiting;std::once_flag notified;
+    auto reader=std::async(std::launch::async,[&] {
+      return budget.Acquire(600,[] {return false;},[&] {
+        std::call_once(notified,[&] {waiting.set_value();});
+      });
+    });
+    if(waiting.get_future().wait_for(2s)!=std::future_status::ready) {budget.Cancel();return 24;}
+    writer.reset(); // Drainable writer retires; persistent owner stays live.
+    if(reader.wait_for(2s)!=std::future_status::ready) {budget.Cancel();return 25;}
+    auto image=reader.get();
+    if(budget.Used()!=700) return 26;
+  }
+  {
+    colmap::ExtractionBudget budget(1030,0,0);
+    auto writer=budget.Acquire(400,[] {return false;});
+    auto retained=writer->Fork(100);
+    std::promise<void> waiting;std::once_flag notified;
+    auto reader=std::async(std::launch::async,[&] {
+      try {
+        budget.Acquire(600,[] {return false;},[&] {
+          std::call_once(notified,[&] {waiting.set_value();});
+        });return false;
+      } catch(const std::runtime_error& e) {
+        return std::string(e.what()).find("cancelled")!=std::string::npos;
+      }
+    });
+    if(waiting.get_future().wait_for(2s)!=std::future_status::ready) {budget.Cancel();reader.get();return 27;}
+    budget.Cancel();
+    if(reader.wait_for(2s)!=std::future_status::ready || !reader.get() || budget.Used()!=500) return 28;
+  }
+}
+'''
+        with tempfile.TemporaryDirectory(dir=ROOT / 'python/tests') as directory:
+            cc = Path(directory) / 'test.cc'
+            binary = Path(directory) / 'test'
+            cc.write_text(source)
+            subprocess.run([os.environ.get('CXX', 'g++'), '-std=c++17', '-pthread',
+                            *shlex.split(os.environ.get('CXXFLAGS', '')),
+                            '-I' + str(ROOT / 'src'), str(cc), '-o', str(binary)],
+                           check=True, text=True)
+            subprocess.run([str(binary)], check=True, text=True, timeout=15)

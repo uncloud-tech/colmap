@@ -58,11 +58,13 @@ inline uint64_t ExtractionBitmapPayload(uint64_t width,
 // A single frozen logical phase ledger, not an RSS/device/workspace cap.
 // Only reader admission waits; growth ALWAYS refuses immediately, since waiting
 // with live jobs could deadlock every extractor. Credits are move-independent
-// owners travelling with ImageData, released only after its payload is freed.
+// owners released only after their payload is freed. Image tickets can drain;
+// Fork tickets represent extractor-retained owners that cannot drain for a
+// reader waiting to deliver the next image.
 class ExtractionBudget {
  private:
   struct State {
-    uint64_t capacity, policy, reserve, used = 0, peak = 0;
+    uint64_t capacity, policy, reserve, used = 0, persistent_used = 0, peak = 0;
     bool cancelled = false;
     std::mutex mutex;
     std::condition_variable changed;
@@ -79,6 +81,7 @@ class ExtractionBudget {
     ~Ticket() {
       std::lock_guard<std::mutex> lock(state_->mutex);
       state_->used -= bytes_;
+      if (persistent_) state_->persistent_used -= bytes_;
       state_->changed.notify_all();
     }
     Ticket(const Ticket&) = delete;
@@ -86,7 +89,7 @@ class ExtractionBudget {
     // Independent actual-owner lifetime on the SAME phase ledger. Allocation
     // growth never waits, including when reader admission is already blocked.
     std::shared_ptr<Ticket> Fork(uint64_t bytes) {
-      auto ticket = std::shared_ptr<Ticket>(new Ticket(state_));
+      auto ticket = std::shared_ptr<Ticket>(new Ticket(state_, true));
       ticket->Grow(bytes);
       return ticket;
     }
@@ -95,6 +98,7 @@ class ExtractionBudget {
       if (bytes > bytes_) throw std::logic_error("extraction credit underflow");
       bytes_ -= bytes;
       state_->used -= bytes;
+      if (persistent_) state_->persistent_used -= bytes;
       state_->changed.notify_all();
     }
     void Grow(uint64_t bytes) {
@@ -113,12 +117,19 @@ class ExtractionBudget {
       state_->used = next;
       state_->peak = std::max(state_->peak, next);
       bytes_ = ExtractionAdd(bytes_, bytes);
+      if (persistent_) {
+        state_->persistent_used = ExtractionAdd(state_->persistent_used, bytes);
+        // A reader already waiting on drainable jobs may now be impossible.
+        state_->changed.notify_all();
+      }
     }
    private:
     friend class ExtractionBudget;
-    explicit Ticket(std::shared_ptr<State> state) : state_(std::move(state)) {}
+    explicit Ticket(std::shared_ptr<State> state, bool persistent = false)
+        : state_(std::move(state)), persistent_(persistent) {}
     std::shared_ptr<State> state_;
     uint64_t bytes_ = 0;
+    const bool persistent_;
   };
   ExtractionBudget(uint64_t capacity, uint64_t policy, uint64_t reserve)
       : state_(std::make_shared<State>()) {
@@ -135,16 +146,27 @@ class ExtractionBudget {
       throw std::runtime_error(
           "extraction logical host singleton refused before decode "
           "(not a physical-fit guarantee)");
-    while (!state_->cancelled &&
-           !state_->Fits(ExtractionAdd(state_->used, bytes))) {
-      if (stopped()) throw std::runtime_error("extraction admission cancelled");
+    while (true) {
+      if (state_->cancelled || stopped())
+        throw std::runtime_error("extraction admission cancelled");
+      // Retained native buffers cannot retire while their extractor is waiting
+      // for this image. Recheck after EVERY wake, including persistent growth.
+      if (!state_->Fits(ExtractionAdd(state_->persistent_used, bytes)))
+        throw std::runtime_error(
+            "extraction persistent host payload plus incoming image refused "
+            "before decode: persistent=" + std::to_string(state_->persistent_used) +
+            " incoming=" + std::to_string(bytes) +
+            " capacity=" + std::to_string(state_->capacity) +
+            " policy=" + std::to_string(state_->policy) +
+            " reserve=" + std::to_string(state_->reserve) +
+            "; drain cannot admit this image; free host memory/increase cap; "
+            "no history reset or quality fallback");
+      if (state_->Fits(ExtractionAdd(state_->used, bytes))) break;
       // Observers must not re-enter the ledger while its mutex is held.
       if (on_wait) on_wait();
       // Signals are owned by real main, which cannot notify this CV.
       state_->changed.wait_for(lock, std::chrono::milliseconds(25));
     }
-    if (state_->cancelled || stopped())
-      throw std::runtime_error("extraction admission cancelled");
     state_->used = ExtractionAdd(state_->used, bytes);
     state_->peak = std::max(state_->peak, state_->used);
     ticket->bytes_ = bytes;

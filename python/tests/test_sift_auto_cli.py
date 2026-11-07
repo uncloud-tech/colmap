@@ -46,3 +46,18 @@ class SiftAutoCliTest(unittest.TestCase):
         invalid = self.plan(2**30, 2**30, 2**30, '--policy_host_bytes', '-1')
         self.assertNotEqual(invalid.returncode, 0)
         self.assertIn('canonical byte allowance', invalid.stderr)
+
+    def test_all_byte_fields_use_the_canonical_native_adapter(self):
+        for name in ('host_capacity_bytes', 'device_capacity_bytes',
+                     'disk_capacity_bytes', 'policy_host_bytes',
+                     'policy_device_bytes', 'reserve_host_bytes',
+                     'reserve_device_bytes'):
+            for value in ('-1', '+1', '01', '18446744073709551616',
+                          '1.5', '1e3', '1x', ' 1', '1 ', ''):
+                with self.subTest(option=name, value=value):
+                    result = subprocess.run([
+                        os.environ['COLMAP_TEST_EXECUTABLE'], 'sift_extraction_plan',
+                        '--dimensions', '256x128', '--' + name, value],
+                        capture_output=True, text=True, timeout=30)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('canonical byte allowance', result.stderr)

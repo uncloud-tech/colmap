@@ -73,7 +73,13 @@ int RunSiftExtractionPlan(int argc, char** argv) {
   try {
     std::string dimensions;
     uint64_t host = 0, device = 0, disk = 0, hp = 0, dp = 0, hr = 0, dr = 0;
-    OptionManager options;
+    // Keep byte parsing on the existing canonical adapter, without exposing
+    // generic unsigned Boost options or broadening the base manager's API.
+    class SiftPlanOptionManager : public OptionManager {
+     public:
+      using BaseOptionManager::AddDefaultByteOption;
+    };
+    SiftPlanOptionManager options;
     options.AddRequiredOption("dimensions", &dimensions);
     options.AddDefaultByteOption("host_capacity_bytes", &host);
     options.AddDefaultByteOption("device_capacity_bytes", &device);
