@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""CPU-native public SIFT sequence admission contract; no CUDA execution claim."""
+"CPU-native public SIFT sequence admission contract; no CUDA execution claim."
+
 import os
 import shlex
-from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 class SiftRequirementsTest(unittest.TestCase):
     def test_sequence_selection_and_actual_growth(self):
-        source = r'''
+        source = """
 #include "thirdparty/SiftGPU/SiftRequirements.h"
 #include <cassert>
 #include <limits>
@@ -51,7 +52,8 @@ int main() {
   SiftDeviceBudget budget(103,0,0);
   budget.Replace(0,100);
   bool refused=false;
-  try { budget.Replace(0,1); } catch(const std::runtime_error&) {refused=true;}
+  try { budget.Replace(0,1); } catch(const std::runtime_error&) \
+{refused=true;}
   assert(refused && budget.Used()==100);
   budget.Replace(100,99);
   assert(budget.Used()==99);
@@ -62,11 +64,13 @@ int main() {
   std::vector<float> values(10);
   const auto old_capacity=values.capacity();
   {
-    SiftHostBudgetScope scope([](uint64_t) { throw std::runtime_error("host no fit"); });
+    SiftHostBudgetScope scope([](uint64_t) { throw std::runtime_error("host \
+no fit"); });
     bool host_refused=false;
     try { SiftResizeHostVector(values,100); }
     catch(const std::runtime_error&) { host_refused=true; }
-    assert(host_refused && values.capacity()==old_capacity && values.size()==10);
+    assert(host_refused && values.capacity()==old_capacity && \
+values.size()==10);
   }
   bool window_refused=false;
   try { DescriptorPlan(256,100,1000,1000); }
@@ -77,30 +81,45 @@ int main() {
   assert(SiftSelect(one,1ULL<<30,SiftRequired(one.stream_device,20,9)-1,
                     10,20,7,9,one.scratch_bytes).mode=="refused");
 }
-'''
-        with tempfile.TemporaryDirectory(dir=ROOT / 'python/tests') as directory:
-            cc = Path(directory) / 'test.cc'
-            binary = Path(directory) / 'test'
+"""
+        with tempfile.TemporaryDirectory(
+            dir=ROOT / "python/tests"
+        ) as directory:
+            cc = Path(directory) / "test.cc"
+            binary = Path(directory) / "test"
             cc.write_text(source)
-            subprocess.run([os.environ.get('CXX', 'g++'), '-std=c++17',
-                            *shlex.split(os.environ.get('CXXFLAGS', '')),
-                            '-I' + str(ROOT / 'src'), str(cc), '-o', str(binary)],
-                           check=True, text=True)
-            subprocess.run([str(binary)], check=True, capture_output=True, text=True)
+            subprocess.run(
+                [
+                    os.environ.get("CXX", "g++"),
+                    "-std=c++17",
+                    *shlex.split(os.environ.get("CXXFLAGS", "")),
+                    "-I" + str(ROOT / "src"),
+                    str(cc),
+                    "-o",
+                    str(binary),
+                ],
+                check=True,
+                text=True,
+            )
+            subprocess.run(
+                [str(binary)], check=True, capture_output=True, text=True
+            )
 
     def test_retained_host_credits_outlive_writer_and_cover_relocation(self):
-        source = r'''
+        source = """
 #include "thirdparty/SiftGPU/SiftRequirements.h"
 #include <cassert>
 #include <future>
 int main() {
-  colmap::ExtractionBudget budget(2060,0,0); // 2000 raw bytes, one 3% margin.
+  colmap::ExtractionBudget budget(2060,0,0); // 2000 raw bytes, one 3% \
+margin.
   auto image = budget.Acquire(100, [] { return false; });
   std::shared_ptr<colmap::ExtractionBudget::Ticket> retained;
   std::vector<float> values;
   std::shared_ptr<colmap::ExtractionBudget::Ticket> converted;
   {
-    siftgpu::SiftHostBudgetScope scope([&](uint64_t bytes) {image->Grow(bytes);}, [&](uint64_t bytes) {
+    siftgpu::SiftHostBudgetScope scope([&](uint64_t bytes) \
+{image->Grow(bytes);}, [&](uint64_t bytes) {
       return image->Fork(bytes);
     });
     siftgpu::SiftResizeHostVector(values,100,&retained);
@@ -115,12 +134,14 @@ int main() {
       return std::string(e.what()).find("persistent")!=std::string::npos;
     }
   });
-  assert(reader.wait_for(std::chrono::seconds(2))==std::future_status::ready);
+  \
+assert(reader.wait_for(std::chrono::seconds(2))==std::future_status::ready);
   assert(reader.get());
   {
     // The next input has a distinct image credit, not an old writer credit.
     auto next=budget.Acquire(0,[] {return false;});
-    siftgpu::SiftHostBudgetScope scope([&](uint64_t bytes) {next->Grow(bytes);}, [&](uint64_t bytes) {
+    siftgpu::SiftHostBudgetScope scope([&](uint64_t bytes) \
+{next->Grow(bytes);}, [&](uint64_t bytes) {
       return next->Fork(bytes);
     });
     bool refused=false;
@@ -132,34 +153,49 @@ int main() {
     assert(budget.Used()==values.capacity()*sizeof(float));
     assert(budget.Peak()>=1200); // Old and new vector capacities coexisted.
   }
-  std::vector<float>().swap(values); // Actual buffer is freed BEFORE its credit.
+  std::vector<float>().swap(values); // Actual buffer is freed BEFORE its \
+credit.
   retained.reset();
   assert(budget.Used()==0);
 }
-'''
-        with tempfile.TemporaryDirectory(dir=ROOT / 'python/tests') as directory:
-            cc = Path(directory) / 'test.cc'
-            binary = Path(directory) / 'test'
+"""
+        with tempfile.TemporaryDirectory(
+            dir=ROOT / "python/tests"
+        ) as directory:
+            cc = Path(directory) / "test.cc"
+            binary = Path(directory) / "test"
             cc.write_text(source)
-            subprocess.run([os.environ.get('CXX', 'g++'), '-std=c++17', '-pthread',
-                            *shlex.split(os.environ.get('CXXFLAGS', '')),
-                            '-I' + str(ROOT / 'src'), str(cc), '-o', str(binary)],
-                           check=True, text=True)
+            subprocess.run(
+                [
+                    os.environ.get("CXX", "g++"),
+                    "-std=c++17",
+                    "-pthread",
+                    *shlex.split(os.environ.get("CXXFLAGS", "")),
+                    "-I" + str(ROOT / "src"),
+                    str(cc),
+                    "-o",
+                    str(binary),
+                ],
+                check=True,
+                text=True,
+            )
             subprocess.run([str(binary)], check=True, text=True, timeout=10)
 
     def test_reader_refuses_nondrainable_payload_and_rechecks_waiters(self):
-        source = r'''
+        source = """
 #include "thirdparty/SiftGPU/SiftRequirements.h"
 #include <future>
 #include <string>
 using namespace std::chrono_literals;
 using Credit=std::shared_ptr<colmap::ExtractionBudget::Ticket>;
-// Same ownership order as the native extractor: actual buffer dies before credit.
+// Same ownership order as the native extractor: actual buffer dies before \
+credit.
 struct ExtractorPayload {
   Credit credit;
   std::vector<float> buffer;
   void Allocate(const Credit& image,int floats) {
-    siftgpu::SiftHostBudgetScope scope({},[&](uint64_t bytes) {return image->Fork(bytes);});
+    siftgpu::SiftHostBudgetScope scope({},[&](uint64_t bytes) {return \
+image->Fork(bytes);});
     siftgpu::SiftResizeHostVector(buffer,floats,&credit);
   }
 };
@@ -168,7 +204,8 @@ int main() {
     colmap::ExtractionBudget budget(1030,0,0);
     auto writer=budget.Acquire(100,[] {return false;});
     ExtractorPayload extractor;
-    extractor.Allocate(writer,175); // 700 bytes remain owned between extractions.
+    extractor.Allocate(writer,175); // 700 bytes remain owned between \
+extractions.
     writer.reset();
     auto reader=std::async(std::launch::async,[&] {
       try {budget.Acquire(400,[] {return false;});return false;}
@@ -177,15 +214,19 @@ int main() {
       }
     });
     const bool ready=reader.wait_for(2s)==std::future_status::ready;
-    if(!ready) budget.Cancel(); // Bound a broken implementation, not its owners.
+    if(!ready) budget.Cancel(); // Bound a broken implementation, not its \
+owners.
     const bool refused=reader.get();
-    if(!ready || !refused || budget.Used()!=700 || extractor.buffer.size()!=175) return 21;
-    auto exact=budget.Acquire(300,[] {return false;}); // ceil((700+300)*1.03)==1030
+    if(!ready || !refused || budget.Used()!=700 || \
+extractor.buffer.size()!=175) return 21;
+    auto exact=budget.Acquire(300,[] {return false;}); // \
+ceil((700+300)*1.03)==1030
     if(budget.Used()!=1000) return 29;
     bool boundary_refused=false;
     try {budget.Acquire(301,[] {return false;});}
     catch(const std::runtime_error& e) {
-      boundary_refused=std::string(e.what()).find("persistent")!=std::string::npos;
+      \
+boundary_refused=std::string(e.what()).find("persistent")!=std::string::npos;
     }
     if(!boundary_refused) return 30;
   } // No manual owner release is needed to unblock admission.
@@ -203,8 +244,10 @@ int main() {
         return std::string(e.what()).find("persistent")!=std::string::npos;
       }
     });
-    if(waiting.get_future().wait_for(2s)!=std::future_status::ready) {budget.Cancel();reader.get();return 22;}
-    retained->Grow(500); // Existing extraction grows while reader already waits.
+    if(waiting.get_future().wait_for(2s)!=std::future_status::ready) \
+{budget.Cancel();reader.get();return 22;}
+    retained->Grow(500); // Existing extraction grows while reader already \
+waits.
     const bool ready=reader.wait_for(2s)==std::future_status::ready;
     if(!ready) budget.Cancel();
     if(!reader.get() || !ready || budget.Used()!=1000) return 23;
@@ -219,9 +262,11 @@ int main() {
         std::call_once(notified,[&] {waiting.set_value();});
       });
     });
-    if(waiting.get_future().wait_for(2s)!=std::future_status::ready) {budget.Cancel();return 24;}
+    if(waiting.get_future().wait_for(2s)!=std::future_status::ready) \
+{budget.Cancel();return 24;}
     writer.reset(); // Drainable writer retires; persistent owner stays live.
-    if(reader.wait_for(2s)!=std::future_status::ready) {budget.Cancel();return 25;}
+    if(reader.wait_for(2s)!=std::future_status::ready) \
+{budget.Cancel();return 25;}
     auto image=reader.get();
     if(budget.Used()!=700) return 26;
   }
@@ -239,18 +284,32 @@ int main() {
         return std::string(e.what()).find("cancelled")!=std::string::npos;
       }
     });
-    if(waiting.get_future().wait_for(2s)!=std::future_status::ready) {budget.Cancel();reader.get();return 27;}
+    if(waiting.get_future().wait_for(2s)!=std::future_status::ready) \
+{budget.Cancel();reader.get();return 27;}
     budget.Cancel();
-    if(reader.wait_for(2s)!=std::future_status::ready || !reader.get() || budget.Used()!=500) return 28;
+    if(reader.wait_for(2s)!=std::future_status::ready || !reader.get() || \
+budget.Used()!=500) return 28;
   }
 }
-'''
-        with tempfile.TemporaryDirectory(dir=ROOT / 'python/tests') as directory:
-            cc = Path(directory) / 'test.cc'
-            binary = Path(directory) / 'test'
+"""
+        with tempfile.TemporaryDirectory(
+            dir=ROOT / "python/tests"
+        ) as directory:
+            cc = Path(directory) / "test.cc"
+            binary = Path(directory) / "test"
             cc.write_text(source)
-            subprocess.run([os.environ.get('CXX', 'g++'), '-std=c++17', '-pthread',
-                            *shlex.split(os.environ.get('CXXFLAGS', '')),
-                            '-I' + str(ROOT / 'src'), str(cc), '-o', str(binary)],
-                           check=True, text=True)
+            subprocess.run(
+                [
+                    os.environ.get("CXX", "g++"),
+                    "-std=c++17",
+                    "-pthread",
+                    *shlex.split(os.environ.get("CXXFLAGS", "")),
+                    "-I" + str(ROOT / "src"),
+                    str(cc),
+                    "-o",
+                    str(binary),
+                ],
+                check=True,
+                text=True,
+            )
             subprocess.run([str(binary)], check=True, text=True, timeout=15)

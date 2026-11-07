@@ -2,7 +2,8 @@
 """Versioned experimental allowances, NOT a second allocation/fit model.
 
 The native inventory predicts input-dependent allocations and owns admission.
-These raw additional allowances reproduce one bounded successful configuration;
+These raw additional allowances reproduce one bounded successful \
+configuration;
 they are conservative policy, not calibrated peaks or arbitrary-scene bounds.
 """
 
@@ -14,7 +15,7 @@ VERSION = "experimental-stereo-v1"
 # whole-pipeline streaming/physical-fit or universal numerical qualification.
 # Conservative allowances/reserves remain unchanged: no staging savings credit.
 ALLOCATION_FINGERPRINT = (
-    "df00b16840b1c2ae64c4911da1cd90baf11993da41e36887668c623c18d84015"
+    "d014bf6b862a1533a6266b729aded854f3517f0be55a5c7b50e20554691146f0"
 )
 DEFAULTS = {
     "loader_scratch_host_bytes": 512 * 1024**2,
@@ -61,13 +62,16 @@ def validate_overrides(args):
 
 
 def select_policy(args, identity):
-    """Fill only absent terms; explicit expert declarations remain supported."""
+    "Fill only absent terms; explicit expert declarations remain supported."
     validate_overrides(args)
     defaults_needed = any(getattr(args, name) is None for name in DEFAULTS)
     fingerprint = identity["allocation_fingerprint"]
     if defaults_needed and fingerprint != ALLOCATION_FINGERPRINT:
         raise ValueError(
-            "automatic resource policy has no supported allocation binding for "
+            (
+                "automatic resource policy has no supported"
+                " allocation binding for "
+            )
             + fingerprint
             + "; install a supported native build or provide all "
             "expert byte allowances and --unknown-provenance"
@@ -226,7 +230,9 @@ def select_policy(args, identity):
         measured_capacity=(
             "native FREE host/cgroup and selected CUDA device; caps only lower"
         ),
-        margin="one aggregate 3% applied by native admission; no Python margin",
+        margin=(
+            "one aggregate 3% applied by native admission; no Python margin"
+        ),
         live_usage="already excluded from FREE; never subtract again",
         whole_pipeline_physical_fit=None,
         unknown_physical_stages=[

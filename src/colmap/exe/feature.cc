@@ -297,7 +297,8 @@ int RunExhaustiveMatcher(int argc, char** argv) {
     auto matcher = CreateExhaustiveFeatureMatcher(*options.exhaustive_pairing,
                                                   *options.feature_matching,
                                                   *options.two_view_geometry,
-                                                  *options.database_path, result);
+                                                  *options.database_path,
+                                                  result);
 
     if (app != nullptr) {
       RunThreadWithOpenGLContext(matcher.get());

@@ -29,13 +29,15 @@ inline uint64_t ExtractionMultiply(uint64_t a, uint64_t b) {
 // original + resized pixels, gravity rotation's old + new pixels, and
 // CPU SIFT's grayscale + float staging (5T). Staging is prepaid here.
 // The maximum is held from the SAME decoder header until writer retirement.
-// OIIO/VLFeat/SiftGPU internals and allocator bookkeeping remain UNKNOWN policy.
+// OIIO/VLFeat/SiftGPU internals and allocator bookkeeping remain UNKNOWN
+// policy.
 inline uint64_t ExtractionBitmapPayload(uint64_t width,
-                                       uint64_t height,
-                                       int file_channels,
-                                       int max_size,
-                                       bool cpu_staging = true) {
-  if (!width || !height || file_channels < 1 || file_channels > 4 || max_size <= 0)
+                                        uint64_t height,
+                                        int file_channels,
+                                        int max_size,
+                                        bool cpu_staging = true) {
+  if (!width || !height || file_channels < 1 || file_channels > 4 ||
+      max_size <= 0)
     throw std::invalid_argument("unsupported extraction bitmap header");
   const auto area = ExtractionMultiply(width, height);
   // Bitmap currently uses int multiplication even for RGB conversion.
@@ -46,12 +48,14 @@ inline uint64_t ExtractionBitmapPayload(uint64_t width,
   uint64_t resized = area;
   const bool resize = std::max(width, height) > static_cast<uint64_t>(max_size);
   if (resize) {
-    const double scale = static_cast<double>(max_size) / std::max(width, height);
+    const double scale =
+        static_cast<double>(max_size) / std::max(width, height);
     const auto w = std::max<uint64_t>(1, std::llround(width * scale));
     const auto h = std::max<uint64_t>(1, std::llround(height * scale));
     resized = ExtractionMultiply(w, h);
   }
-  return std::max({decode, resize ? ExtractionAdd(area, resized) : area,
+  return std::max({decode,
+                   resize ? ExtractionAdd(area, resized) : area,
                    ExtractionMultiply(resized, cpu_staging ? 5 : 2)});
 }
 
@@ -75,6 +79,7 @@ class ExtractionBudget {
       return ExtractionAdd(ExtractionAdd(raw, margin), reserve) <= capacity;
     }
   };
+
  public:
   class Ticket {
    public:
@@ -123,6 +128,7 @@ class ExtractionBudget {
         state_->changed.notify_all();
       }
     }
+
    private:
     friend class ExtractionBudget;
     explicit Ticket(std::shared_ptr<State> state, bool persistent = false)
@@ -154,7 +160,8 @@ class ExtractionBudget {
       if (!state_->Fits(ExtractionAdd(state_->persistent_used, bytes)))
         throw std::runtime_error(
             "extraction persistent host payload plus incoming image refused "
-            "before decode: persistent=" + std::to_string(state_->persistent_used) +
+            "before decode: persistent=" +
+            std::to_string(state_->persistent_used) +
             " incoming=" + std::to_string(bytes) +
             " capacity=" + std::to_string(state_->capacity) +
             " policy=" + std::to_string(state_->policy) +
@@ -185,6 +192,7 @@ class ExtractionBudget {
     std::lock_guard<std::mutex> lock(state_->mutex);
     return state_->used;
   }
+
  private:
   std::shared_ptr<State> state_;
 };

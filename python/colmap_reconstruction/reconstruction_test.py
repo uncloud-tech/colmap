@@ -1,16 +1,31 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""Installed frontend public seams; synthetic native commands are not GPU proof."""
-import tempfile
-from pathlib import Path
+"Installed frontend public seams; synthetic native commands are not GPU proof."
+
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 
 def photo_summary(width=4004, height=3001, orientation=None):
-    return dict(schema_version=1, image_path='/photos', photo_count=1,
-        photos=[dict(path='photo.jpg', width=width, height=height, orientation=orientation)],
-        problems=[], non_image_files=[], header_only=True, orientation_applied=False,
-        build=dict(revision='a' * 8, cuda_compiled=True))
+    return dict(
+        schema_version=1,
+        image_path="/photos",
+        photo_count=1,
+        photos=[
+            dict(
+                path="photo.jpg",
+                width=width,
+                height=height,
+                orientation=orientation,
+            )
+        ],
+        problems=[],
+        non_image_files=[],
+        header_only=True,
+        orientation_applied=False,
+        build=dict(revision="a" * 8, cuda_compiled=True),
+    )
 
 
 class FrontendTest(unittest.TestCase):
@@ -18,316 +33,680 @@ class FrontendTest(unittest.TestCase):
         # Legacy phase-isolation tests prescribe selection; installed subprocess
         # tests and CPU-native tests cover the real selection protocol.
         from unittest.mock import patch
+
         from colmap_reconstruction.cli import parse_args
+
         def args_with_policy(*args, **kwargs):
             result = parse_args(*args, **kwargs)
-            for name in ('process_device_bytes', 'unknown_device_bytes', 'reserve_device_bytes'):
+            for name in (
+                "process_device_bytes",
+                "unknown_device_bytes",
+                "reserve_device_bytes",
+            ):
                 if getattr(result, name) is None:
                     setattr(result, name, 0)
             return result
-        parser = patch('colmap_reconstruction.cli.parse_args', side_effect=args_with_policy)
+
+        parser = patch(
+            "colmap_reconstruction.cli.parse_args", side_effect=args_with_policy
+        )
         parser.start()
         self.addCleanup(parser.stop)
-        selection = patch('colmap_reconstruction.cli.Reconstruction.select_extraction',
-            return_value=dict(mode='resident'))
+        selection = patch(
+            "colmap_reconstruction.cli.Reconstruction.select_extraction",
+            return_value=dict(mode="resident"),
+        )
         selection.start()
         self.addCleanup(selection.stop)
 
     def test_undistortion_budget_is_scoped_on_success_and_native_failure(self):
         import json
         from unittest.mock import patch
+
         from colmap_reconstruction.cli import Reconstruction, parse_args
         from colmap_reconstruction.process import NativeFailure
 
         for cap in (None, 3000):
             for fails in (False, True):
-                with self.subTest(cap=cap, fails=fails), tempfile.TemporaryDirectory() as directory:
+                with (
+                    self.subTest(cap=cap, fails=fails),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
                     root = Path(directory)
-                    argv = ['--photos', str(root), '--workspace', str(root)]
+                    argv = ["--photos", str(root), "--workspace", str(root)]
                     if cap is not None:
-                        argv += ['--host-budget-bytes', str(cap)]
-                    for name in ('loader-scratch-host', 'process-host', 'unknown-host',
-                                 'process-device', 'unknown-device', 'reserve-host', 'reserve-device'):
-                        argv += ['--' + name + '-bytes', '0']
-                    reconstruction = Reconstruction(parse_args(argv), sys.executable)
+                        argv += ["--host-budget-bytes", str(cap)]
+                    for name in (
+                        "loader-scratch-host",
+                        "process-host",
+                        "unknown-host",
+                        "process-device",
+                        "unknown-device",
+                        "reserve-host",
+                        "reserve-device",
+                    ):
+                        argv += ["--" + name + "-bytes", "0"]
+                    reconstruction = Reconstruction(
+                        parse_args(argv), sys.executable
+                    )
                     reconstruction.assets.mkdir()
-                    reconstruction.identity = {'allocation_fingerprint': 'test-only', 'source_commit': 'a' * 40}
-                    observed_free = 1000
-                    failure = NativeFailure('undistortion failed')
+                    reconstruction.identity = {
+                        "allocation_fingerprint": "test-only",
+                        "source_commit": "a" * 40,
+                    }
+                    observed_free = {"bytes": 1000}
+                    failure = NativeFailure("undistortion failed")
                     calls = []
 
-                    def native(command, *arguments, capture=False):
+                    def native(
+                        command,
+                        *arguments,
+                        capture=False,
+                        calls=calls,
+                        cap=cap,
+                        fails=fails,
+                        failure=failure,
+                        observed_free=observed_free,
+                        reconstruction=reconstruction,
+                        root=root,
+                    ):
                         reconstruction.process.sequence += 1
                         calls.append(command)
-                        if command == 'photo_directory_summary':
+                        if command == "photo_directory_summary":
                             return json.dumps(photo_summary())
-                        if command == 'reconstruction_info':
-                            return json.dumps(dict(allocation_fingerprint='test-only',
-                                available_host_bytes=observed_free, available_device_bytes=1000))
-                        if command == 'mapper':
-                            (root / 'sparse/0').mkdir()
-                        if command == 'model_analyzer':
-                            return json.dumps(dict(num_registered_images=2, num_points3D=1))
-                        if command in ('feature_extractor', 'exhaustive_matcher', 'mapper'):
-                            self.assertEqual(reconstruction.process.host_budget_bytes, 1000)
-                        elif command == 'image_undistorter':
-                            self.assertEqual(reconstruction.process.host_budget_bytes, 1000)
-                            self.assertEqual(arguments[arguments.index('--host_budget_bytes') + 1], 1000)
+                        if command == "reconstruction_info":
+                            return json.dumps(
+                                dict(
+                                    allocation_fingerprint="test-only",
+                                    available_host_bytes=observed_free["bytes"],
+                                    available_device_bytes=1000,
+                                )
+                            )
+                        if command == "mapper":
+                            (root / "sparse/0").mkdir()
+                        if command == "model_analyzer":
+                            return json.dumps(
+                                dict(num_registered_images=2, num_points3D=1)
+                            )
+                        if command in (
+                            "feature_extractor",
+                            "exhaustive_matcher",
+                            "mapper",
+                        ):
+                            self.assertEqual(
+                                reconstruction.process.host_budget_bytes, 1000
+                            )
+                        elif command == "image_undistorter":
+                            self.assertEqual(
+                                reconstruction.process.host_budget_bytes, 1000
+                            )
+                            self.assertEqual(
+                                arguments[
+                                    arguments.index("--host_budget_bytes") + 1
+                                ],
+                                1000,
+                            )
                             if fails:
                                 raise failure
                         else:
-                            self.assertEqual(reconstruction.process.host_budget_bytes, cap)
+                            self.assertEqual(
+                                reconstruction.process.host_budget_bytes, cap
+                            )
 
-                    with patch.object(reconstruction, 'native', side_effect=native):
+                    with patch.object(
+                        reconstruction, "native", side_effect=native
+                    ):
                         if fails:
                             with self.assertRaises(NativeFailure) as raised:
                                 reconstruction.prepare()
                             self.assertIs(raised.exception, failure)
                         else:
                             reconstruction.prepare()
-                        self.assertIn('image_undistorter', calls)
-                        self.assertEqual(reconstruction.process.host_budget_bytes, cap)
-                        # A later observation/launch must not inherit the earlier
+                        self.assertIn("image_undistorter", calls)
+                        self.assertEqual(
+                            reconstruction.process.host_budget_bytes, cap
+                        )
+                        # A later observation/launch must not inherit the
+                        # earlier
                         # 1000-byte FREE snapshot as its RSS-monitor ceiling.
-                        observed_free = 2000
-                        self.assertEqual(reconstruction.resources()['host'], 2000)
-                        reconstruction.native('optimized_dense_plan')
+                        observed_free["bytes"] = 2000
+                        self.assertEqual(
+                            reconstruction.resources()["host"], 2000
+                        )
+                        reconstruction.native("optimized_dense_plan")
 
-    def test_sidecar_inventory_filters_extraction_without_reordering_photo_only(self):
+    def test_sidecar_inventory_filters_extraction_without_reordering_photo_only(
+        self,
+    ):
         import json
         from unittest.mock import patch
+
         from colmap_reconstruction.cli import Reconstruction, parse_args
         from colmap_reconstruction.process import NativeFailure
-        selected = ['#camera.jpg', 'a/z.jpg', 'a.jpg', 'café photo.jpg']
-        for sidecars in ([], ['notes.txt', 'camera.xmp']):
-            with self.subTest(sidecars=sidecars), tempfile.TemporaryDirectory() as directory:
+
+        selected = ["#camera.jpg", "a/z.jpg", "a.jpg", "café photo.jpg"]
+        for sidecars in ([], ["notes.txt", "camera.xmp"]):
+            with (
+                self.subTest(sidecars=sidecars),
+                tempfile.TemporaryDirectory() as directory,
+            ):
                 root = Path(directory)
-                reconstruction = Reconstruction(parse_args(['--photos', str(root), '--workspace', str(root),
-                    '--loader-scratch-host-bytes', '0', '--process-host-bytes', '0',
-                    '--unknown-host-bytes', '0', '--reserve-host-bytes', '0']), sys.executable)
+                reconstruction = Reconstruction(
+                    parse_args(
+                        [
+                            "--photos",
+                            str(root),
+                            "--workspace",
+                            str(root),
+                            "--loader-scratch-host-bytes",
+                            "0",
+                            "--process-host-bytes",
+                            "0",
+                            "--unknown-host-bytes",
+                            "0",
+                            "--reserve-host-bytes",
+                            "0",
+                        ]
+                    ),
+                    sys.executable,
+                )
                 reconstruction.assets.mkdir()
-                reconstruction.identity = {'source_commit': 'a' * 40}
+                reconstruction.identity = {"source_commit": "a" * 40}
                 originals = {}
                 for name in selected + sidecars:
                     path = root / name
                     path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(('untouched synthetic fixture: ' + name).encode('utf-8'))
+                    path.write_bytes(
+                        ("untouched synthetic fixture: " + name).encode("utf-8")
+                    )
                     originals[path] = path.read_bytes()
                 summary = photo_summary()
-                summary['photos'] = [dict(path=name, width=4004, height=3001, orientation=None) for name in selected]
-                summary['photo_count'] = 4
-                summary['non_image_files'] = sidecars
-                def native(command, *arguments, **kwargs):
-                    if command == 'photo_directory_summary':
-                        return json.dumps(summary)
-                    self.assertEqual(command, 'feature_extractor')
-                    if sidecars:
-                        self.assertIn('--image_list_path', arguments)
-                        path = Path(arguments[arguments.index('--image_list_path') + 1])
-                        self.assertEqual(path.read_bytes(), '#camera.jpg\na/z.jpg\na.jpg\ncafé photo.jpg\n'.encode('utf-8'))
-                    else:
-                        self.assertNotIn('--image_list_path', arguments)
-                    record = json.loads((reconstruction.assets / 'extraction-inventory.json').read_text())
-                    self.assertEqual(record['selected_photos'], selected)
-                    self.assertEqual(record['effective_order'],
-                        ['#camera.jpg', 'a.jpg', 'a/z.jpg', 'café photo.jpg'] if sidecars else selected)
-                    raise NativeFailure('extraction boundary')
-                with patch.object(reconstruction, 'native', side_effect=native), \
-                     patch.object(reconstruction, 'resources', return_value={'host': 2**30, 'device': 2**30}):
-                    with self.assertRaisesRegex(NativeFailure, 'extraction boundary'):
-                        reconstruction.prepare()
-                self.assertEqual({path: path.read_bytes() for path in originals}, originals)
+                summary["photos"] = [
+                    dict(path=name, width=4004, height=3001, orientation=None)
+                    for name in selected
+                ]
+                summary["photo_count"] = 4
+                summary["non_image_files"] = sidecars
 
-    def test_sidecar_image_list_refuses_unrepresentable_names_before_extraction(self):
+                def native(
+                    command,
+                    *arguments,
+                    reconstruction=reconstruction,
+                    sidecars=sidecars,
+                    summary=summary,
+                    **kwargs,
+                ):
+                    if command == "photo_directory_summary":
+                        return json.dumps(summary)
+                    self.assertEqual(command, "feature_extractor")
+                    if sidecars:
+                        self.assertIn("--image_list_path", arguments)
+                        path = Path(
+                            arguments[arguments.index("--image_list_path") + 1]
+                        )
+                        self.assertEqual(
+                            path.read_bytes(),
+                            (
+                                "#camera.jpg\na/z.jpg\na.jpg\ncafé photo.jpg\n"
+                            ).encode(),
+                        )
+                    else:
+                        self.assertNotIn("--image_list_path", arguments)
+                    record = json.loads(
+                        (
+                            reconstruction.assets
+                            / ("extraction-inventory.json")
+                        ).read_text()
+                    )
+                    self.assertEqual(record["selected_photos"], selected)
+                    self.assertEqual(
+                        record["effective_order"],
+                        ["#camera.jpg", "a.jpg", "a/z.jpg", "café photo.jpg"]
+                        if sidecars
+                        else selected,
+                    )
+                    raise NativeFailure("extraction boundary")
+
+                with (
+                    patch.object(reconstruction, "native", side_effect=native),
+                    patch.object(
+                        reconstruction,
+                        "resources",
+                        return_value={"host": 2**30, "device": 2**30},
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        NativeFailure, "extraction boundary"
+                    ):
+                        reconstruction.prepare()
+                self.assertEqual(
+                    {path: path.read_bytes() for path in originals}, originals
+                )
+
+    def test_sidecar_image_list_refuses_unrepresentable_names_before_extraction(
+        self,
+    ):
         import json
         from unittest.mock import patch
+
         from colmap_reconstruction.cli import Reconstruction, parse_args
-        for name in (' leading.jpg', 'trailing.jpg ', '\tphoto.jpg', 'photo.jpg\r',
-                     'line\nbreak.jpg', 'nul\0.jpg', '\udcff.jpg'):
-            with self.subTest(name=repr(name)), tempfile.TemporaryDirectory() as directory:
+
+        for name in (
+            " leading.jpg",
+            "trailing.jpg ",
+            "\tphoto.jpg",
+            "photo.jpg\r",
+            "line\nbreak.jpg",
+            "nul\0.jpg",
+            "\udcff.jpg",
+        ):
+            with (
+                self.subTest(name=repr(name)),
+                tempfile.TemporaryDirectory() as directory,
+            ):
                 root = Path(directory)
-                reconstruction = Reconstruction(parse_args(['--photos', str(root), '--workspace', str(root)]), sys.executable)
+                reconstruction = Reconstruction(
+                    parse_args(
+                        ["--photos", str(root), "--workspace", str(root)]
+                    ),
+                    sys.executable,
+                )
                 reconstruction.assets.mkdir()
-                reconstruction.identity = {'source_commit': 'a' * 40}
+                reconstruction.identity = {"source_commit": "a" * 40}
                 summary = photo_summary()
-                summary['photos'][0]['path'] = name
-                summary['non_image_files'] = ['camera.xmp']
-                with patch.object(reconstruction, 'native', return_value=json.dumps(summary)) as native:
-                    with self.assertRaisesRegex(ValueError, 'cannot represent photo filename.*no rename/skip'):
+                summary["photos"][0]["path"] = name
+                summary["non_image_files"] = ["camera.xmp"]
+                with patch.object(
+                    reconstruction, "native", return_value=json.dumps(summary)
+                ) as native:
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "cannot represent photo filename.*no rename/skip",
+                    ):
                         reconstruction.prepare()
-                self.assertEqual([call.args[0] for call in native.call_args_list], ['photo_directory_summary'])
-                self.assertFalse((root / 'database.db').exists())
-                self.assertFalse((reconstruction.assets / 'extraction-images.txt').exists())
+                self.assertEqual(
+                    [call.args[0] for call in native.call_args_list],
+                    ["photo_directory_summary"],
+                )
+                self.assertFalse((root / "database.db").exists())
+                self.assertFalse(
+                    (reconstruction.assets / "extraction-images.txt").exists()
+                )
 
     def test_extraction_budget_is_scoped_and_preserves_over_3200(self):
         from unittest.mock import patch
+
         from colmap_reconstruction.cli import Reconstruction, parse_args
         from colmap_reconstruction.process import NativeFailure
+
         for previous in (None, 3000):
-            with self.subTest(previous=previous), tempfile.TemporaryDirectory() as directory:
+            with (
+                self.subTest(previous=previous),
+                tempfile.TemporaryDirectory() as directory,
+            ):
                 root = Path(directory)
-                reconstruction = Reconstruction(parse_args([
-                    '--photos', str(root), '--workspace', str(root),
-                    '--loader-scratch-host-bytes', '0', '--process-host-bytes', '0',
-                    '--unknown-host-bytes', '0', '--reserve-host-bytes', '0']), sys.executable)
+                reconstruction = Reconstruction(
+                    parse_args(
+                        [
+                            "--photos",
+                            str(root),
+                            "--workspace",
+                            str(root),
+                            "--loader-scratch-host-bytes",
+                            "0",
+                            "--process-host-bytes",
+                            "0",
+                            "--unknown-host-bytes",
+                            "0",
+                            "--reserve-host-bytes",
+                            "0",
+                        ]
+                    ),
+                    sys.executable,
+                )
                 reconstruction.process.host_budget_bytes = previous
                 reconstruction.assets.mkdir()
-                reconstruction.identity = {'source_commit': 'a' * 40}
-                failure = NativeFailure('extraction failed')
-                def native(command, *arguments, **kwargs):
-                    if command == 'photo_directory_summary':
+                reconstruction.identity = {"source_commit": "a" * 40}
+                failure = NativeFailure("extraction failed")
+
+                def native(
+                    command,
+                    *arguments,
+                    failure=failure,
+                    reconstruction=reconstruction,
+                    **kwargs,
+                ):
+                    if command == "photo_directory_summary":
                         import json
-                        return json.dumps(photo_summary(width=4004, height=3001))
-                    self.assertEqual(command, 'feature_extractor')
-                    self.assertEqual(reconstruction.process.host_budget_bytes, 2000)
-                    self.assertEqual(arguments[arguments.index('--FeatureExtraction.host_budget_bytes') + 1], 2000)
-                    self.assertEqual(arguments[arguments.index('--FeatureExtraction.max_image_size') + 1], '4004')
-                    self.assertEqual(arguments[arguments.index('--FeatureExtraction.use_gpu') + 1], 'true')
+
+                        return json.dumps(
+                            photo_summary(width=4004, height=3001)
+                        )
+                    self.assertEqual(command, "feature_extractor")
+                    self.assertEqual(
+                        reconstruction.process.host_budget_bytes, 2000
+                    )
+                    self.assertEqual(
+                        arguments[
+                            arguments.index(
+                                "--FeatureExtraction.host_budget_bytes"
+                            )
+                            + 1
+                        ],
+                        2000,
+                    )
+                    self.assertEqual(
+                        arguments[
+                            arguments.index(
+                                "--FeatureExtraction.max_image_size"
+                            )
+                            + 1
+                        ],
+                        "4004",
+                    )
+                    self.assertEqual(
+                        arguments[
+                            arguments.index("--FeatureExtraction.use_gpu") + 1
+                        ],
+                        "true",
+                    )
                     raise failure
-                with patch.object(reconstruction, 'resources', return_value={'host': 2000, 'device': 2000}), \
-                     patch.object(reconstruction, 'native', side_effect=native):
+
+                with (
+                    patch.object(
+                        reconstruction,
+                        "resources",
+                        return_value={"host": 2000, "device": 2000},
+                    ),
+                    patch.object(reconstruction, "native", side_effect=native),
+                ):
                     with self.assertRaises(NativeFailure) as raised:
                         reconstruction.prepare()
                     self.assertIs(raised.exception, failure)
-                self.assertEqual(reconstruction.process.host_budget_bytes, previous)
+                self.assertEqual(
+                    reconstruction.process.host_budget_bytes, previous
+                )
 
     def test_invalid_inspection_refuses_before_extraction(self):
         import copy
         import json
         from unittest.mock import patch
+
         from colmap_reconstruction.cli import Reconstruction, parse_args
-        summaries = ['not JSON', '[]', '{}']
-        for key, value in (('photos', []), ('photo_count', 2), ('problems', [{'path': 'bad.jpg'}]),
-                           ('header_only', False), ('orientation_applied', True),
-                           ('schema_version', True), ('build', {'revision': 'b' * 8, 'cuda_compiled': True})):
+
+        summaries = ["not JSON", "[]", "{}"]
+        for key, value in (
+            ("photos", []),
+            ("photo_count", 2),
+            ("problems", [{"path": "bad.jpg"}]),
+            ("header_only", False),
+            ("orientation_applied", True),
+            ("schema_version", True),
+            ("build", {"revision": "b" * 8, "cuda_compiled": True}),
+        ):
             summary = photo_summary()
             summary[key] = value
             summaries.append(json.dumps(summary))
-        for key in ('width', 'height'):
-            for value in (-1, 0, True, 3.5, '4004', 2**31):
+        for key in ("width", "height"):
+            for value in (-1, 0, True, 3.5, "4004", 2**31):
                 summary = copy.deepcopy(photo_summary())
-                summary['photos'][0][key] = value
+                summary["photos"][0][key] = value
                 summaries.append(json.dumps(summary))
         for payload in summaries:
-            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as directory:
+            with (
+                self.subTest(payload=payload),
+                tempfile.TemporaryDirectory() as directory,
+            ):
                 root = Path(directory)
-                reconstruction = Reconstruction(parse_args(['--photos', str(root),
-                    '--workspace', str(root)]), sys.executable)
+                reconstruction = Reconstruction(
+                    parse_args(
+                        ["--photos", str(root), "--workspace", str(root)]
+                    ),
+                    sys.executable,
+                )
                 reconstruction.assets.mkdir()
-                reconstruction.identity = {'source_commit': 'a' * 40}
-                with patch.object(reconstruction, 'native', return_value=payload) as native:
+                reconstruction.identity = {"source_commit": "a" * 40}
+                with patch.object(
+                    reconstruction, "native", return_value=payload
+                ) as native:
                     with self.assertRaises(ValueError):
                         reconstruction.prepare()
-                self.assertEqual([call.args[0] for call in native.call_args_list], ['photo_directory_summary'])
-                self.assertFalse((root / 'database.db').exists())
+                self.assertEqual(
+                    [call.args[0] for call in native.call_args_list],
+                    ["photo_directory_summary"],
+                )
+                self.assertFalse((root / "database.db").exists())
 
     def test_cuda_sift_exact_domain_requires_current_native_binding(self):
         import json
         from unittest.mock import patch
+
         from colmap_reconstruction.cli import Reconstruction, parse_args
         from colmap_reconstruction.process import NativeFailure
         from colmap_reconstruction.resource_policy import ALLOCATION_FINGERPRINT
+
         # EXIF 6/8 swap working width/height; null, 1, 3 and unsupported
         # mirrored orientations do not. A 3001-pixel height alone is valid.
         for width, height, orientation, refuses in (
-                (4004, 3001, None, False), (4004, 3001, 1, False),
-                (4004, 3001, 3, False), (4004, 3001, 5, False),
-                (4004, 3001, 6, True), (4004, 3001, 8, True),
-                (4003, 3004, None, True), (4003, 3004, 6, False),
-                (6204, 4132, None, False), (6201, 4130, None, True),
-                (6202, 4130, None, True), (1, 2, None, True),
-                (2, 1, 6, True), (3, 2, 8, True)):
+            (4004, 3001, None, False),
+            (4004, 3001, 1, False),
+            (4004, 3001, 3, False),
+            (4004, 3001, 5, False),
+            (4004, 3001, 6, True),
+            (4004, 3001, 8, True),
+            (4003, 3004, None, True),
+            (4003, 3004, 6, False),
+            (6204, 4132, None, False),
+            (6201, 4130, None, True),
+            (6202, 4130, None, True),
+            (1, 2, None, True),
+            (2, 1, 6, True),
+            (3, 2, 8, True),
+        ):
             for current in (False, True):
-                with self.subTest(width=width, height=height, orientation=orientation, current=current), tempfile.TemporaryDirectory() as directory:
+                with (
+                    self.subTest(
+                        width=width,
+                        height=height,
+                        orientation=orientation,
+                        current=current,
+                    ),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
                     root = Path(directory)
-                    reconstruction = Reconstruction(parse_args(['--photos', str(root),
-                        '--workspace', str(root)]), sys.executable)
+                    reconstruction = Reconstruction(
+                        parse_args(
+                            ["--photos", str(root), "--workspace", str(root)]
+                        ),
+                        sys.executable,
+                    )
                     reconstruction.assets.mkdir()
-                    reconstruction.identity = {'source_commit': 'a' * 40,
-                        'allocation_fingerprint': ALLOCATION_FINGERPRINT if current else '0' * 64}
-                    for name in ('loader_scratch_host', 'process_host', 'unknown_host', 'reserve_host'):
-                        setattr(reconstruction.args, name + '_bytes', 0)
+                    reconstruction.identity = {
+                        "source_commit": "a" * 40,
+                        "allocation_fingerprint": ALLOCATION_FINGERPRINT
+                        if current
+                        else "0" * 64,
+                    }
+                    for name in (
+                        "loader_scratch_host",
+                        "process_host",
+                        "unknown_host",
+                        "reserve_host",
+                    ):
+                        setattr(reconstruction.args, name + "_bytes", 0)
                     commands = []
-                    def native(command, *arguments, **kwargs):
+
+                    def native(
+                        command,
+                        *arguments,
+                        commands=commands,
+                        height=height,
+                        orientation=orientation,
+                        width=width,
+                        **kwargs,
+                    ):
                         commands.append(command)
-                        if command == 'photo_directory_summary':
+                        if command == "photo_directory_summary":
                             summary = photo_summary(width, height, orientation)
-                            summary['photos'][0]['path'] = 'DSC_0393.JPG'
+                            summary["photos"][0]["path"] = "DSC_0393.JPG"
                             return json.dumps(summary)
-                        self.assertEqual(command, 'feature_extractor')
-                        raise NativeFailure('test boundary')
-                    with patch.object(reconstruction, 'native', side_effect=native), \
-                         patch.object(reconstruction, 'resources', return_value={'host': 2**30, 'device': 2**30}):
+                        self.assertEqual(command, "feature_extractor")
+                        raise NativeFailure("test boundary")
+
+                    with (
+                        patch.object(
+                            reconstruction, "native", side_effect=native
+                        ),
+                        patch.object(
+                            reconstruction,
+                            "resources",
+                            return_value={"host": 2**30, "device": 2**30},
+                        ),
+                    ):
                         if refuses and not current:
-                            with self.assertRaisesRegex(ValueError, 'DSC_0393.JPG: effective working width.*matching native odd-width CUDA SIFT'):
+                            with self.assertRaisesRegex(
+                                ValueError,
+                                (
+                                    "DSC_0393.JPG: effective working width.*mat"
+                                    "ching native odd-width CUDA SIFT"
+                                ),
+                            ):
                                 reconstruction.prepare()
-                            self.assertEqual(commands, ['photo_directory_summary'])
+                            self.assertEqual(
+                                commands, ["photo_directory_summary"]
+                            )
                         else:
                             with self.assertRaises(NativeFailure):
                                 reconstruction.prepare()
-                            self.assertEqual(commands, ['photo_directory_summary', 'feature_extractor'])
+                            self.assertEqual(
+                                commands,
+                                [
+                                    "photo_directory_summary",
+                                    "feature_extractor",
+                                ],
+                            )
 
-    def test_resolution_report_distinguishes_geometry_from_explicit_resize(self):
+    def test_resolution_report_distinguishes_geometry_from_explicit_resize(
+        self,
+    ):
         import json
         from unittest.mock import patch
-        from colmap_reconstruction.cli import Reconstruction, parse_args
-        for cap in (-1, 1600):
-            with self.subTest(cap=cap), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                reconstruction = Reconstruction(parse_args(['--photos', str(root), '--workspace', str(root),
-                    '--max-image-size', str(cap)]), sys.executable)
-                reconstruction.assets.mkdir()
-                reconstruction.identity = {'source_commit': 'a' * 40}
-                with patch.object(reconstruction, 'native', return_value=json.dumps(photo_summary())):
-                    self.assertEqual(reconstruction.inspect_photos(), 4004)
-                report = json.loads((reconstruction.assets / 'resolution-intent.json').read_text())
-                self.assertEqual(report['original']['photos'][0]['width'], 4004)
-                self.assertEqual(report['extraction']['max_image_size'], 4004)
-                self.assertEqual(report['extraction']['working_dimensions'],
-                    [dict(path='photo.jpg', width=4004, height=3001)])
-                self.assertEqual(report['undistortion']['max_image_size'], cap)
-                self.assertEqual(report['undistortion']['geometric_options'],
-                    dict(blank_pixels=0.0, min_scale=0.2, max_scale=2.0))
-                self.assertIsNone(report['undistortion']['resolved_dimensions'])
-                self.assertEqual(report['stereo'], dict(max_image_size=-1, map_precision='float32'))
-                self.assertEqual(report['fusion']['max_image_size'], -1)
-                self.assertFalse(report['automatic_resource_resize'])
 
-    def test_dense_launch_uses_canonical_adaptive_backend_and_explicit_allowances(self):
         from colmap_reconstruction.cli import Reconstruction, parse_args
+
+        for cap in (-1, 1600):
+            with (
+                self.subTest(cap=cap),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                reconstruction = Reconstruction(
+                    parse_args(
+                        [
+                            "--photos",
+                            str(root),
+                            "--workspace",
+                            str(root),
+                            "--max-image-size",
+                            str(cap),
+                        ]
+                    ),
+                    sys.executable,
+                )
+                reconstruction.assets.mkdir()
+                reconstruction.identity = {"source_commit": "a" * 40}
+                with patch.object(
+                    reconstruction,
+                    "native",
+                    return_value=json.dumps(photo_summary()),
+                ):
+                    self.assertEqual(reconstruction.inspect_photos(), 4004)
+                report = json.loads(
+                    (
+                        reconstruction.assets / "resolution-intent.json"
+                    ).read_text()
+                )
+                self.assertEqual(report["original"]["photos"][0]["width"], 4004)
+                self.assertEqual(report["extraction"]["max_image_size"], 4004)
+                self.assertEqual(
+                    report["extraction"]["working_dimensions"],
+                    [dict(path="photo.jpg", width=4004, height=3001)],
+                )
+                self.assertEqual(report["undistortion"]["max_image_size"], cap)
+                self.assertEqual(
+                    report["undistortion"]["geometric_options"],
+                    dict(blank_pixels=0.0, min_scale=0.2, max_scale=2.0),
+                )
+                self.assertIsNone(report["undistortion"]["resolved_dimensions"])
+                self.assertEqual(
+                    report["stereo"],
+                    dict(max_image_size=-1, map_precision="float32"),
+                )
+                self.assertEqual(report["fusion"]["max_image_size"], -1)
+                self.assertFalse(report["automatic_resource_resize"])
+
+    def test_dense_launch_keeps_adaptive_backend_and_allowances(
+        self,
+    ):
+        from colmap_reconstruction.cli import Reconstruction, parse_args
+
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            argv = ['--photos', str(root), '--workspace', str(root)]
-            for name in ('loader-scratch-host', 'process-host', 'process-device',
-                         'unknown-host', 'unknown-device', 'reserve-host', 'reserve-device'):
-                argv += ['--' + name + '-bytes', '123']
-            args = parse_args(argv + ['--experimental-local', '--unknown-provenance', 'test-only'])
+            argv = ["--photos", str(root), "--workspace", str(root)]
+            for name in (
+                "loader-scratch-host",
+                "process-host",
+                "process-device",
+                "unknown-host",
+                "unknown-device",
+                "reserve-host",
+                "reserve-device",
+            ):
+                argv += ["--" + name + "-bytes", "123"]
+            args = parse_args(
+                argv
+                + ["--experimental-local", "--unknown-provenance", "test-only"]
+            )
             reconstruction = Reconstruction(args, sys.executable)
-            reconstruction.graph = {'phases': {'geo': {'requested_options': {}}}}
+            reconstruction.graph = {
+                "phases": {"geo": {"requested_options": {}}}
+            }
             command = reconstruction.dense_arguments()
-            for key in ('resolve_workspace_plan', 'auto_active_owners',
-                        'auto_phase_active_owners', 'observe_capacities'):
-                self.assertEqual(command[command.index('--' + key) + 1], '1')
-            self.assertEqual(command[command.index('--photo_source_storage') + 1], 'auto')
-            self.assertEqual(command[command.index('--unknown_host_bytes') + 1], '123')
-            self.assertNotIn('--PatchMatchStereo.depth_min', command)
-            self.assertNotIn('--PatchMatchStereo.depth_max', command)
+            for key in (
+                "resolve_workspace_plan",
+                "auto_active_owners",
+                "auto_phase_active_owners",
+                "observe_capacities",
+            ):
+                self.assertEqual(command[command.index("--" + key) + 1], "1")
+            self.assertEqual(
+                command[command.index("--photo_source_storage") + 1], "auto"
+            )
+            self.assertEqual(
+                command[command.index("--unknown_host_bytes") + 1], "123"
+            )
+            self.assertNotIn("--PatchMatchStereo.depth_min", command)
+            self.assertNotIn("--PatchMatchStereo.depth_max", command)
             self.assertEqual(args.max_image_size, -1)
 
     def test_incomplete_or_nonfinite_maps_are_not_success(self):
         import struct
+
         from colmap_reconstruction.cli import validate_dense_map
+
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'depth.bin'
-            for payload in (b'2&1&1&' + struct.pack('<f', 1),
-                            b'2&1&1&' + struct.pack('<ff', 1, float('nan')),
-                            b'1&1&1&' + struct.pack('<f', 1)):
+            path = Path(directory) / "depth.bin"
+            for payload in (
+                b"2&1&1&" + struct.pack("<f", 1),
+                b"2&1&1&" + struct.pack("<ff", 1, float("nan")),
+                b"1&1&1&" + struct.pack("<f", 1),
+            ):
                 path.write_bytes(payload)
                 with self.assertRaises(ValueError):
                     validate_dense_map(path, 2, 1, 1)
-            path.write_bytes(b'2&1&1&' + struct.pack('<ff', 1, 2))
+            path.write_bytes(b"2&1&1&" + struct.pack("<ff", 1, 2))
             validate_dense_map(path, 2, 1, 1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()
