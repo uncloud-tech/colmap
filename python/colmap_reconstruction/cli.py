@@ -933,13 +933,27 @@ resize/fallback."""
             image["path"]: image
             for image in self.resolution["extraction"]["working_dimensions"]
         }
-        dimensions = ",".join(
-            str(shapes[name]["width"]) + "x" + str(shapes[name]["height"])
-            for name in self.extraction_inventory["effective_order"]
+        dimensions = (
+            "\n".join(
+                str(shapes[name]["width"]) + "x" + str(shapes[name]["height"])
+                for name in self.extraction_inventory["effective_order"]
+            )
+            + "\n"
         )
+        dimensions_path = self.assets / "extraction-dimensions.txt"
+        if dimensions_path.exists():
+            if dimensions_path.read_text(encoding="ascii") != dimensions:
+                raise ValueError(
+                    "ordered SIFT dimensions changed; rerun for a fresh plan"
+                )
+        else:
+            with dimensions_path.open(
+                "x", encoding="ascii", newline="\n"
+            ) as stream:
+                stream.write(dimensions)
         arguments = [
-            "--dimensions",
-            dimensions,
+            "--dimensions_path",
+            dimensions_path,
             "--host_capacity_bytes",
             capacity["host"],
             "--device_capacity_bytes",

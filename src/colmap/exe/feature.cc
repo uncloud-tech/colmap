@@ -19,6 +19,7 @@
 #include "thirdparty/SiftGPU/SiftRequirements.h"
 
 #include <chrono>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 
@@ -71,16 +72,33 @@ void UpdateImageReaderOptionsFromCameraMode(ImageReaderOptions& options,
 // Metadata/CPU only: never initializes an extractor or warms its input history.
 int RunSiftExtractionPlan(int argc, char** argv) {
   try {
-    std::string dimensions;
+    std::string dimensions, dimensions_path;
+    bool dimensions_supplied = false, path_supplied = false;
     uint64_t host = 0, device = 0, disk = 0, hp = 0, dp = 0, hr = 0, dr = 0;
     // Keep byte parsing on the existing canonical adapter, without exposing
     // generic unsigned Boost options or broadening the base manager's API.
     class SiftPlanOptionManager : public OptionManager {
      public:
       using BaseOptionManager::AddDefaultByteOption;
+      void AddSequenceInput(const std::string& name,
+                            std::string* value,
+                            bool* supplied) {
+        desc_->add_options()(
+            name.c_str(),
+            boost::program_options::value<std::string>()->notifier(
+                [value, supplied](const std::string& text) {
+                  *value = text;
+                  *supplied = true;
+                }),
+            "Exactly one input: comma-separated dimensions or file with one "
+            "WIDTHxHEIGHT per line");
+        RegisterOption(name, value);
+      }
     };
     SiftPlanOptionManager options;
-    options.AddRequiredOption("dimensions", &dimensions);
+    options.AddSequenceInput("dimensions", &dimensions, &dimensions_supplied);
+    options.AddSequenceInput(
+        "dimensions_path", &dimensions_path, &path_supplied);
     options.AddDefaultByteOption("host_capacity_bytes", &host);
     options.AddDefaultByteOption("device_capacity_bytes", &device);
     options.AddDefaultByteOption("disk_capacity_bytes", &disk);
@@ -89,10 +107,14 @@ int RunSiftExtractionPlan(int argc, char** argv) {
     options.AddDefaultByteOption("reserve_host_bytes", &hr);
     options.AddDefaultByteOption("reserve_device_bytes", &dr);
     if (!options.Parse(argc, argv)) return EXIT_FAILURE;
+    if (dimensions_supplied == path_supplied ||
+        (dimensions_supplied && dimensions.empty()) ||
+        (path_supplied && dimensions_path.empty()))
+      throw std::invalid_argument(
+          "SIFT plan requires exactly one non-empty --dimensions or "
+          "--dimensions_path");
     std::vector<std::pair<int, int>> shapes;
-    std::istringstream sequence(dimensions);
-    std::string shape;
-    while (std::getline(sequence, shape, ',')) {
+    auto append_shape = [&shapes](const std::string& shape) {
       std::istringstream pair(shape);
       int w = 0, h = 0;
       char x = 0, tail = 0;
@@ -100,6 +122,20 @@ int RunSiftExtractionPlan(int argc, char** argv) {
         throw std::invalid_argument(
             "SIFT dimensions require ordered WIDTHxHEIGHT pairs");
       shapes.emplace_back(w, h);
+    };
+    std::string shape;
+    if (path_supplied) {
+      std::ifstream sequence(dimensions_path);
+      if (!sequence.is_open())
+        throw std::runtime_error("cannot open SIFT dimensions file: " +
+                                 dimensions_path);
+      while (std::getline(sequence, shape)) append_shape(shape);
+      if (sequence.bad() || !sequence.eof())
+        throw std::runtime_error("cannot read SIFT dimensions file: " +
+                                 dimensions_path);
+    } else {
+      std::istringstream sequence(dimensions);
+      while (std::getline(sequence, shape, ',')) append_shape(shape);
     }
     const auto r = siftgpu::SiftSequenceRequirements(shapes);
     const auto selected =

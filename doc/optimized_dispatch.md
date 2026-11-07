@@ -345,7 +345,12 @@ with host/device/disk byte figures, without resizing or falling back. Extraction
 uses one resizer/extractor thread to preserve the ordered input history; the
 requested thread setting remains available to later phases.
 
-`colmap sift_extraction_plan --dimensions 6048x4032,4032x6048` accepts ordered
+The photos CLI writes `planning/extraction-dimensions.txt` and passes
+`--dimensions_path FILE`, with one ordered `WIDTHxHEIGHT` pair per line. This
+avoids operating-system argument-length limits without limiting photo count.
+The file follows existing preview cleanup and approved-workspace copying.
+Legacy `--dimensions 6048x4032,4032x6048` remains supported; exactly one non-empty
+input source is required. Both forms accept ordered
 post-EXIF working dimensions and explicit `--host_capacity_bytes`,
 `--device_capacity_bytes`, `--disk_capacity_bytes`, `--policy_host_bytes`,
 `--policy_device_bytes`, `--reserve_host_bytes`, `--reserve_device_bytes`.

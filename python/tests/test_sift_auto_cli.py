@@ -110,3 +110,133 @@ class SiftAutoCliTest(unittest.TestCase):
                     )
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("canonical byte allowance", result.stderr)
+
+    def test_file_query_matches_legacy_ordered_query_and_policy(self):
+        import tempfile
+        from pathlib import Path
+
+        policy = [
+            "--policy_host_bytes",
+            "123",
+            "--policy_device_bytes",
+            "456",
+            "--reserve_host_bytes",
+            "7",
+            "--reserve_device_bytes",
+            "9",
+        ]
+        legacy = self.plan(2**40, 2**40, 2**40, *policy)
+        self.assertEqual(legacy.returncode, 0, legacy.stderr)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "dimensions.txt"
+            path.write_text(
+                "264x129\n256x129\n264x129\n257x129\n256x129\n264x130\n256x129\n"
+            )
+            result = subprocess.run(
+                [
+                    os.environ["COLMAP_TEST_EXECUTABLE"],
+                    "sift_extraction_plan",
+                    "--dimensions_path",
+                    str(path),
+                    "--host_capacity_bytes",
+                    str(2**40),
+                    "--device_capacity_bytes",
+                    str(2**40),
+                    "--disk_capacity_bytes",
+                    str(2**40),
+                    *policy,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                json.loads(result.stdout), json.loads(legacy.stdout)
+            )
+
+    def test_native_file_query_exceeds_single_argument_limit(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "dimensions.txt"
+            path.write_text("6048x4032\n6049x4032\n" * 7500)
+            self.assertGreater(path.stat().st_size, 128 * 1024)
+            result = subprocess.run(
+                [
+                    os.environ["COLMAP_TEST_EXECUTABLE"],
+                    "sift_extraction_plan",
+                    "--dimensions_path",
+                    str(path),
+                    "--host_capacity_bytes",
+                    str(2**40),
+                    "--device_capacity_bytes",
+                    str(2**40),
+                    "--disk_capacity_bytes",
+                    str(2**40),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            record = json.loads(result.stdout)
+            self.assertEqual(record["mode"], "resident")
+            self.assertEqual(record["retained_pyramid_width"], 12098)
+            self.assertEqual(record["input_history_bytes"], 97558272)
+
+    def test_native_input_sources_are_exclusive_and_fail_closed(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "dimensions.txt"
+            path.write_text("264x129\n")
+            for arguments in (
+                [],
+                ["--dimensions", ""],
+                ["--dimensions_path", ""],
+                ["--dimensions", "264x129", "--dimensions_path", str(path)],
+                ["--dimensions", "", "--dimensions_path", str(path)],
+            ):
+                with self.subTest(arguments=arguments):
+                    result = subprocess.run(
+                        [
+                            os.environ["COLMAP_TEST_EXECUTABLE"],
+                            "sift_extraction_plan",
+                            *arguments,
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("exactly one", result.stderr)
+            for content in ("", "264x129\ninvalid\n", "264x129\n\n"):
+                path.write_text(content)
+                result = subprocess.run(
+                    [
+                        os.environ["COLMAP_TEST_EXECUTABLE"],
+                        "sift_extraction_plan",
+                        "--dimensions_path",
+                        str(path),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertNotEqual(result.returncode, 0)
+            result = subprocess.run(
+                [
+                    os.environ["COLMAP_TEST_EXECUTABLE"],
+                    "sift_extraction_plan",
+                    "--dimensions_path",
+                    str(path.parent / "missing"),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("cannot open", result.stderr)

@@ -50,8 +50,8 @@ if command == 'reconstruction_info':
 Path(os.environ['TEST_CALLS']).read_text().splitlines()]
         if sum(call[0] == 'reconstruction_info' for call in calls) >= 3:
             \
-Path(os.environ['TEST_MUTATE_ON_REOBSERVE']).write_bytes(b'changed at launch \
-boundary')
+Path(os.environ['TEST_MUTATE_ON_REOBSERVE']).write_bytes(b'changed at \
+launch boundary')
     if len(sys.argv) > 2 and os.environ.get('TEST_BLOCK_QUERY'):
         with open(os.environ['TEST_BLOCK_QUERY'], 'w') as fifo:
             fifo.write(str(os.getpid()) + '\\n')
@@ -80,11 +80,25 @@ in json.loads(os.environ.get('TEST_INVENTORY', '[]')) if '--gpu_index' in \
 sys.argv and d['ordinal'] == int(sys.argv[sys.argv.index('--gpu_index') + \
 1])), 'GPU-test')),
         device_inventory=json.loads(os.environ.get('TEST_INVENTORY', \
-'[{"ordinal":0,"usable":true,"compute_capability_major":8,"compute_capability\
-_minor":9,"available_device_bytes":"17179869184","device_uuid":"GPU-test"},{"\
-ordinal":2,"usable":true,"compute_capability_major":8,"compute_capability_min\
-or":9,"available_device_bytes":"17179869184","device_uuid":"GPU-test"}]')))))
+'[{"ordinal":0,"usable":true,"compute_capability_major":8,"compute_capabilit\
+y_minor":9,"available_device_bytes":"17179869184","device_uuid":"GPU-test"},\
+{"ordinal":2,"usable":true,"compute_capability_major":8,"compute_capability_\
+minor":9,"available_device_bytes":"17179869184","device_uuid":"GPU-test"}]')\
+))))
 elif command == 'sift_extraction_plan':
+    if '--dimensions_path' in sys.argv:
+        dimensions = Path(sys.argv[sys.argv.index('--dimensions_path') + 1])
+        assert dimensions.parent.name == 'planning'
+        rows = dimensions.read_text().splitlines()
+        if os.environ.get('TEST_EXIF'):
+            assert rows == ['3001x4004']
+        count = int(os.environ.get('TEST_MANY_PHOTOS', '0'))
+        if count:
+            assert len(dimensions.read_bytes()) > 128 * 1024
+            assert rows == [f'{4004 + 4 * (i % 2)}x3001' for i in \
+range(count)]
+    elif os.environ.get('TEST_MANY_PHOTOS'):
+        raise AssertionError('large sequence must use file transport')
     print(json.dumps(dict(schema_version=1, \
 mode=os.environ.get('TEST_SIFT_MODE','resident'),
         reason='synthetic boundary fixture', num_threads=1, \
@@ -100,8 +114,8 @@ elif os.environ.get('TEST_SIDECAR') and command == 'feature_extractor':
     assert image_list.read_bytes() == b'photo.jpg\\n'
     sys.exit(17)  # List really consumed at the native boundary; no GPU \
 claim.
-elif os.environ.get('TEST_SFM_PROCEED') and command in ('feature_extractor', \
-'exhaustive_matcher'):
+elif os.environ.get('TEST_SFM_PROCEED') and command in \
+('feature_extractor', 'exhaustive_matcher'):
     pass
 elif os.environ.get('TEST_SFM_PROCEED') and command == 'mapper':
     (Path(sys.argv[sys.argv.index('--output_path') + 1]) / '0').mkdir()
@@ -132,13 +146,17 @@ in ('photo', 'geo')},
                      width=6405, height=4187) for index in (0, 1)], \
 input_files=[])))
 elif command == 'photo_directory_summary':
+    count = int(os.environ.get('TEST_MANY_PHOTOS', '0'))
+    photos = ([dict(path=f'photo-{i:05d}.jpg', width=4004 + 4 * (i % 2),
+                   height=3001, orientation=None) for i in range(count)]
+              if count else [dict(path='photo.jpg', width=4004, height=3001,
+                   orientation=int(os.environ['TEST_EXIF']) if \
+os.environ.get('TEST_EXIF') else None)])
     print(json.dumps(dict(schema_version=1, header_only=True, \
 orientation_applied=False,
-        photo_count=1, photos=[dict(path='photo.jpg', width=4004, \
-height=3001, orientation=int(os.environ['TEST_EXIF']) if \
-os.environ.get('TEST_EXIF') else None)],
-        non_image_files=['photo.xmp'] if os.environ.get('TEST_SIDECAR') else \
-[],
+        photo_count=len(photos), photos=photos,
+        non_image_files=['photo.xmp'] if os.environ.get('TEST_SIDECAR') \
+else [],
         problems=[], build=dict(revision='a' * 8, cuda_compiled=True))))
 else:
     print('TEST native execution reached', file=sys.stderr)
@@ -422,6 +440,21 @@ return_value=candidates):
         self.assertFalse(self.workspace.exists())
         self.assertFalse(self.calls.exists())
 
+    def test_large_ordered_sequence_uses_owned_file_not_an_argv_payload(self):
+        self.env["TEST_MANY_PHOTOS"] = "15000"
+        result = self.invoke("--plan-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        query = next(
+            call
+            for call in self.commands()
+            if call[0] == "sift_extraction_plan"
+        )
+        self.assertIn("--dimensions_path", query)
+        self.assertNotIn("--dimensions", query)
+        self.assertTrue(all(len(arg.encode()) < 128 * 1024 for arg in query))
+        self.assert_preview_only()
+        self.assertEqual(list(self.root.glob("colmap-preview-*")), [])
+
     def test_auto_sift_selection_is_process_wide_and_serialized(self):
         result = self.invoke("--yes", "--threads", "3")
         calls = self.commands()
@@ -497,7 +530,8 @@ return_value=candidates):
             for call in self.commands()
             if call[0] == "sift_extraction_plan"
         )
-        self.assertEqual(plan[plan.index("--dimensions") + 1], "3001x4004")
+        self.assertIn("--dimensions_path", plan)
+        self.assertNotIn("--dimensions", plan)
         self.assert_preview_only()
 
     def test_admitted_extraction_preserves_selected_options(self):
