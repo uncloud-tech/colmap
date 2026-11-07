@@ -15,6 +15,7 @@ if(CUDA_ENABLED OR HIP_ENABLED)
     add_compile_definitions(SIFTGPU_CUDA_ENABLED)
     set(OPTIONAL_GPU_SRCS
         StreamedPlane.h
+        SiftRequirements.h
         CudaImageDomain.h
         CuTexImage.h CuTexImage.cpp
         ProgramCU.cu

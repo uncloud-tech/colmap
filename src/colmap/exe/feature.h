@@ -63,6 +63,7 @@ void RunGuidedGeometricVerifierImpl(
     int num_threads,
     std::function<bool()> check_if_stopped = {});
 
+int RunSiftExtractionPlan(int argc, char** argv);
 int RunFeatureExtractor(int argc, char** argv);
 int RunFeatureImporter(int argc, char** argv);
 int RunExhaustiveMatcher(int argc, char** argv);

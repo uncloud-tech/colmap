@@ -1309,6 +1309,10 @@ void SiftGPU::SaveSIFT(const char * szFileName)
 	_pyramid->SaveSIFT(szFileName);
 }
 
+size_t SiftGPU::GetResidentHostCapacityBytes() const {
+  return _pyramid ? _pyramid->HostCapacityBytes() : 0;
+}
+
 int SiftGPU::GetFeatureNum()
 {
 	return _pyramid->GetFeatureNum();

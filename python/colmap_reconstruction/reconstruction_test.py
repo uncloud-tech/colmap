@@ -14,6 +14,25 @@ def photo_summary(width=4004, height=3001, orientation=None):
 
 
 class FrontendTest(unittest.TestCase):
+    def setUp(self):
+        # Legacy phase-isolation tests prescribe selection; installed subprocess
+        # tests and CPU-native tests cover the real selection protocol.
+        from unittest.mock import patch
+        from colmap_reconstruction.cli import parse_args
+        def args_with_policy(*args, **kwargs):
+            result = parse_args(*args, **kwargs)
+            for name in ('process_device_bytes', 'unknown_device_bytes', 'reserve_device_bytes'):
+                if getattr(result, name) is None:
+                    setattr(result, name, 0)
+            return result
+        parser = patch('colmap_reconstruction.cli.parse_args', side_effect=args_with_policy)
+        parser.start()
+        self.addCleanup(parser.stop)
+        selection = patch('colmap_reconstruction.cli.Reconstruction.select_extraction',
+            return_value=dict(mode='resident'))
+        selection.start()
+        self.addCleanup(selection.stop)
+
     def test_undistortion_budget_is_scoped_on_success_and_native_failure(self):
         import json
         from unittest.mock import patch
@@ -114,7 +133,7 @@ class FrontendTest(unittest.TestCase):
                         ['#camera.jpg', 'a.jpg', 'a/z.jpg', 'café photo.jpg'] if sidecars else selected)
                     raise NativeFailure('extraction boundary')
                 with patch.object(reconstruction, 'native', side_effect=native), \
-                     patch.object(reconstruction, 'resources', return_value={'host': 2**30}):
+                     patch.object(reconstruction, 'resources', return_value={'host': 2**30, 'device': 2**30}):
                     with self.assertRaisesRegex(NativeFailure, 'extraction boundary'):
                         reconstruction.prepare()
                 self.assertEqual({path: path.read_bytes() for path in originals}, originals)
@@ -165,7 +184,7 @@ class FrontendTest(unittest.TestCase):
                     self.assertEqual(arguments[arguments.index('--FeatureExtraction.max_image_size') + 1], '4004')
                     self.assertEqual(arguments[arguments.index('--FeatureExtraction.use_gpu') + 1], 'true')
                     raise failure
-                with patch.object(reconstruction, 'resources', return_value={'host': 2000}), \
+                with patch.object(reconstruction, 'resources', return_value={'host': 2000, 'device': 2000}), \
                      patch.object(reconstruction, 'native', side_effect=native):
                     with self.assertRaises(NativeFailure) as raised:
                         reconstruction.prepare()
@@ -238,7 +257,7 @@ class FrontendTest(unittest.TestCase):
                         self.assertEqual(command, 'feature_extractor')
                         raise NativeFailure('test boundary')
                     with patch.object(reconstruction, 'native', side_effect=native), \
-                         patch.object(reconstruction, 'resources', return_value={'host': 2**30}):
+                         patch.object(reconstruction, 'resources', return_value={'host': 2**30, 'device': 2**30}):
                         if refuses and not current:
                             with self.assertRaisesRegex(ValueError, 'DSC_0393.JPG: effective working width.*matching native odd-width CUDA SIFT'):
                                 reconstruction.prepare()

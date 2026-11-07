@@ -95,6 +95,10 @@ public:
 public:
 	vector<float>	_keypoint_buffer;
 	vector<float>	_descriptor_buffer;
+    size_t HostCapacityBytes() const {
+      return (_keypoint_buffer.capacity()+_descriptor_buffer.capacity())*sizeof(float)+
+             _keypoint_index.capacity()*sizeof(int);
+    }
 private:
 	inline  void PrepareBuffer();
 protected:

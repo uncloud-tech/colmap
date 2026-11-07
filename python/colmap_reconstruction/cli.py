@@ -257,6 +257,7 @@ class Reconstruction:
         self.resources()
         self.approved_device_uuid = self.observation['device_uuid']
         self.extraction_limit = self.inspect_photos()
+        self.extraction_selection = self.select_extraction(self.observation['effective_capacity_bytes'])
         if self.photo_snapshot() != self.approved_photos:
             raise ValueError('photo inputs changed during inspection; rerun for a fresh plan')
         self.preview_options = dict(vars(self.args))
@@ -272,8 +273,8 @@ class Reconstruction:
             hardware_not_exported_by_native='CPU model: UNKNOWN',
             resource_policy=self.resource_policy,
             capacity_semantics='FREE snapshot, not reserved; reobserved/admitted at native boundaries',
-            effective_dispatch=dict(extraction=dict(backend='CUDA SIFT', threads=self.args.threads,
-                    gpu_index=self.args.gpu_index),
+            effective_dispatch=dict(extraction=dict(backend='CUDA SIFT', threads=1,
+                    gpu_index=self.args.gpu_index, selection=self.extraction_selection),
                 matching=dict(backend='CUDA SIFT exhaustive', threads=self.args.threads,
                     gpu_index=self.args.gpu_index),
                 mapping=dict(backend='incremental CPU Ceres', threads=self.args.threads),
@@ -410,6 +411,7 @@ class Reconstruction:
             ordering = 'native image-list UTF-8 byte string sort (may differ from discovery)'
         inventory = dict(selected_photos=selected, effective_order=effective_order,
                          ordering=ordering, excluded_non_image_files=summary['non_image_files'])
+        self.extraction_inventory = inventory
         write_json(self.assets / 'extraction-inventory.json', inventory)
         print('Extraction inventory: ' + json.dumps(inventory), file=sys.stderr)
         write_json(self.assets / 'photos.json', summary)
@@ -430,11 +432,52 @@ class Reconstruction:
         print('Resolution intent (not approval): ' + json.dumps(resolution, sort_keys=True), file=sys.stderr)
         return extraction_limit
 
+    def select_extraction(self, capacity):
+        a = self.args
+        shapes = {image['path']: image for image in self.resolution['extraction']['working_dimensions']}
+        dimensions = ','.join(str(shapes[name]['width']) + 'x' + str(shapes[name]['height'])
+            for name in self.extraction_inventory['effective_order'])
+        arguments = ['--dimensions', dimensions,
+            '--host_capacity_bytes', capacity['host'], '--device_capacity_bytes', capacity['device'],
+            '--disk_capacity_bytes', shutil.disk_usage(self.assets.parent).free,
+            '--policy_host_bytes', a.loader_scratch_host_bytes + a.process_host_bytes + a.unknown_host_bytes,
+            '--policy_device_bytes', a.process_device_bytes + a.unknown_device_bytes,
+            '--reserve_host_bytes', a.reserve_host_bytes, '--reserve_device_bytes', a.reserve_device_bytes]
+        decision = json.loads(self.native('sift_extraction_plan', *arguments, capture=True))
+        if (decision.get('schema_version') != 1 or decision.get('mode') not in ('resident', 'streamed', 'refused')
+                or decision.get('num_threads') != 1 or decision.get('mode_transitions') is not False
+                or any(type(decision.get(key)) is not int or decision[key] < 0 for key in (
+                    'resident_host_required_bytes', 'resident_device_required_bytes',
+                    'stream_host_required_bytes', 'stream_device_required_bytes',
+                    'streaming_gpu_bytes', 'streaming_host_bytes', 'scratch_static_bytes'))):
+            raise ValueError('invalid native SIFT selection inventory; install matching executable')
+        write_json(self.assets / ('extraction-selection-%03d.json' % self.process.sequence), decision)
+        print('SIFT selection: ' + json.dumps(decision, sort_keys=True), flush=True)
+        if decision['mode'] == 'refused':
+            raise ValueError('SIFT neither mode admitted: ' + json.dumps(decision, sort_keys=True))
+        return decision
+
     def prepare(self):
         a = self.args
         extraction_limit = self.extraction_limit if hasattr(self, 'extraction_limit') else self.inspect_photos()
         common = ['--database_path', self.workspace / 'database.db']
-        phase_capacity = self.resources()['host']
+        capacity = self.resources()
+        phase_capacity = capacity['host']
+        selected = self.select_extraction(capacity)
+        approved = getattr(self, 'extraction_selection', selected)
+        if selected['mode'] != approved['mode']:
+            raise ValueError('SIFT mode no longer admitted as approved; rerun for a fresh plan; no mode transition')
+        self.extraction_selection = selected
+        streaming = selected['mode'] == 'streamed'
+        sift_arguments = ['--SiftExtraction.streaming', str(streaming).lower(),
+            '--SiftExtraction.auto_resource_check', 'true',
+            '--SiftExtraction.device_budget_bytes', capacity['device'],
+            '--SiftExtraction.policy_device_bytes', a.process_device_bytes + a.unknown_device_bytes,
+            '--SiftExtraction.reserve_device_bytes', a.reserve_device_bytes]
+        if streaming:
+            sift_arguments += ['--SiftExtraction.streaming_gpu_bytes', selected['streaming_gpu_bytes'],
+                '--SiftExtraction.streaming_host_bytes', selected['streaming_host_bytes'],
+                '--SiftExtraction.streaming_scratch_path', self.workspace]
         previous_host_budget = self.process.host_budget_bytes
         self.process.host_budget_bytes = phase_capacity
         try:
@@ -442,7 +485,7 @@ class Reconstruction:
                 '--FeatureExtraction.max_image_size', str(extraction_limit),
                 '--FeatureExtraction.type', 'SIFT', '--FeatureExtraction.use_gpu', 'true',
                 '--SiftExtraction.first_octave', '-1', '--FeatureExtraction.gpu_index', a.gpu_index,
-                '--FeatureExtraction.num_threads', a.threads,
+                '--FeatureExtraction.num_threads', 1, *sift_arguments,
                 '--FeatureExtraction.host_budget_bytes', phase_capacity,
                 '--FeatureExtraction.policy_host_bytes', a.loader_scratch_host_bytes + a.process_host_bytes + a.unknown_host_bytes,
                 '--FeatureExtraction.reserve_host_bytes', a.reserve_host_bytes)

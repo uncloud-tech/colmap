@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 
 namespace colmap {
 inline uint64_t ExtractionAdd(uint64_t a, uint64_t b) {
@@ -87,7 +88,13 @@ class ExtractionBudget {
       const auto next = ExtractionAdd(state_->used, bytes);
       if (state_->cancelled || !state_->Fits(next))
         throw std::runtime_error(
-            "extraction logical host growth refused; workers must drain "
+            "extraction logical host growth refused before allocation: "
+            "payload=" +
+            std::to_string(next) +
+            " capacity=" + std::to_string(state_->capacity) +
+            " policy=" + std::to_string(state_->policy) +
+            " reserve=" + std::to_string(state_->reserve) +
+            "; free host memory/increase cap; workers must drain "
             "(not a physical-fit guarantee)");
       state_->used = next;
       state_->peak = std::max(state_->peak, next);

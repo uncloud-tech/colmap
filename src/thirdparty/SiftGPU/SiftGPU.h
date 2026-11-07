@@ -27,6 +27,7 @@
 
 #ifndef GPU_SIFT_H
 #define GPU_SIFT_H
+#include <stddef.h>
 
 #if  defined(_WIN32)
 	#ifdef SIFTGPU_DLL
@@ -160,6 +161,7 @@ public:
 	SIFTGPU_EXPORT virtual void SetImageList(int nimage, const char** filelist);
 	//get the number of SIFT features in current image
 	SIFTGPU_EXPORT virtual int	GetFeatureNum();
+    SIFTGPU_EXPORT size_t GetResidentHostCapacityBytes() const;
 	//save the SIFT result as a ANSCII/BINARY file
 	SIFTGPU_EXPORT virtual void SaveSIFT(const char * szFileName);
 	//Copy the SIFT result to two vectors

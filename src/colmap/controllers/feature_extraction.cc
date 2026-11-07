@@ -653,7 +653,8 @@ class FeatureExtractorController : public Thread {
       if (budget_)
         admit_header = [&](int w, int h, int channels) {
           const int max_size = extraction_options_.EffMaxImageSize();
-          if (extraction_options_.sift->streaming &&
+          if ((extraction_options_.sift->streaming ||
+               extraction_options_.sift->auto_resource_check) &&
               (w > max_size || h > max_size))
             throw std::invalid_argument(
                 "SIFT streaming refuses implicit image resizing; input exceeds "

@@ -171,6 +171,7 @@ CuTexImage::CuTexImage(int width, int height, int nchannel, GLuint pbo)
 
 CuTexImage::~CuTexImage()
 {
+    if(resource_budget_) resource_budget_->Release(_numBytes);
 
 
 	if(_fromPBO)
@@ -197,7 +198,10 @@ bool CuTexImage::InitTexture(int width, int height, int nchannel)
 	_imgHeight = height;
 	_numChannel = min(max(nchannel, 1), 4);
 
-	const size_t size = width * height * _numChannel * sizeof(float);
+	if (siftgpu::active_sift_device_budget &&
+      (width < 0 || height < 0 || uint64_t(width)*height*_numChannel >= INT32_MAX))
+    throw std::runtime_error("SIFT CUDA texture integer domain refused before allocation");
+	const size_t size = size_t(width) * height * _numChannel * sizeof(float);
 
   if (size < 0) {
     return false;
@@ -211,12 +215,15 @@ bool CuTexImage::InitTexture(int width, int height, int nchannel)
 
 	if(size <= _numBytes) return true;
 
+	if (!resource_budget_) resource_budget_=siftgpu::active_sift_device_budget;
+    if(resource_budget_) resource_budget_->Replace(_numBytes,size);
 	if(_cuData) cudaFree(_cuData);
 
 	//allocate the array data
 	const cudaError_t status = cudaMalloc(&_cuData, _numBytes = size);
 
   if (status != cudaSuccess) {
+    if(resource_budget_) resource_budget_->Release(_numBytes);
     _cuData = NULL;
     _numBytes = 0;
     return false;

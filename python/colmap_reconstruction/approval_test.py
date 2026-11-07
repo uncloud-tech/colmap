@@ -57,6 +57,12 @@ if command == 'reconstruction_info':
         available_device_bytes=(int(Path(os.environ['TEST_FREE']).read_text()) if Path(os.environ['TEST_FREE']).exists() else 16 * 1024**3),
         device_uuid=(Path(os.environ['TEST_DEVICE']).read_text() if Path(os.environ['TEST_DEVICE']).exists() else next((d['device_uuid'] for d in json.loads(os.environ.get('TEST_INVENTORY', '[]')) if '--gpu_index' in sys.argv and d['ordinal'] == int(sys.argv[sys.argv.index('--gpu_index') + 1])), 'GPU-test')),
         device_inventory=json.loads(os.environ.get('TEST_INVENTORY', '[{"ordinal":0,"usable":true,"compute_capability_major":8,"compute_capability_minor":9,"available_device_bytes":"17179869184","device_uuid":"GPU-test"},{"ordinal":2,"usable":true,"compute_capability_major":8,"compute_capability_minor":9,"available_device_bytes":"17179869184","device_uuid":"GPU-test"}]')))))
+elif command == 'sift_extraction_plan':
+    print(json.dumps(dict(schema_version=1, mode=os.environ.get('TEST_SIFT_MODE','resident'),
+        reason='synthetic boundary fixture', num_threads=1, mode_transitions=False,
+        resident_host_required_bytes=100, resident_device_required_bytes=200,
+        stream_host_required_bytes=50, stream_device_required_bytes=60,
+        streaming_gpu_bytes=1000, streaming_host_bytes=1000, scratch_static_bytes=500)))
 elif os.environ.get('TEST_SIDECAR') and command == 'feature_extractor':
     image_list = Path(sys.argv[sys.argv.index('--image_list_path') + 1])
     workspace = Path(sys.argv[sys.argv.index('--database_path') + 1]).parent
@@ -87,7 +93,7 @@ elif os.environ.get('TEST_SFM_PROCEED') and command == 'optimized_dense_plan':
                      width=6405, height=4187) for index in (0, 1)], input_files=[])))
 elif command == 'photo_directory_summary':
     print(json.dumps(dict(schema_version=1, header_only=True, orientation_applied=False,
-        photo_count=1, photos=[dict(path='photo.jpg', width=4004, height=3001, orientation=None)],
+        photo_count=1, photos=[dict(path='photo.jpg', width=4004, height=3001, orientation=int(os.environ['TEST_EXIF']) if os.environ.get('TEST_EXIF') else None)],
         non_image_files=['photo.xmp'] if os.environ.get('TEST_SIDECAR') else [],
         problems=[], build=dict(revision='a' * 8, cuda_compiled=True))))
 else:
@@ -115,7 +121,7 @@ else:
     def assert_preview_only(self):
         self.assertFalse(self.workspace.exists())
         self.assertEqual((self.photos / 'photo.jpg').read_bytes(), b'original')
-        self.assertTrue(all(call[0] in ('reconstruction_info', 'photo_directory_summary')
+        self.assertTrue(all(call[0] in ('reconstruction_info', 'photo_directory_summary', 'sift_extraction_plan')
                             for call in self.commands()))
 
     def interactive(self):
@@ -293,6 +299,49 @@ with patch.object(tempfile, '_candidate_tempdir_list', return_value=candidates):
         self.assertFalse(self.workspace.exists())
         self.assertFalse(self.calls.exists())
 
+    def test_auto_sift_selection_is_process_wide_and_serialized(self):
+        result = self.invoke('--yes', '--threads', '3')
+        calls = self.commands()
+        self.assertIn('sift_extraction_plan', [call[0] for call in calls], result.stderr)
+        extraction = next(call for call in calls if call[0] == 'feature_extractor')
+        self.assertEqual(extraction[extraction.index('--FeatureExtraction.num_threads') + 1], '1')
+        self.assertEqual(extraction[extraction.index('--SiftExtraction.auto_resource_check') + 1], 'true')
+        self.assertEqual(extraction[extraction.index('--SiftExtraction.streaming') + 1], 'false')
+
+    def test_streamed_selection_passes_owned_scratch_and_component_budgets(self):
+        self.env['TEST_SIFT_MODE'] = 'streamed'
+        result = self.invoke('--yes')
+        self.assertEqual(result.returncode, 2)  # prescribed native exit, not GPU proof
+        extraction = next(call for call in self.commands() if call[0] == 'feature_extractor')
+        for option, expected in {
+                '--SiftExtraction.streaming': 'true',
+                '--SiftExtraction.streaming_gpu_bytes': '1000',
+                '--SiftExtraction.streaming_host_bytes': '1000',
+                '--SiftExtraction.streaming_scratch_path': str(self.workspace)}.items():
+            self.assertEqual(extraction[extraction.index(option) + 1], expected)
+        plan = json.loads((self.workspace / 'planning/approved-plan.json').read_text())
+        self.assertEqual(plan['effective_dispatch']['extraction']['selection']['mode'], 'streamed')
+        self.assertEqual(plan['effective_dispatch']['extraction']['threads'], 1)
+
+    def test_neither_fit_plan_preserves_actionable_phase_bounds_without_launch(self):
+        self.env['TEST_SIFT_MODE'] = 'refused'
+        result = self.invoke('--yes')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('SIFT neither mode admitted', result.stderr)
+        self.assertIn('resident_device_required_bytes', result.stderr)
+        self.assertIn('stream_host_required_bytes', result.stderr)
+        self.assertIn('scratch_static_bytes', result.stderr)
+        self.assertNotIn('feature_extractor', [call[0] for call in self.commands()])
+        self.assertFalse(self.workspace.exists())
+
+    def test_selection_uses_exif_working_dimensions_without_resizing(self):
+        self.env['TEST_EXIF'] = '6'
+        result = self.invoke('--plan-only')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        plan = next(call for call in self.commands() if call[0] == 'sift_extraction_plan')
+        self.assertEqual(plan[plan.index('--dimensions') + 1], '3001x4004')
+        self.assert_preview_only()
+
     def test_admitted_extraction_preserves_selected_options(self):
         result = self.invoke('--yes', '--threads', '3', '--gpu-index', '2',
                              '--max-image-size', '1600', '--source-cap', '8',
@@ -305,7 +354,7 @@ with patch.object(tempfile, '_candidate_tempdir_list', return_value=candidates):
                 '--FeatureExtraction.max_image_size': '4004',
                 '--FeatureExtraction.type': 'SIFT', '--FeatureExtraction.use_gpu': 'true',
                 '--SiftExtraction.first_octave': '-1', '--FeatureExtraction.gpu_index': '2',
-                '--FeatureExtraction.num_threads': '3'}.items():
+                '--FeatureExtraction.num_threads': '1'}.items():
             self.assertEqual(extraction[extraction.index(option) + 1], expected)
         plan = json.loads((self.workspace / 'planning/approved-plan.json').read_text())
         for key, expected in dict(threads=3, gpu_index=2, max_image_size=1600,
