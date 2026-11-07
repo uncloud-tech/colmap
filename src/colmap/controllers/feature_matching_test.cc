@@ -4,9 +4,9 @@
 
 #include "colmap/controllers/matching_resource.h"
 #include "colmap/feature/types.h"
-#include "colmap/util/file.h"
 #include "colmap/retrieval/visual_index.h"
 #include "colmap/scene/synthetic.h"
+#include "colmap/util/file.h"
 #include "colmap/util/testing.h"
 
 #include <fstream>
@@ -78,7 +78,8 @@ TEST(CreateExhaustiveFeatureMatcher, BudgetedWritesBackpressureAndFailure) {
     uint64_t largest = 0;
     for (const auto& a : inventory.images)
       for (const auto& b : inventory.images)
-        largest = std::max(largest, inventory.PairPayload(a.first, b.first, options));
+        largest =
+            std::max(largest, inventory.PairPayload(a.first, b.first, options));
     options.host_budget_bytes = MatchingMargined(persistent + largest, 0, 0);
     auto result = std::make_shared<FeatureMatchingResult>();
     auto matcher = CreateExhaustiveFeatureMatcher(
@@ -87,7 +88,8 @@ TEST(CreateExhaustiveFeatureMatcher, BudgetedWritesBackpressureAndFailure) {
     matcher->AddCallback(kFeatureMatchingAdmissionWait, [&] { ++waits; });
     matcher->AddCallback(kFeatureMatchingBeforeWrite, [&] {
       ++writes;
-      if (fail_writer) throw std::runtime_error("injected matching writer failure");
+      if (fail_writer)
+        throw std::runtime_error("injected matching writer failure");
     });
     matcher->Start();
     matcher->Wait();
@@ -119,10 +121,18 @@ TEST(CreateExhaustiveFeatureMatcher, BudgetedWorkerGrowthAndCancellationDrain) {
     FeatureMatchingOptions options;
     options.use_gpu = false;
     options.num_threads = 1;
-    options.host_budget_bytes = 64 * 1024 * 1024;
+    const auto inventory = MatchingInventory::Read(*database, options);
+    options.host_budget_bytes =
+        MatchingMargined(MatchingAdd(inventory.HostPersistent(options, 1, 1, 1),
+                                     inventory.LargestPairPayload(options)),
+                         0,
+                         0);
     auto result = std::make_shared<FeatureMatchingResult>();
-    auto matcher = CreateExhaustiveFeatureMatcher(
-        ExhaustivePairingOptions(), options, TwoViewGeometryOptions(), path, result);
+    auto matcher = CreateExhaustiveFeatureMatcher(ExhaustivePairingOptions(),
+                                                  options,
+                                                  TwoViewGeometryOptions(),
+                                                  path,
+                                                  result);
     bool injected = false;
     matcher->AddCallback(kFeatureMatchingBeforeMatch, [&] {
       if (injected) return;
@@ -147,9 +157,11 @@ TEST(CreateExhaustiveFeatureMatcher, BudgetedWorkerGrowthAndCancellationDrain) {
     EXPECT_EQ(result->live_host_bytes, 0);
     EXPECT_EQ(result->live_device_bytes, 0);
     if (!cancel) {
-      try { std::rethrow_exception(result->error); }
-      catch (const std::runtime_error& error) {
-        EXPECT_NE(std::string(error.what()).find("shape changed"), std::string::npos);
+      try {
+        std::rethrow_exception(result->error);
+      } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("shape changed"),
+                  std::string::npos);
       }
     }
   }

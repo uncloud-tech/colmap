@@ -5,6 +5,8 @@
 #include "colmap/scene/synthetic.h"
 #include "colmap/util/testing.h"
 
+#include <stdexcept>
+
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <sqlite3.h>
@@ -126,6 +128,74 @@ TEST(FeatureMatcherCache, FindImagePosePriorOrNullWithoutPriors) {
     const PosePrior* prior = cache.FindImagePosePriorOrNull(image.ImageId());
     EXPECT_EQ(prior, nullptr);
   }
+}
+
+TEST(FeatureMatcherCache,
+     BudgetSelectedCapacityKeepsPinsAndReloadsAfterFailure) {
+  auto data = CreateTestData(3);
+  FeatureMatcherCache cache(100, data.database);
+  cache.SetPayloadCacheCapacity(1);
+  EXPECT_EQ(cache.PayloadCacheCapacity(), 1);
+  const auto ids = cache.GetImageIds();
+  ASSERT_EQ(ids.size(), 3);
+  bool fail = false;
+  size_t loads = 0;
+  cache.SetMatchingShapeValidator([&](Database&, image_t) {
+    ++loads;
+    if (fail) throw std::runtime_error("injected cache load failure");
+  });
+  const auto keys = cache.GetKeypoints(ids[0]);
+  const auto descriptors = cache.GetDescriptors(ids[0]);
+  const auto index = cache.GetFeatureDescriptorIndexCache().Get(ids[0]);
+  const auto count = loads;
+  EXPECT_EQ(cache.GetKeypoints(ids[0]), keys);
+  EXPECT_EQ(cache.GetDescriptors(ids[0]), descriptors);
+  EXPECT_EQ(loads, count);  // Real hits, not a loader called on every Get.
+  cache.GetKeypoints(ids[1]);
+  cache.GetDescriptors(ids[2]);  // Independent LRU membership.
+  cache.GetFeatureDescriptorIndexCache().Get(ids[1]);
+  EXPECT_EQ(*keys, data.database->ReadKeypoints(ids[0]));
+  EXPECT_EQ(descriptors->data, data.database->ReadDescriptors(ids[0]).data);
+  EXPECT_NE(cache.GetKeypoints(ids[0]), keys);
+  EXPECT_NE(cache.GetDescriptors(ids[0]), descriptors);
+  EXPECT_NE(cache.GetFeatureDescriptorIndexCache().Get(ids[0]), index);
+  EXPECT_GT(loads, count);
+  // An evicted-but-pinned object survives a failing replacement; the failed
+  // LRU future is evicted, allowing an ordinary subsequent reload.
+  cache.GetDescriptors(ids[1]);
+  fail = true;
+  EXPECT_THROW(cache.GetDescriptors(ids[0]), std::runtime_error);
+  EXPECT_EQ(descriptors->data, data.database->ReadDescriptors(ids[0]).data);
+  fail = false;
+  EXPECT_EQ(cache.GetDescriptors(ids[0])->data, descriptors->data);
+  EXPECT_ANY_THROW(cache.SetPayloadCacheCapacity(2));
+}
+
+TEST(FeatureMatcherCache, TrainedIndexReloadPreservesSearch) {
+  auto data = CreateTestData(1);
+  const auto id = data.database->ReadAllImages().front().ImageId();
+  data.database->ClearDescriptors();
+  FeatureDescriptors descriptors(FeatureExtractorType::SIFT,
+                                 FeatureDescriptorsData(512, 128));
+  for (int row = 0; row < 512; ++row)
+    for (int col = 0; col < 128; ++col)
+      descriptors.data(row, col) = (row * 37 + col * 19 + row / 4) % 256;
+  data.database->WriteDescriptors(id, descriptors);
+  data.database->UpdateKeypoints(id,
+                                 FeatureKeypoints(512, FeatureKeypoint(0, 0)));
+  FeatureMatcherCache cache(100, data.database);
+  cache.SetPayloadCacheCapacity(1);
+  const auto original = cache.GetFeatureDescriptorIndexCache().Get(id);
+  const auto query = descriptors.ToFloat();
+  Eigen::RowMajorMatrixXi expected_indices, actual_indices;
+  Eigen::RowMajorMatrixXf expected_distances, actual_distances;
+  original->Search(2, query, expected_indices, expected_distances);
+  ASSERT_TRUE(cache.GetFeatureDescriptorIndexCache().Evict(id));
+  const auto reloaded = cache.GetFeatureDescriptorIndexCache().Get(id);
+  ASSERT_NE(original, reloaded);
+  reloaded->Search(2, query, actual_indices, actual_distances);
+  EXPECT_EQ(actual_indices, expected_indices);
+  EXPECT_EQ(actual_distances, expected_distances);
 }
 
 TEST(FeatureMatcherCache, Features) {

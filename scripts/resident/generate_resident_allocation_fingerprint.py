@@ -347,6 +347,7 @@ CLOSURE = (
     # Exhaustive matching: DB/cache ownership, FAISS/SIFT persistent payload,
     # rounded CUDA textures and verifier/solver allocation dependencies.
     "src/colmap/controllers/matching_resource.h",
+    "src/colmap/controllers/matching_cache_budget.h",
     "src/colmap/controllers/feature_matching.h",
     "src/colmap/controllers/feature_matching.cc",
     "src/colmap/controllers/feature_matching_utils.h",

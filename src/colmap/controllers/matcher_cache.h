@@ -65,9 +65,17 @@ class FeatureMatcherCache {
 
   size_t MaxNumKeypoints();
 
+  // Setup-only; independent payload LRUs share a fixed entry limit. Existence
+  // caches and pair-generation block size are deliberately unchanged.
+  void SetPayloadCacheCapacity(size_t entries);
+  size_t PayloadCacheCapacity() const {
+    return descriptors_cache_->MaxNumElems();
+  }
+
   // Set before workers start. The budgeted exhaustive inventory freezes shapes;
   // Validate and load under the DB mutex AND one database snapshot.
-  void SetMatchingShapeValidator(std::function<void(Database&, image_t)> validate) {
+  void SetMatchingShapeValidator(
+      std::function<void(Database&, image_t)> validate) {
     matching_shape_validator_ = std::move(validate);
   }
 
@@ -77,6 +85,7 @@ class FeatureMatcherCache {
   }
 
  private:
+  void InitializePayloadCaches(size_t entries);
   void MaybeLoadCameras();
   void MaybeLoadFrames();
   void MaybeLoadImages();
@@ -95,7 +104,8 @@ class FeatureMatcherCache {
       descriptors_cache_;
   std::unique_ptr<ThreadSafeLRUCache<image_t, bool>> keypoints_exists_cache_;
   std::unique_ptr<ThreadSafeLRUCache<image_t, bool>> descriptors_exists_cache_;
-  ThreadSafeLRUCache<image_t, FeatureDescriptorIndex> descriptor_index_cache_;
+  std::unique_ptr<ThreadSafeLRUCache<image_t, FeatureDescriptorIndex>>
+      descriptor_index_cache_;
   std::optional<size_t> max_num_keypoints_;
   std::function<void(Database&, image_t)> matching_shape_validator_;
   std::function<void(Database&, image_t, image_t)> matching_match_validator_;
