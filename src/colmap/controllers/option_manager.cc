@@ -312,6 +312,33 @@ void OptionManager::AddFeatureExtractionOptions() {
   AddDefaultOption("FeatureExtraction.max_image_size",
                    &feature_extraction->max_image_size);
 
+  AddDefaultOption(
+      "SiftExtraction.streaming",
+      &feature_extraction->sift->streaming,
+      "Experimental explicit native CUDA file-backed extraction only; no auto "
+      "selection/fallback. streaming_gpu_bytes/streaming_host_bytes are "
+      "COMPONENT "
+      "staging caps, not aggregate VRAM/RAM. Requires "
+      "FeatureExtraction.host_budget_bytes "
+      "for decoded Bitmap, retained outputs, staging and complete public "
+      "results; "
+      "decoder/allocator/charged page cache require external aggregate job "
+      "containment. "
+      "Supported domain: first_octave -1 or 0, including aligned widths. "
+      "Nonzero single-root tiny domains fail closed. Affine/DSP/covariant/"
+      "darkness modes and more than 2 orientations are unsupported. "
+      "POSIX disk required; Windows streaming is unsupported and fails closed. "
+      "This experimental path does not qualify whole-workflow streaming. "
+      "No silent resizing or option changes.");
+  AddDefaultByteOption("SiftExtraction.streaming_gpu_bytes",
+                       &feature_extraction->sift->streaming_gpu_bytes);
+  AddDefaultByteOption("SiftExtraction.streaming_host_bytes",
+                       &feature_extraction->sift->streaming_host_bytes);
+  AddDefaultOption(
+      "SiftExtraction.streaming_scratch_path",
+      &feature_extraction->sift->streaming_scratch_path,
+      "Explicit disk-backed scratch directory; disk errors/cancellation "
+      "fail extraction without fallback. Files are owned and removed.");
   AddDefaultOption("SiftExtraction.max_num_features",
                    &feature_extraction->sift->max_num_features);
   AddDefaultOption("SiftExtraction.first_octave",
@@ -722,7 +749,8 @@ void OptionManager::AddMapperOptions() {
 
   AddDefaultByteOption("Mapper.host_budget_bytes", &mapper->host_budget_bytes);
   AddDefaultByteOption("Mapper.policy_host_bytes", &mapper->policy_host_bytes);
-  AddDefaultByteOption("Mapper.reserve_host_bytes", &mapper->reserve_host_bytes);
+  AddDefaultByteOption("Mapper.reserve_host_bytes",
+                       &mapper->reserve_host_bytes);
   AddDefaultOption("Mapper.min_num_matches", &mapper->min_num_matches);
   AddDefaultOption("Mapper.ignore_watermarks", &mapper->ignore_watermarks);
   AddDefaultOption("Mapper.multiple_models", &mapper->multiple_models);

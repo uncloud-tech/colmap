@@ -355,11 +355,12 @@ if(CUDA_ENABLED)
     if(TESTS_ENABLED)
         target_link_libraries(colmap_mvs_owned_fixed_cohort_workspace_test colmap_mvs_cuda)
     endif()
+    # Workspace orchestration is host-only; its kernels stay in colmap_mvs_cuda.
     COLMAP_ADD_TEST(
         NAME owned_fixed_cohort_pipeline_test
         SRCS owned_fixed_cohort_pipeline_test.cu
              multi_gpu_fixed_cohort_test.cu
-             owned_fixed_cohort_workspace_execution_test.cu
+             owned_fixed_cohort_workspace_execution_test.cc
         LINK_LIBS colmap_mvs_cuda
     )
     if(TESTS_ENABLED)

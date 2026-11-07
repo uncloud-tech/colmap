@@ -281,7 +281,9 @@ TEST_F(ResidentCliRunnerTest, OptimizedN3N4N5ReachForecastBoundaryOrRefuseCpu) {
 }
 
 #if defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
-TEST_F(ResidentCliRunnerTest, OptimizedPhotoCohortAndInvalidNRefusePolicy) {
+// PHOTO binds its launch ceiling later; canonical PHOTO N reaches config
+// validation. GEO syntax is checked before the concurrency policy ceiling.
+TEST_F(ResidentCliRunnerTest, OptimizedModesRefuseAtFirstApplicableGuard) {
   for (const char* phase : {"photo", "cohort", "geo"}) {
     const bool photo = std::string(phase) == "photo";
     const bool cohort = std::string(phase) == "cohort";
@@ -318,8 +320,23 @@ TEST_F(ResidentCliRunnerTest, OptimizedPhotoCohortAndInvalidNRefusePolicy) {
       const int result = RunArgs(args);
       const auto diagnostic = ::testing::internal::GetCapturedStderr();
       EXPECT_EQ(result, EXIT_FAILURE);
-      EXPECT_NE(diagnostic.find("optimized_only requires PHOTO concurrency1"),
-                std::string::npos)
+      const char* expected_diagnostic =
+          "optimized_only requires PHOTO concurrency1";
+      if (photo) {
+#if defined(COLMAP_DOWNLOAD_ENABLED)
+        expected_diagnostic = "PHOTO requires a single-reference config_path";
+#else
+        expected_diagnostic =
+            "optimized PHOTO requires CUDA and SHA256 support";
+#endif
+      } else if (!cohort && concurrency.front() == '0') {
+        expected_diagnostic =
+            "owned concurrency requires a canonical positive decimal integer";
+      } else if (!cohort && concurrency == "+3") {
+        expected_diagnostic =
+            "owned concurrency requires ASCII digits only, no sign/whitespace";
+      }
+      EXPECT_NE(diagnostic.find(expected_diagnostic), std::string::npos)
           << diagnostic;
       EXPECT_FALSE(std::filesystem::exists(workspace_ / "receipt.json"));
       EXPECT_FALSE(std::filesystem::exists(workspace_ / "stereo"));

@@ -21,13 +21,15 @@
 
 #if defined(SIFTGPU_CUDA_ENABLED)
 
-#include "GL/glew.h"
-#include <iostream>
-#include <vector>
 #include <algorithm>
-#include <stdlib.h>
-#include <math.h>
 #include <cstring>
+#include <iostream>
+#include <stdexcept>
+#include <vector>
+
+#include "GL/glew.h"
+#include <math.h>
+#include <stdlib.h>
 using namespace std;
 
 
@@ -84,13 +86,37 @@ CuTexImage::CuTexObj CuTexImage::BindTexture(const cudaTextureDesc& textureDesc,
 	return texObj;
 }
 
+CuTexImage::CuTexObj CuTexImage::BindTexture(
+    const cudaTextureDesc& textureDesc,
+    const cudaChannelFormatDesc& channelFmtDesc,
+    size_t size_bytes) {
+  const int bits =
+      channelFmtDesc.x + channelFmtDesc.y + channelFmtDesc.z + channelFmtDesc.w;
+  if (!_cuData || !size_bytes || size_bytes > _numBytes || bits <= 0 ||
+      bits % 8 || size_bytes % (bits / 8))
+    throw std::invalid_argument(
+        "SIFT texture extent exceeds allocation/channel domain");
+  CuTexObj texObj;
+
+  cudaResourceDesc resourceDesc;
+  memset(&resourceDesc, 0, sizeof(resourceDesc));
+  resourceDesc.resType = cudaResourceTypeLinear;
+  resourceDesc.res.linear.devPtr = _cuData;
+  resourceDesc.res.linear.desc = channelFmtDesc;
+  resourceDesc.res.linear.sizeInBytes = size_bytes;
+
+  cudaCreateTextureObject(&texObj.handle, &resourceDesc, &textureDesc, nullptr);
+  ProgramCU::CheckErrorCUDA("CuTexImage::BindTexture");
+
+  return texObj;
+}
+
 CuTexImage::CuTexImage()
 {
 	_cuData = NULL;
-	_cuData2D = NULL;
 	_fromPBO = 0;
 	_numChannel = _numBytes = 0;
-	_imgWidth = _imgHeight = _texWidth = _texHeight = 0;
+	_imgWidth = _imgHeight = 0;
 }
 
 CuTexImage::CuTexImage(int width, int height, int nchannel, GLuint pbo)
@@ -141,10 +167,6 @@ CuTexImage::CuTexImage(int width, int height, int nchannel, GLuint pbo)
 		_imgHeight = 0;
 		_numChannel = 0;
 	}
-
-	_texWidth = _texHeight =0;
-
-	_cuData2D = NULL;
 }
 
 CuTexImage::~CuTexImage()
@@ -161,7 +183,6 @@ CuTexImage::~CuTexImage()
 	{
 		cudaFree(_cuData);
 	}
-	if(_cuData2D)  cudaFreeArray(_cuData2D);
 }
 
 void CuTexImage::SetImageSize(int width, int height)
@@ -204,63 +225,22 @@ bool CuTexImage::InitTexture(int width, int height, int nchannel)
   return true;
 }
 
-void CuTexImage::CopyFromHost(const void * buf)
+cudaError_t CuTexImage::CopyFromHost(const void * buf)
 {
-	if(_cuData == NULL) return;
-	cudaMemcpy( _cuData, buf, _imgWidth * _imgHeight * _numChannel * sizeof(float), cudaMemcpyHostToDevice);
+	if(_cuData == NULL) return cudaError_t(1);
+	return cudaMemcpy( _cuData, buf, _imgWidth * _imgHeight * _numChannel * sizeof(float), cudaMemcpyHostToDevice);
 }
 
-void CuTexImage::CopyToHost(void * buf)
+cudaError_t CuTexImage::CopyToHost(void * buf)
 {
-	if(_cuData == NULL) return;
-	cudaMemcpy(buf, _cuData, _imgWidth * _imgHeight * _numChannel * sizeof(float), cudaMemcpyDeviceToHost);
+	if(_cuData == NULL) return cudaError_t(1);
+	return cudaMemcpy(buf, _cuData, _imgWidth * _imgHeight * _numChannel * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
 void CuTexImage::CopyToHost(void * buf, int stream)
 {
 	if(_cuData == NULL) return;
 	cudaMemcpyAsync(buf, _cuData, _imgWidth * _imgHeight * _numChannel * sizeof(float), cudaMemcpyDeviceToHost, (cudaStream_t)stream);
-}
-
-void CuTexImage::InitTexture2D()
-{
-#if !defined(SIFTGPU_ENABLE_LINEAR_TEX2D)
-	if(_cuData2D && (_texWidth < _imgWidth || _texHeight < _imgHeight))
-	{
-		cudaFreeArray(_cuData2D);
-		_cuData2D = NULL;
-	}
-	if(_cuData2D == NULL)
-	{
-		_texWidth = max(_texWidth, _imgWidth);
-		_texHeight = max(_texHeight, _imgHeight);
-		cudaChannelFormatDesc desc;
-		desc.f = cudaChannelFormatKindFloat;
-		desc.x = sizeof(float) * 8;
-		desc.y = _numChannel >=2 ? sizeof(float) * 8 : 0;
-		desc.z = _numChannel >=3 ? sizeof(float) * 8 : 0;
-		desc.w = _numChannel >=4 ? sizeof(float) * 8 : 0;
-		const cudaError_t status = cudaMallocArray(&_cuData2D, &desc, _texWidth, _texHeight);
-    if (status != cudaSuccess) {
-      _cuData = NULL;
-      _numBytes = 0;
-    }
-		ProgramCU::CheckErrorCUDA("CuTexImage::InitTexture2D");
-	}
-#endif
-}
-
-void CuTexImage::CopyToTexture2D()
-{
-#if !defined(SIFTGPU_ENABLE_LINEAR_TEX2D)
-	InitTexture2D();
-	if(_cuData2D)
-	{
-		cudaMemcpy2DToArray(_cuData2D, 0, 0, _cuData, _imgWidth* _numChannel* sizeof(float) ,
-		_imgWidth * _numChannel*sizeof(float), _imgHeight,	cudaMemcpyDeviceToDevice);
-		ProgramCU::CheckErrorCUDA("cudaMemcpy2DToArray");
-	}
-#endif
 }
 
 void CuTexImage::CopyFromPBO(int width, int height, GLuint pbo)

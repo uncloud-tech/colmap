@@ -18,6 +18,124 @@ spec.loader.exec_module(generator)
 
 
 class PhotoFingerprintTest(unittest.TestCase):
+    def test_graph_api_signatures_preserve_default_edges(self):
+        # Compile actual call sites against versioned API shapes, not an SDK.
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "src/colmap/mvs/owned_graph.cu").read_text()
+        node_call = source.split("      cudaGraphNode_t node;", 1)[1].split(
+            "      body =", 1
+        )[0]
+        edge_call = source.split(
+            "    for (const auto& edge : topology.dependencies) {", 1
+        )[1].split("\n  } catch", 1)[0]
+        code = (
+            r"""
+#include <cassert>
+#include <stdexcept>
+#include <utility>
+#include <vector>
+using cudaGraph_t = int;
+using cudaGraphNode_t = int;
+struct cudaGraphNodeParams {};
+struct cudaGraphEdgeData {};
+static cudaGraphNodeParams* expected_params;
+static int node_calls = 0, edge_calls = 0;
+static int fail_node = 0, fail_edge = 0;
+void Check(int error) {
+  if (error) throw std::runtime_error("injected CUDA error");
+}
+int cudaGraphAddNode(cudaGraphNode_t* node, cudaGraph_t graph,
+                     const cudaGraphNode_t* dependencies,
+#if CUDART_VERSION >= 13000
+                     const cudaGraphEdgeData* data,
+#endif
+                     size_t count, cudaGraphNodeParams* params) {
+  ++node_calls;
+  assert(graph == 7 && !dependencies && count == 0);
+  assert(params == expected_params);
+#if CUDART_VERSION >= 13000
+  assert(!data); // Default/zeroed edge data, not a changed dependency type.
+#endif
+  *node = 17;
+  return fail_node;
+}
+int cudaGraphAddDependencies(cudaGraph_t graph,
+                             const cudaGraphNode_t* from,
+                             const cudaGraphNode_t* to,
+#if CUDART_VERSION >= 13000
+                             const cudaGraphEdgeData* data,
+#endif
+                             size_t count) {
+  assert(graph == 7 && count == 1);
+#if CUDART_VERSION >= 13000
+  assert(!data);
+#endif
+  assert(*from == (edge_calls == 0 ? 12 : 10));
+  assert(*to == (edge_calls == 0 ? 10 : 11));
+  return ++edge_calls == fail_edge ? 1 : 0;
+}
+void AddConditional() {
+  cudaGraph_t graph_ = 7;
+  cudaGraphNodeParams condition{};
+  expected_params = &condition;
+  cudaGraphNode_t node;
+"""
+            + node_call
+            + r"""
+  assert(node == 17);
+}
+void AddEdges() {
+  cudaGraph_t graph = 7;
+  std::vector<cudaGraphNode_t> children{10, 11, 12};
+  struct {
+    std::vector<std::pair<size_t, size_t>> dependencies{{2, 0}, {0, 1}};
+  } topology;
+  for (const auto& edge : topology.dependencies) {
+"""
+            + edge_call
+            + r"""
+}
+int main() {
+  AddConditional(); assert(node_calls == 1);
+  AddEdges(); assert(edge_calls == 2);
+  fail_node = 1;
+  bool refused = false;
+  try { AddConditional(); } catch (const std::runtime_error&) {
+    refused = true;
+  }
+  assert(refused && node_calls == 2);
+  for (fail_edge = 1; fail_edge <= 2; ++fail_edge) {
+    edge_calls = 0; refused = false;
+    try { AddEdges(); } catch (const std::runtime_error&) {
+      refused = true;
+    }
+    assert(refused && edge_calls == fail_edge);
+  }
+}
+"""
+        )
+        with tempfile.TemporaryDirectory(dir=root.parent) as directory:
+            test = Path(directory) / "graph.cc"
+            binary = Path(directory) / "graph"
+            test.write_text(code)
+            for version in (12080, 12090, 13000, 13020):
+                with self.subTest(cudart_version=version):
+                    subprocess.run(
+                        [
+                            "c++",
+                            "-std=c++17",
+                            "-Wall",
+                            "-Wextra",
+                            "-Werror",
+                            f"-DCUDART_VERSION={version}",
+                            str(test),
+                            "-o",
+                            str(binary),
+                        ],
+                        check=True,
+                    )
+                    subprocess.run([str(binary)], check=True)
+
     def test_graph_allocation_and_host_boundary_sources_are_attested(self):
         required = {
             "src/colmap/mvs/owned_input_bank.h",
@@ -147,13 +265,18 @@ class PhotoFingerprintTest(unittest.TestCase):
             self.assertIn(f'"{lineage}";', output.read_text())
             original = output.read_text()
             for new_header in (
-                "owned_photo_output.h", "owned_photo_output_state.h",
-                "owned_geo_photo_input.h", "owned_geo_photo_input.cu",
-                "owned_fixed_cohort_budget.h", "owned_fixed_cohort_inventory.h",
+                "owned_photo_output.h",
+                "owned_photo_output_state.h",
+                "owned_geo_photo_input.h",
+                "owned_geo_photo_input.cu",
+                "owned_fixed_cohort_budget.h",
+                "owned_fixed_cohort_inventory.h",
                 "owned_fixed_cohort_pipeline.h",
                 "owned_fixed_cohort_pipeline.cu",
-                "owned_fixed_cohort_validation.h", "owned_fixed_cohort_validation.cc",
-                "owned_fixed_cohort_workspace.h", "owned_fixed_cohort_workspace.cc",
+                "owned_fixed_cohort_validation.h",
+                "owned_fixed_cohort_validation.cc",
+                "owned_fixed_cohort_workspace.h",
+                "owned_fixed_cohort_workspace.cc",
             ):
                 added = root / "src/colmap/mvs" / new_header
                 added.write_bytes(b"dirty snapshot allocation\n")

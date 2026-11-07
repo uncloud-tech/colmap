@@ -79,6 +79,10 @@ jobs:
           OPENAI__API_BASE: https://ollama.com/v1
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CONFIG__MODEL: openai/glm-5.3-flash
+          # Ollama /api/show advertises low/high/max, default max (2026-11-06).
+          # Opt in this custom ID so LiteLLM cannot silently drop the effort.
+          CONFIG__REASONING_EFFORT: "low"
+          CONFIG__ADDITIONAL_REASONING_EFFORT_MODELS: '["openai/glm-5.3-flash"]'
           CONFIG__FALLBACK_MODELS: '[]'
           # Ollama /api/show, model glm-5.3-flash (verified 2026-11-05):
           # model_info.glm5_next.context_length = 1048576 (input + output).
@@ -88,10 +92,10 @@ jobs:
           # Ollama does not publish a separate output maximum in /api/show.
           # The model author's documentation specifies 128K output tokens:
           # https://docs.z.ai/guides/vlm/glm-5.3-flash
-          # Use a bounded 32K reasoning+output budget for CI, not the 128K maximum.
+          # Use a bounded 64K reasoning+output budget for CI, not the 128K maximum.
           # This is separate from the full context limit; no input files need be
           # dropped for PR39. PR-Agent reserves output space when packing input.
-          CONFIG__MAX_OUTPUT_TOKENS: "32768"
+          CONFIG__MAX_OUTPUT_TOKENS: "65536"
           # Full-diff review needs longer than the default 120s request timeout.
           # Disable both client and same-model timeout retries: their defaults
           # multiplied into four ~6-minute attempts across review and improve.

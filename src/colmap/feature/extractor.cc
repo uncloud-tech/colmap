@@ -22,9 +22,10 @@ void ThrowUnknownFeatureExtractorType(FeatureExtractorType type) {
 }  // namespace
 
 void FeatureExtractionOptions::ReserveHostPayload(uint64_t count,
-                                                   uint64_t element_size) const {
+                                                  uint64_t element_size) const {
   if (!reserve_host_payload) return;
-  if (element_size && count > std::numeric_limits<uint64_t>::max() / element_size)
+  if (element_size &&
+      count > std::numeric_limits<uint64_t>::max() / element_size)
     throw std::overflow_error("SIFT host allocation overflow");
   reserve_host_payload(count * element_size);
 }
@@ -115,6 +116,15 @@ int FeatureExtractionOptions::EffMaxImageSize() const {
 
 bool FeatureExtractionOptions::Check() const {
   CHECK_OPTION_GT(EffMaxImageSize(), 0);
+  if (sift && sift->streaming) {
+    CHECK_OPTION(type == FeatureExtractorType::SIFT);
+    CHECK_OPTION_EQ(use_gpu, true);
+    CHECK_OPTION_GT(host_budget_bytes, 0);
+#if !defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
+    LOG(ERROR) << "SIFT streaming requires a CUDA/HIP build; no CPU fallback";
+    return false;
+#endif
+  }
   if (use_gpu) {
     CHECK_OPTION_GT(CSVToVector<int>(gpu_index).size(), 0);
 #if !defined(COLMAP_GPU_ENABLED)

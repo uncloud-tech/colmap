@@ -290,6 +290,7 @@ CLOSURE = (
     "src/colmap/feature/extractor.cc",
     "src/colmap/feature/sift.h",
     "src/colmap/feature/sift.cc",
+    "src/colmap/feature/sift_streaming.h",
     "src/colmap/feature/types.h",
     "src/colmap/feature/types.cc",
     "src/colmap/feature/utils.h",
@@ -334,6 +335,7 @@ CLOSURE = (
     "src/thirdparty/SiftGPU/SiftGPU.cpp",
     "src/thirdparty/SiftGPU/SiftPyramid.h",
     "src/thirdparty/SiftGPU/SiftPyramid.cpp",
+    "src/thirdparty/SiftGPU/StreamedPlane.h",
     "src/thirdparty/SiftGPU/CudaImageDomain.h",
     "src/thirdparty/SiftGPU/CuTexImage.h",
     "src/thirdparty/SiftGPU/CuTexImage.cpp",
@@ -500,7 +502,6 @@ CLOSURE = (
     "src/colmap/estimators/bundle_adjustment_ceres.cc",
     "src/colmap/exe/sfm.h",
     "src/colmap/exe/sfm.cc",
-
 )
 
 HEADER_COMMENT = """// GENERATED FILE - DO NOT EDIT.

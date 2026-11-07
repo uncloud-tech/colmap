@@ -130,7 +130,20 @@ test('workflow preserves trigger security and explicitly separates token limits'
   assert.equal(value('CONFIG__CUSTOM_MODEL_MAX_TOKENS'), 1048576);
   assert.equal(value('CONFIG__MAX_MODEL_TOKENS'), 1048576);
   // Provider capability is not the per-review reasoning/output budget.
-  assert.equal(value('CONFIG__MAX_OUTPUT_TOKENS'), 32768);
+  assert.equal(value('CONFIG__MAX_OUTPUT_TOKENS'), 65536);
+});
+
+test('the pinned model explicitly receives its supported low reasoning effort', () => {
+  const model = workflow.match(/^          CONFIG__MODEL: (\S+)$/m)?.[1];
+  assert.equal(model, 'openai/glm-5.3-flash');
+  assert.match(workflow, /^          OPENAI__API_BASE: https:\/\/ollama\.com\/v1$/m);
+  assert.match(workflow, /^          CONFIG__REASONING_EFFORT: "low"$/m);
+  const registered = workflow.match(
+    /^          CONFIG__ADDITIONAL_REASONING_EFFORT_MODELS: '([^']+)'$/m)?.[1];
+  assert.ok(registered, 'Unknown model IDs need explicit reasoning-effort opt-in');
+  assert.deepEqual(JSON.parse(registered), [model]);
+  // That unrelated flag merges system/user messages; effort opt-in must not.
+  assert.doesNotMatch(workflow, /CONFIG__CUSTOM_REASONING_MODEL:/);
 });
 
 test('review request is bounded without multiplied timeout retries or extra AI tools', () => {

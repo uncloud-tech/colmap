@@ -56,6 +56,7 @@ EXTRACTION_ALLOCATION_SOURCES = (
     "src/colmap/feature/extractor.cc",
     "src/colmap/feature/sift.h",
     "src/colmap/feature/sift.cc",
+    "src/colmap/feature/sift_streaming.h",
     "src/colmap/feature/types.h",
     "src/colmap/feature/utils.cc",
     "src/colmap/scene/database_sqlite.cc",
@@ -64,6 +65,11 @@ EXTRACTION_ALLOCATION_SOURCES = (
     "src/thirdparty/SiftGPU/SiftGPU.cpp",
     "src/thirdparty/SiftGPU/SiftPyramid.cpp",
     "src/thirdparty/SiftGPU/PyramidCU.cpp",
+    "src/thirdparty/SiftGPU/PyramidCU.h",
+    "src/thirdparty/SiftGPU/ProgramCU.h",
+    "src/thirdparty/SiftGPU/SiftGPU.h",
+    "src/thirdparty/SiftGPU/SiftPyramid.h",
+    "src/thirdparty/SiftGPU/StreamedPlane.h",
     "src/thirdparty/SiftGPU/CudaImageDomain.h",
     "src/thirdparty/SiftGPU/ProgramCU.cu",
     "src/colmap/exe/feature.cc",
@@ -263,16 +269,25 @@ MAPPING_ALLOCATION_SOURCES = (
     "src/colmap/sensor/models.cc",
 )
 
+
 class ResidentAllocationFingerprintTest(unittest.TestCase):
-    def test_phase_mutations_change_compiled_binding_and_rebuild_dependencies(self):
+    def test_phase_mutations_change_compiled_binding_and_rebuild_dependencies(
+        self,
+    ):
         repo = Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             # Copy real source bytes, including phase files even when a
             # regression omits them from the generator's declared closure.
             sources = dict.fromkeys(
-                (*generator.CLOSURE, *FUSION_ALLOCATION_SOURCES,
-                 *UNDISTORTION_ALLOCATION_SOURCES, *EXTRACTION_ALLOCATION_SOURCES, *MATCHING_ALLOCATION_SOURCES, *MAPPING_ALLOCATION_SOURCES)
+                (
+                    *generator.CLOSURE,
+                    *FUSION_ALLOCATION_SOURCES,
+                    *UNDISTORTION_ALLOCATION_SOURCES,
+                    *EXTRACTION_ALLOCATION_SOURCES,
+                    *MATCHING_ALLOCATION_SOURCES,
+                    *MAPPING_ALLOCATION_SOURCES,
+                )
             )
             for name in sources:
                 target = root / name
@@ -285,18 +300,30 @@ class ResidentAllocationFingerprintTest(unittest.TestCase):
                 subprocess.run(
                     [
                         sys.executable,
-                        str(repo / "scripts/resident" /
-                            "generate_resident_allocation_fingerprint.py"),
-                        "--repo-root", str(root), "--output", str(output),
-                        "--depfile", str(depfile),
+                        str(
+                            repo
+                            / "scripts/resident"
+                            / "generate_resident_allocation_fingerprint.py"
+                        ),
+                        "--repo-root",
+                        str(root),
+                        "--output",
+                        str(output),
+                        "--depfile",
+                        str(depfile),
                     ],
                     check=True,
                 )
                 return output.read_text()
 
             baseline = generate()
-            for name in (*FUSION_ALLOCATION_SOURCES,
-                         *UNDISTORTION_ALLOCATION_SOURCES, *EXTRACTION_ALLOCATION_SOURCES, *MATCHING_ALLOCATION_SOURCES, *MAPPING_ALLOCATION_SOURCES):
+            for name in (
+                *FUSION_ALLOCATION_SOURCES,
+                *UNDISTORTION_ALLOCATION_SOURCES,
+                *EXTRACTION_ALLOCATION_SOURCES,
+                *MATCHING_ALLOCATION_SOURCES,
+                *MAPPING_ALLOCATION_SOURCES,
+            ):
                 with self.subTest(source=name):
                     source = root / name
                     original = source.read_bytes()
@@ -305,7 +332,9 @@ class ResidentAllocationFingerprintTest(unittest.TestCase):
                             original + b"\n// allocation mutation test\n"
                         )
                         self.assertNotEqual(baseline, generate())
-                        self.assertIn(str(source.resolve()), depfile.read_text())
+                        self.assertIn(
+                            str(source.resolve()), depfile.read_text()
+                        )
                     finally:
                         source.write_bytes(original)
             self.assertEqual(baseline, generate())

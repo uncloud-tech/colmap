@@ -9,64 +9,34 @@
 #include "colmap/exe/mvs.h"
 #include "colmap/util/testing.h"
 
-#include <cerrno>
-#include <cstdio>
 #include <filesystem>
 #include <fstream>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
-#include <fcntl.h>
 #include <gtest/gtest.h>
-#include <unistd.h>
 
 namespace colmap {
 namespace {
 
-std::string ReadFileText(const std::filesystem::path& path) {
-  std::ifstream file(path, std::ios::binary);
-  return std::string((std::istreambuf_iterator<char>(file)),
-                     std::istreambuf_iterator<char>());
-}
-
-// Runs the real CLI dispatch with stderr captured to a file so the tests
+// Runs the real CLI dispatch with portable GTest stderr capture so the tests
 // assert the EXACT guard reason (not just any failure): the fail-closed
 // raw-argv/mutual-exclusivity checks run BEFORE the workspace, wire or
 // CUDA availability can mask them.
 int RunArgsExpectingError(const std::vector<std::string>& args,
                           std::string* stderr_log) {
-  const auto log = CreateTestDir() / "cli-stderr.log";
-  std::fflush(nullptr);
-  const int saved = ::dup(::fileno(stderr));
-  if (saved < 0) {
-    throw std::runtime_error("stderr dup failed");
+  std::vector<char*> argv;
+  for (auto& arg : args) {
+    argv.push_back(const_cast<char*>(arg.c_str()));
   }
-  const int fd = ::open(log.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-  if (fd < 0) {
-    throw std::runtime_error("stderr capture open failed");
-  }
-  if (::dup2(fd, ::fileno(stderr)) != ::fileno(stderr)) {
-    throw std::runtime_error("stderr redirect failed");
-  }
-  const int exit_code = ([&] {
-    std::vector<char*> argv;
-    for (auto& arg : args) {
-      argv.push_back(const_cast<char*>(arg.c_str()));
-    }
-    argv.push_back(nullptr);
-    return RunPatchMatchStereoWithExecution(static_cast<int>(argv.size() - 1),
-                                            argv.data(),
-                                            mvs::PatchMatchExecution::kStock);
-  })();
-  std::fflush(nullptr);
-  std::fflush(stderr);
-  if (::dup2(saved, ::fileno(stderr)) != ::fileno(stderr)) {
-    throw std::runtime_error("stderr restore failed");
-  }
-  ::close(saved);
-  ::close(fd);
-  if (stderr_log) *stderr_log = ReadFileText(log);
+  argv.push_back(nullptr);
+  ::testing::internal::CaptureStderr();
+  const int exit_code =
+      RunPatchMatchStereoWithExecution(static_cast<int>(argv.size() - 1),
+                                       argv.data(),
+                                       mvs::PatchMatchExecution::kStock);
+  const auto diagnostic = ::testing::internal::GetCapturedStderr();
+  if (stderr_log) *stderr_log = diagnostic;
   return exit_code;
 }
 

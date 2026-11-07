@@ -32,13 +32,10 @@ class CuTexImage
 {
 protected:
 	void*		_cuData;
-	cudaArray*	_cuData2D;
 	int			_numChannel;
 	size_t			_numBytes;
 	int			_imgWidth;
 	int			_imgHeight;
-	int			_texWidth;
-	int			_texHeight;
 	GLuint		_fromPBO;
 public:
     // Only used to select input resampling boundary behavior. Logical rows
@@ -77,13 +74,14 @@ public:
 
 	virtual void SetImageSize(int width, int height);
 	virtual bool InitTexture(int width, int height, int nchannel = 1);
-	void InitTexture2D();
 	CuTexObj BindTexture(const cudaTextureDesc& textureDesc,
 											 const cudaChannelFormatDesc& channelFmtDesc);
-	void CopyToHost(void* buf);
-	void CopyToHost(void* buf, int stream);
-	void CopyFromHost(const void* buf);
-	void CopyToTexture2D();
+        CuTexObj BindTexture(const cudaTextureDesc& textureDesc,
+                             const cudaChannelFormatDesc& channelFmtDesc,
+                             size_t size_bytes);
+        cudaError_t CopyToHost(void* buf);
+        void CopyToHost(void* buf, int stream);
+	cudaError_t CopyFromHost(const void* buf);
 	int  CopyToPBO(GLuint pbo);
 	void CopyFromPBO(int width, int height, GLuint pbo);
 public:

@@ -30,6 +30,8 @@
 #include "ProgramCU.h"
 #include "GlobalUtil.h"
 #include "CudaImageDomain.h"
+#include <chrono>
+#include <cmath>
 
 //----------------------------------------------------------------
 //Begin SiftGPU setting section.
@@ -234,53 +236,114 @@ template<int  FW>  __global__ void FilterV(cudaTextureObject_t texData, float* d
 	}
 }
 
+template <int LOG_SCALE>
+__global__ void UpsampleKernel(cudaTextureObject_t texData,
+                               float* d_result,
+                               int width,
+                               int height,
+                               bool exact_domain,
+                               int source_origin = 0,
+                               int destination_origin = 0) {
+  const int SCALE = (1 << LOG_SCALE), SCALE_MASK = (SCALE - 1);
+  const float INV_SCALE = 1.0f / (float(SCALE));
+  int col = IMUL(blockIdx.x, FILTERH_TILE_WIDTH) + threadIdx.x;
+  if (col >= width) return;
 
-template<int LOG_SCALE> __global__ void UpsampleKernel(cudaTextureObject_t texData, float* d_result, int width, int height, bool exact_domain)
-{
-	const int SCALE = (1 << LOG_SCALE), SCALE_MASK = (SCALE - 1);
-	const float INV_SCALE = 1.0f / (float(SCALE));
-	int col = IMUL(blockIdx.x, FILTERH_TILE_WIDTH) + threadIdx.x;
-	if(col >= width) return;
-
-	int row = blockIdx.y >> LOG_SCALE;
-	int index = row * width + col;
-    const int neighbor = siftgpu::UpsampleNeighbor(col, row, width, height, exact_domain);
-	int dst_row = blockIdx.y;
-	int dst_idx= (width * dst_row + col) * SCALE;
-	int helper = blockIdx.y & SCALE_MASK;
-	if (helper)
-	{
-		float v11 = tex1Dfetch<float>(texData, index);
-		float v12 = tex1Dfetch<float>(texData, neighbor);
-        const int next_row = siftgpu::UpsampleRow(row + 1, height, exact_domain);
-		index = next_row * width + col;
-		float v21 = tex1Dfetch<float>(texData, index);
-		float v22 = tex1Dfetch<float>(texData, siftgpu::UpsampleNeighbor(col, row + 1, width, height, exact_domain));
-		float w1 = INV_SCALE * helper, w2 = 1.0 - w1;
-		float v1 = (v21 * w1  + w2 * v11);
-		float v2 = (v22 * w1  + w2 * v12);
-		d_result[dst_idx] = v1;
+  const int absolute_row = int(blockIdx.y) + destination_origin;
+  int row = absolute_row >> LOG_SCALE;
+  int index = row * width + col;
+  const int neighbor =
+      siftgpu::UpsampleNeighbor(col, row, width, height, exact_domain);
+  int dst_row = absolute_row;
+  int dst_idx = (width * dst_row + col) * SCALE;
+  dst_idx -= destination_origin * width * SCALE;
+  int helper = absolute_row & SCALE_MASK;
+  if (helper) {
+    float v11 = tex1Dfetch<float>(texData, index - source_origin * width);
+    float v12 = tex1Dfetch<float>(texData, neighbor - source_origin * width);
+    const int next_row = siftgpu::UpsampleRow(row + 1, height, exact_domain);
+    index = next_row * width + col;
+    float v21 = tex1Dfetch<float>(texData, index - source_origin * width);
+    float v22 = tex1Dfetch<float>(
+        texData,
+        siftgpu::UpsampleNeighbor(col, row + 1, width, height, exact_domain) -
+            source_origin * width);
+    float w1 = INV_SCALE * helper, w2 = 1.0 - w1;
+    float v1 = (v21 * w1 + w2 * v11);
+    float v2 = (v22 * w1 + w2 * v12);
+    d_result[dst_idx] = v1;
 #pragma unroll
-		for(int i = 1; i < SCALE; ++i)
-		{
-			const float r2 = i * INV_SCALE;
-			const float r1 = 1.0f - r2;
-			d_result[dst_idx +i] = v1 * r1 + v2 * r2;
-		}
-	}else
-	{
-		float v1 = tex1Dfetch<float>(texData, index);
-		float v2 = tex1Dfetch<float>(texData, neighbor);
-		d_result[dst_idx] = v1;
+    for (int i = 1; i < SCALE; ++i) {
+      const float r2 = i * INV_SCALE;
+      const float r1 = 1.0f - r2;
+      d_result[dst_idx + i] = v1 * r1 + v2 * r2;
+    }
+  } else {
+    float v1 = tex1Dfetch<float>(texData, index - source_origin * width);
+    float v2 = tex1Dfetch<float>(texData, neighbor - source_origin * width);
+    d_result[dst_idx] = v1;
 #pragma unroll
-		for(int i = 1; i < SCALE; ++i)
-		{
-			const float r2 = i * INV_SCALE;
-			const float r1 = 1.0f - r2;
-			d_result[dst_idx +i] = v1 * r1 + v2 * r2;
-		}
-	}
+    for (int i = 1; i < SCALE; ++i) {
+      const float r2 = i * INV_SCALE;
+      const float r1 = 1.0f - r2;
+      d_result[dst_idx + i] = v1 * r1 + v2 * r2;
+    }
+  }
+}
 
+template <int LOG_SCALE>
+__global__ void StreamedUpsampleKernel(cudaTextureObject_t texData,
+                                       float* d_result,
+                                       int width,
+                                       int height,
+                                       bool exact_domain,
+                                       int source_origin = 0,
+                                       int destination_origin = 0) {
+  const int SCALE = (1 << LOG_SCALE), SCALE_MASK = (SCALE - 1);
+  const float INV_SCALE = 1.0f / (float(SCALE));
+  int col = IMUL(blockIdx.x, FILTERH_TILE_WIDTH) + threadIdx.x;
+  if (col >= width) return;
+
+  const int absolute_row = int(blockIdx.y) + destination_origin;
+  int row = absolute_row >> LOG_SCALE;
+  int index = row * width + col;
+  const int neighbor =
+      siftgpu::UpsampleNeighbor(col, row, width, height, exact_domain);
+  int dst_row = absolute_row;
+  int dst_idx = (width * dst_row + col) * SCALE;
+  dst_idx -= destination_origin * width * SCALE;
+  int helper = absolute_row & SCALE_MASK;
+  if (helper) {
+    float v11 = tex1Dfetch<float>(texData, index - source_origin);
+    float v12 = tex1Dfetch<float>(texData, neighbor - source_origin);
+    const int next_row = siftgpu::UpsampleRow(row + 1, height, exact_domain);
+    index = next_row * width + col;
+    float v21 = tex1Dfetch<float>(texData, index - source_origin);
+    float v22 = tex1Dfetch<float>(
+        texData,
+        siftgpu::UpsampleNeighbor(col, row + 1, width, height, exact_domain) -
+            source_origin);
+    float w1 = INV_SCALE * helper, w2 = 1.0 - w1;
+    float v1 = (v21 * w1 + w2 * v11);
+    float v2 = (v22 * w1 + w2 * v12);
+    d_result[dst_idx] = v1;
+#pragma unroll
+    for (int i = 1; i < SCALE; ++i) {
+      const float r2 = i * INV_SCALE;
+      const float r1 = 1.0f - r2;
+      d_result[dst_idx + i] = v1 * r1 + v2 * r2;
+    }
+  } else {
+    float v1 = tex1Dfetch<float>(texData, index - source_origin);
+    float v2 = tex1Dfetch<float>(texData, neighbor - source_origin);
+    d_result[dst_idx] = v1;
+#pragma unroll
+    for (int i = 1; i < SCALE; ++i) {
+      const float r2 = i * INV_SCALE;
+      const float r1 = 1.0f - r2;
+      d_result[dst_idx + i] = v1 * r1 + v2 * r2;
+    }
+  }
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////
@@ -299,17 +362,22 @@ void ProgramCU::SampleImageU(CuTexImage *dst, CuTexImage *src, int log_scale)
 	}
 }
 
-template<int LOG_SCALE> __global__ void DownsampleKernel(cudaTextureObject_t texData, float* d_result, int src_width, int dst_width)
-{
-	const int dst_col = IMUL(blockIdx.x, FILTERH_TILE_WIDTH) + threadIdx.x;
-	if(dst_col >= dst_width) return;
-	const int src_col = min((dst_col << LOG_SCALE), (src_width - 1));
-	const int dst_row = blockIdx.y;
-	const int src_row = blockIdx.y << LOG_SCALE;
-	const int src_idx = IMUL(src_row, src_width) + src_col;
-	const int dst_idx = IMUL(dst_width, dst_row) + dst_col;
-	d_result[dst_idx] = tex1Dfetch<float>(texData, src_idx);
-
+template <int LOG_SCALE>
+__global__ void DownsampleKernel(cudaTextureObject_t texData,
+                                 float* d_result,
+                                 int src_width,
+                                 int dst_width,
+                                 int source_origin = 0,
+                                 int destination_origin = 0) {
+  const int dst_col = IMUL(blockIdx.x, FILTERH_TILE_WIDTH) + threadIdx.x;
+  if (dst_col >= dst_width) return;
+  const int src_col = min((dst_col << LOG_SCALE), (src_width - 1));
+  const int dst_row = blockIdx.y;
+  const int src_row = (int(blockIdx.y) + destination_origin) << LOG_SCALE;
+  const int src_idx = IMUL(src_row, src_width) + src_col;
+  const int dst_idx = IMUL(dst_width, dst_row) + dst_col;
+  d_result[dst_idx] =
+      tex1Dfetch<float>(texData, src_idx - source_origin * src_width);
 }
 
 __global__ void DownsampleKernel(cudaTextureObject_t texData, float* d_result, int src_width, int dst_width, const int log_scale)
@@ -323,6 +391,138 @@ __global__ void DownsampleKernel(cudaTextureObject_t texData, float* d_result, i
 	const int dst_idx = IMUL(dst_width, dst_row) + dst_col;
 	d_result[dst_idx] = tex1Dfetch<float>(texData, src_idx);
 
+}
+
+// Bounded sampler: global legacy arithmetic with final flat-index translation.
+// Published extent, not reusable staging capacity, controls hardware fetches.
+siftgpu::StreamFilterResult ProgramCU::SampleImageStreamed(
+    siftgpu::StreamedPlane& input,
+    int width,
+    int height,
+    bool up,
+    bool exact,
+    const siftgpu::StreamFilterOptions& options) {
+  using namespace siftgpu;
+  if (input.Channels() != 1 || !input.Complete())
+    throw std::invalid_argument(
+        "SIFT sampling requires published scalar input");
+  int device;
+  cudaDeviceProp properties{};
+  if (cudaGetDevice(&device) != cudaSuccess ||
+      cudaGetDeviceProperties(&properties, device) != cudaSuccess)
+    throw std::runtime_error("SIFT sampling CUDA properties");
+#if defined(COLMAP_HIP_ENABLED)
+  const size_t max_texture_values = size_t(properties.maxTexture1DLinear);
+#else
+  size_t max_texture_values = 0;
+  const auto format = cudaCreateChannelDesc<float>();
+  if (cudaDeviceGetTexture1DLinearMaxWidth(
+          &max_texture_values, &format, device) != cudaSuccess)
+    throw std::runtime_error("SIFT sampling CUDA properties");
+#endif
+  const SamplePlan plan(input.Width(),
+                        input.Height(),
+                        width,
+                        height,
+                        up,
+                        exact,
+                        options.gpu_bytes,
+                        options.host_bytes,
+                        properties.textureAlignment,
+                        input.CapacityValues());
+  if (plan.source_values > max_texture_values)
+    throw std::runtime_error("SIFT sampling CUDA linear texture limit");
+  CheckStreamCancellation(options.cancelled);
+  const auto start = std::chrono::steady_clock::now();
+  auto tick = start;
+  const auto elapsed = [&] {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                         tick)
+        .count();
+  };
+  StreamFilterResult result;
+  result.stats.host_staging_bytes = plan.host_bytes;
+  result.stats.gpu_staging_bytes = plan.gpu_bytes;
+  result.output =
+      std::make_unique<StreamedPlane>(options.scratch_directory, width, height);
+  result.stats.scratch_bytes = result.output->Bytes();
+  std::unique_ptr<float[]> host(new float[plan.host_bytes / sizeof(float)]);
+  CuTexImage source, destination;
+  struct Drain {
+    ~Drain() { cudaDeviceSynchronize(); }
+  } drain;
+  if (!source.InitTexture(int(plan.source_values), 1) ||
+      !destination.InitTexture(width, 1))
+    throw std::runtime_error("SIFT sampling stripe allocation");
+  result.stats.gpu_staging_bytes = size_t(source.GetDataSize()) +
+                                   size_t(destination.GetDataSize()) +
+                                   33 * sizeof(float);
+  if (result.stats.gpu_staging_bytes > options.gpu_bytes)
+    throw std::runtime_error("SIFT sampling allocation exceeds cap");
+  for (int row = 0; row < height; ++row) {
+    CheckStreamCancellation(options.cancelled);
+    const int begin = up ? row / 2 : row * 2;
+    const auto window = plan.Window(row);
+    tick = std::chrono::steady_clock::now();
+    input.ReadFlat(window.origin, window.values, host.get(), options.cancelled);
+    result.stats.file_seconds += elapsed();
+    result.stats.file_read_bytes += uint64_t(window.values) * sizeof(float);
+    source.SetImageSize(int(window.values), 1);
+    tick = std::chrono::steady_clock::now();
+    if (source.CopyFromHost(host.get()) != cudaSuccess)
+      throw std::runtime_error("SIFT sampling H2D");
+    result.stats.h2d_seconds += elapsed();
+    result.stats.h2d_bytes += uint64_t(window.values) * sizeof(float);
+    tick = std::chrono::steady_clock::now();
+    {
+      auto texture = source.BindTexture(texDataDesc,
+                                        cudaCreateChannelDesc<float>(),
+                                        window.values * sizeof(float));
+      if (!texture.handle)
+        throw std::runtime_error("SIFT sampling texture binding");
+      dim3 grid(((up ? input.Width() : width) + FILTERH_TILE_WIDTH - 1) /
+                    FILTERH_TILE_WIDTH,
+                1);
+      dim3 block(FILTERH_TILE_WIDTH);
+      if (up)
+        StreamedUpsampleKernel<1>
+            <<<grid, block>>>(texture.handle,
+                              static_cast<float*>(destination._cuData),
+                              input.Width(),
+                              input.Height(),
+                              exact,
+                              int(window.origin),
+                              row);
+      else
+        DownsampleKernel<1>
+            <<<grid, block>>>(texture.handle,
+                              static_cast<float*>(destination._cuData),
+                              input.Width(),
+                              width,
+                              begin,
+                              row);
+      const auto launch = cudaGetLastError();
+      const auto finish = cudaDeviceSynchronize();
+      if (launch != cudaSuccess || finish != cudaSuccess)
+        throw std::runtime_error("SIFT sampling kernel");
+    }
+    result.stats.kernel_seconds += elapsed();
+    tick = std::chrono::steady_clock::now();
+    if (destination.CopyToHost(host.get()) != cudaSuccess)
+      throw std::runtime_error("SIFT sampling D2H");
+    result.stats.d2h_seconds += elapsed();
+    result.stats.d2h_bytes += uint64_t(width) * sizeof(float);
+    tick = std::chrono::steady_clock::now();
+    result.output->WriteRows(row, 1, host.get(), options.cancelled);
+    result.stats.file_seconds += elapsed();
+  }
+  CheckStreamCancellation(options.cancelled);
+  result.output->Seal();
+  result.stats.file_written_bytes = result.output->BytesWritten();
+  result.stats.seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+          .count();
+  return result;
 }
 
 void ProgramCU::SampleImageD(CuTexImage *dst, CuTexImage *src, int log_scale)
@@ -469,6 +669,161 @@ void ProgramCU::FilterImage(CuTexImage *dst, CuTexImage *src, CuTexImage* buf, f
 }
 
 
+// Reuse exactly the resident specializations and their accumulation order.
+template <int FW>
+static void StreamFilterPass(CuTexImage* source,
+                             float* destination,
+                             bool vertical) {
+  const int width = source->GetImgWidth(), height = source->GetImgHeight();
+  auto texture =
+      source->BindTexture(texDataDesc, cudaCreateChannelDesc<float>());
+  if (!texture.handle)
+    throw std::runtime_error("SIFT streaming texture binding");
+  if (vertical) {
+    dim3 grid((width + FILTERV_TILE_WIDTH - 1) / FILTERV_TILE_WIDTH,
+              (height + FILTERV_TILE_HEIGHT - 1) / FILTERV_TILE_HEIGHT);
+    dim3 block(FILTERV_TILE_WIDTH, FILTERV_BLOCK_HEIGHT);
+    FilterV<FW><<<grid, block>>>(texture.handle, destination, width, height);
+  } else {
+    dim3 grid((width + FILTERH_TILE_WIDTH - 1) / FILTERH_TILE_WIDTH, height);
+    dim3 block(FILTERH_TILE_WIDTH);
+    FilterH<FW><<<grid, block>>>(texture.handle, destination, width);
+  }
+  const auto launch = cudaGetLastError();
+  const auto finish = cudaDeviceSynchronize();
+  if (launch != cudaSuccess || finish != cudaSuccess)
+    throw std::runtime_error("SIFT streaming Gaussian kernel failed");
+}
+
+siftgpu::StreamFilterResult ProgramCU::FilterImageStreamed(
+    siftgpu::StreamedPlane& input,
+    float sigma,
+    const siftgpu::StreamFilterOptions& options) {
+  using namespace siftgpu;
+  const auto start = std::chrono::steady_clock::now();
+  if (input.Channels() != 1 || !input.Complete() || !std::isfinite(sigma) ||
+      sigma <= 0 || !std::isfinite(GlobalUtil::_FilterWidthFactor) ||
+      GlobalUtil::_FilterWidthFactor <= 0 ||
+      double(sigma) * GlobalUtil::_FilterWidthFactor >
+          (std::numeric_limits<int>::max() - 1) / 2)
+    throw std::invalid_argument("SIFT streaming input/sigma/filter factor");
+  float coefficients[KERNEL_MAX_WIDTH];
+  int fw;
+  CreateFilterKernel(sigma, coefficients, fw);
+  const int width = input.Width(), height = input.Height();
+  const StripePlan plan(
+      width, height, fw, options.gpu_bytes, options.host_bytes);
+  CheckStreamCancellation(options.cancelled);
+  StreamFilterResult result;
+  result.stats.gpu_staging_bytes = plan.gpu_bytes;
+  result.stats.host_staging_bytes = plan.host_bytes;
+  result.stats.scratch_bytes = 2 * input.Bytes();
+  result.horizontal =
+      std::make_unique<StreamedPlane>(options.scratch_directory, width, height);
+  result.output =
+      std::make_unique<StreamedPlane>(options.scratch_directory, width, height);
+  std::unique_ptr<float[]> host(new float[plan.staging_rows * size_t(width)]);
+  CuTexImage source, destination;
+  // Drain before these RAII owners unwind on ANY error or cancellation.
+  struct Drain {
+    ~Drain() { cudaDeviceSynchronize(); }
+  } drain;
+  if (!source.InitTexture(width, int(plan.staging_rows)) ||
+      !destination.InitTexture(width, int(plan.staging_rows)))
+    throw std::runtime_error("SIFT streaming GPU stripe allocation");
+  result.stats.gpu_staging_bytes = size_t(source.GetDataSize()) +
+                                   size_t(destination.GetDataSize()) +
+                                   sizeof(coefficients);
+  auto tick = std::chrono::steady_clock::now();
+  const auto elapsed = [&tick]() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                         tick)
+        .count();
+  };
+  if (cudaMemcpyToSymbol(d_kernel,
+                         coefficients,
+                         fw * sizeof(float),
+                         0,
+                         cudaMemcpyHostToDevice) != cudaSuccess)
+    throw std::runtime_error("SIFT streaming coefficient upload");
+  result.stats.h2d_bytes += fw * sizeof(float);
+  result.stats.h2d_seconds += elapsed();
+  const uint64_t input_reads = input.BytesRead();
+  for (bool vertical : {false, true}) {
+    StreamedPlane& read = vertical ? *result.horizontal : input;
+    StreamedPlane& write = vertical ? *result.output : *result.horizontal;
+    for (int first = 0; first < height;) {
+      CheckStreamCancellation(options.cancelled);
+      const int count = int(std::min(plan.rows, size_t(height - first)));
+      const int begin = vertical ? std::max(0, first - fw / 2) : first;
+      const int end =
+          vertical
+              ? int(std::min(int64_t(height), int64_t(first) + count + fw / 2))
+              : first + count;
+      const int loaded = end - begin;
+      tick = std::chrono::steady_clock::now();
+      read.ReadRows(begin, loaded, host.get(), options.cancelled);
+      result.stats.file_seconds += elapsed();
+      source.SetImageSize(width, loaded);
+      destination.SetImageSize(width, loaded);
+      tick = std::chrono::steady_clock::now();
+      if (source.CopyFromHost(host.get()) != cudaSuccess)
+        throw std::runtime_error("SIFT streaming H2D copy");
+      result.stats.h2d_bytes += uint64_t(loaded) * width * sizeof(float);
+      result.stats.h2d_seconds += elapsed();
+      tick = std::chrono::steady_clock::now();
+#define SIFT_STREAM_CASE(FW)                                          \
+  case FW:                                                            \
+    StreamFilterPass<FW>(                                             \
+        &source, static_cast<float*>(destination._cuData), vertical); \
+    break
+      switch (fw) {
+        SIFT_STREAM_CASE(5);
+        SIFT_STREAM_CASE(7);
+        SIFT_STREAM_CASE(9);
+        SIFT_STREAM_CASE(11);
+        SIFT_STREAM_CASE(13);
+        SIFT_STREAM_CASE(15);
+        SIFT_STREAM_CASE(17);
+        SIFT_STREAM_CASE(19);
+        SIFT_STREAM_CASE(21);
+        SIFT_STREAM_CASE(23);
+        SIFT_STREAM_CASE(25);
+        SIFT_STREAM_CASE(27);
+        SIFT_STREAM_CASE(29);
+        SIFT_STREAM_CASE(31);
+        SIFT_STREAM_CASE(33);
+        default:
+          throw std::runtime_error("SIFT streaming unsupported filter width");
+      }
+#undef SIFT_STREAM_CASE
+      result.stats.kernel_seconds += elapsed();
+      tick = std::chrono::steady_clock::now();
+      if (destination.CopyToHost(host.get()) != cudaSuccess)
+        throw std::runtime_error("SIFT streaming D2H copy");
+      result.stats.d2h_bytes += uint64_t(loaded) * width * sizeof(float);
+      result.stats.d2h_seconds += elapsed();
+      tick = std::chrono::steady_clock::now();
+      write.WriteRows(first,
+                      count,
+                      host.get() + size_t(first - begin) * width,
+                      options.cancelled);
+      result.stats.file_seconds += elapsed();
+      first += count;
+    }
+    CheckStreamCancellation(options.cancelled);
+    write.Seal();
+  }
+  result.stats.file_read_bytes =
+      input.BytesRead() - input_reads + result.horizontal->BytesRead();
+  result.stats.file_written_bytes =
+      result.horizontal->BytesWritten() + result.output->BytesWritten();
+  result.stats.seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+          .count();
+  return result;
+}
+
 void __global__ ComputeDOG_Kernel(cudaTextureObject_t texC, cudaTextureObject_t texP, float* d_dog, float2* d_got, int width, int height)
 {
 	int row = (blockIdx.y << DOG_BLOCK_LOG_DIMY) + threadIdx.y;
@@ -525,6 +880,129 @@ void ProgramCU::ComputeDOG(CuTexImage* gus, CuTexImage* dog, CuTexImage* got)
 		ComputeDOG_Kernel<<<grid, block>>>(texCObj.handle, texPObj.handle, (float*) dog->_cuData, width, height);
 }
 
+siftgpu::StreamDogResult ProgramCU::ComputeDOGStreamed(
+    siftgpu::StreamedPlane& current,
+    siftgpu::StreamedPlane& previous,
+    const siftgpu::StreamFilterOptions& options) {
+  using namespace siftgpu;
+  const auto start = std::chrono::steady_clock::now();
+  if (!current.Complete() || !previous.Complete() || current.Channels() != 1 ||
+      previous.Channels() != 1 || current.Width() != previous.Width() ||
+      current.Height() != previous.Height())
+    throw std::invalid_argument(
+        "SIFT streamed DoG requires matching scalar planes");
+  const int width = current.Width(), height = current.Height();
+  const DogPlan plan(width, height, options.gpu_bytes, options.host_bytes);
+  CheckStreamCancellation(options.cancelled);
+  StreamDogResult result;
+  result.stats.gpu_staging_bytes = plan.gpu_bytes;
+  result.stats.host_staging_bytes = plan.host_bytes;
+  result.dog =
+      std::make_unique<StreamedPlane>(options.scratch_directory, width, height);
+  result.gradient = std::make_unique<StreamedPlane>(
+      options.scratch_directory, width, height, 2);
+  result.stats.scratch_bytes = result.dog->Bytes() + result.gradient->Bytes();
+  std::unique_ptr<float[]> host(
+      new float[2 * plan.staging_rows * size_t(width)]);
+  // Preserve the original previous/current Gaussian pair correspondence.
+  CuTexImage gaussian[2], dog, gradient;
+  struct Drain {
+    ~Drain() { cudaDeviceSynchronize(); }
+  } drain;
+  for (auto& plane : gaussian)
+    if (!plane.InitTexture(width, int(plan.staging_rows)))
+      throw std::runtime_error("SIFT streamed DoG source allocation");
+  if (!dog.InitTexture(width, int(plan.staging_rows)) ||
+      !gradient.InitTexture(width, int(plan.staging_rows), 2))
+    throw std::runtime_error("SIFT streamed DoG output allocation");
+  result.stats.gpu_staging_bytes =
+      size_t(gaussian[0].GetDataSize()) + size_t(gaussian[1].GetDataSize()) +
+      size_t(dog.GetDataSize()) + size_t(gradient.GetDataSize()) +
+      33 * sizeof(float);
+  auto tick = start;
+  const auto elapsed = [&tick]() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                         tick)
+        .count();
+  };
+  const uint64_t before_c = current.BytesRead(),
+                 before_p = previous.BytesRead();
+  for (int first = 0; first < height;) {
+    CheckStreamCancellation(options.cancelled);
+    const int count = int(std::min(plan.rows, size_t(height - first)));
+    const int begin = std::max(0, first - 1);
+    const int end = int(std::min(int64_t(height), int64_t(first) + count + 1));
+    const int loaded = end - begin;
+    for (int i = 0; i < 2; ++i) {
+      tick = std::chrono::steady_clock::now();
+      (i ? current : previous)
+          .ReadRows(begin, loaded, host.get(), options.cancelled);
+      result.stats.file_seconds += elapsed();
+      gaussian[i].SetImageSize(width, loaded);
+      tick = std::chrono::steady_clock::now();
+      if (gaussian[i].CopyFromHost(host.get()) != cudaSuccess)
+        throw std::runtime_error("SIFT streamed DoG H2D copy");
+      result.stats.h2d_bytes += uint64_t(loaded) * current.RowBytes();
+      result.stats.h2d_seconds += elapsed();
+    }
+    dog.SetImageSize(width, loaded);
+    gradient.SetImageSize(width, loaded);
+    tick = std::chrono::steady_clock::now();
+    // No new math or coordinates: full-width row translation preserves every
+    // integer fetch. Only discarded halo outputs can see a stripe boundary;
+    // retained edge rows clamp iff they are true global image edges.
+    auto texC =
+        gaussian[1].BindTexture(texDataDesc, cudaCreateChannelDesc<float>());
+    auto texP =
+        gaussian[0].BindTexture(texDataDesc, cudaCreateChannelDesc<float>());
+    // BindTexture's legacy logging clears errors. Check its actual handles so
+    // a failed binding cannot be mistaken for successful streamed output.
+    if (!texC.handle || !texP.handle)
+      throw std::runtime_error("SIFT streamed DoG texture binding");
+    dim3 grid((width + DOG_BLOCK_DIMX - 1) / DOG_BLOCK_DIMX,
+              (loaded + DOG_BLOCK_DIMY - 1) / DOG_BLOCK_DIMY);
+    dim3 block(DOG_BLOCK_DIMX, DOG_BLOCK_DIMY);
+    ComputeDOG_Kernel<<<grid, block>>>(texC.handle,
+                                       texP.handle,
+                                       static_cast<float*>(dog._cuData),
+                                       static_cast<float2*>(gradient._cuData),
+                                       width,
+                                       loaded);
+    const auto launch = cudaGetLastError();
+    const auto finish = cudaDeviceSynchronize();
+    if (launch != cudaSuccess || finish != cudaSuccess)
+      throw std::runtime_error("SIFT streamed DoG kernel failed");
+    result.stats.kernel_seconds += elapsed();
+    for (bool grad : {false, true}) {
+      tick = std::chrono::steady_clock::now();
+      if ((grad ? gradient : dog).CopyToHost(host.get()) != cudaSuccess)
+        throw std::runtime_error("SIFT streamed DoG D2H copy");
+      auto& output = grad ? *result.gradient : *result.dog;
+      result.stats.d2h_bytes += uint64_t(loaded) * output.RowBytes();
+      result.stats.d2h_seconds += elapsed();
+      tick = std::chrono::steady_clock::now();
+      output.WriteRows(
+          first,
+          count,
+          host.get() + size_t(first - begin) * width * output.Channels(),
+          options.cancelled);
+      result.stats.file_seconds += elapsed();
+    }
+    first += count;
+  }
+  CheckStreamCancellation(options.cancelled);
+  result.dog->Seal();
+  result.gradient->Seal();
+  result.stats.file_read_bytes = current.BytesRead() - before_c;
+  if (&current != &previous)
+    result.stats.file_read_bytes += previous.BytesRead() - before_p;
+  result.stats.file_written_bytes =
+      result.dog->BytesWritten() + result.gradient->BytesWritten();
+  result.stats.seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+          .count();
+  return result;
+}
 
 #define READ_CMP_DOG_DATA(datai, tex, idx) \
 		datai[0] = tex1Dfetch<float>(tex, idx - 1);\
@@ -684,9 +1162,8 @@ void ProgramCU::ComputeKEY(CuTexImage* dog, CuTexImage* key, float Tdog, float T
 
 }
 
-
-
-void __global__ InitHist_Kernel(cudaTextureObject_t texDataF4, int4* hist, int ws, int wd, int height)
+void __global__ InitHist_Kernel(cudaTextureObject_t texDataF4, int4* hist, int ws, int wd, int height,
+                                int row_origin = 0, int full_height = 0)
 {
        int row = IMUL(blockIdx.y, blockDim.y) + threadIdx.y;
        int col = IMUL(blockIdx.x, blockDim.x) + threadIdx.x;
@@ -696,7 +1173,8 @@ void __global__ InitHist_Kernel(cudaTextureObject_t texDataF4, int4* hist, int w
 			int scol = col << 2;
 			int sidx = IMUL(row, ws) + scol;
 			int v[4] = {0, 0, 0, 0};
-			if(row > 0 && row < height -1)
+			if(row + row_origin > 0 &&
+               row + row_origin < (full_height ? full_height : height) - 1)
 			{
 #pragma unroll
 				for(int i = 0; i < 4 ; ++i, ++scol)
@@ -761,29 +1239,263 @@ void ProgramCU::ReduceHistogram(CuTexImage*hist1, CuTexImage* hist2)
 	ReduceHist_Kernel<<<grid, block>>>(hist1Tex.handle, (int4*)hist2->_cuData, ws, wd, hd);
 }
 
+siftgpu::StreamKeyResult ProgramCU::ComputeKEYStreamed(
+    siftgpu::StreamedPlane& previous,
+    siftgpu::StreamedPlane& current,
+    siftgpu::StreamedPlane& next,
+    float Tdog,
+    float Tedge,
+    bool exact_domain,
+    const siftgpu::StreamFilterOptions& options) {
+  using namespace siftgpu;
+  const auto start = std::chrono::steady_clock::now();
+  const int width = current.Width(), height = current.Height();
+  for (auto* plane : {&previous, &current, &next})
+    if (!plane->Complete() || plane->Channels() != 1 ||
+        plane->Width() != width || plane->Height() != height)
+      throw std::invalid_argument(
+          "SIFT streamed KEY requires three scalar planes");
+  // The rounded resident path has full four-column domains, never a partial
+  // last group. Exact domains retain the odd-width ceil grouping.
+  if (!exact_domain && width % 4)
+    throw std::invalid_argument(
+        "SIFT rounded histogram requires aligned width");
+  const KeyPlan plan(width, height, options.gpu_bytes, options.host_bytes);
+  CheckStreamCancellation(options.cancelled);
+  StreamKeyResult result;
+  auto& stats = result.stats;
+  stats.gpu_staging_bytes = plan.gpu_bytes;
+  stats.host_staging_bytes = plan.host_bytes;
+  result.key = std::make_unique<StreamedPlane>(
+      options.scratch_directory, width, height, 4);
+  std::unique_ptr<float[]> host(
+      new float[4 * plan.staging_rows * size_t(width)]);
+  const auto timed = [](double& seconds, auto operation) {
+    const auto begin = std::chrono::steady_clock::now();
+    operation();
+    seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - begin)
+            .count();
+  };
+  const auto finish = [] {
+    const auto launch = cudaGetLastError();
+    const auto sync = cudaDeviceSynchronize();
+    if (launch != cudaSuccess || sync != cudaSuccess)
+      throw std::runtime_error("SIFT streamed KEY/histogram kernel failed");
+  };
+  const auto upload =
+      [&](CuTexImage& texture, StreamedPlane& plane, int row, int count) {
+        CheckStreamCancellation(options.cancelled);
+        timed(stats.file_seconds, [&] {
+          plane.ReadRows(row, count, host.get(), options.cancelled);
+        });
+        stats.file_read_bytes += uint64_t(count) * plane.RowBytes();
+        texture.SetImageSize(plane.Width(), count);
+        timed(stats.h2d_seconds, [&] {
+          if (texture.CopyFromHost(host.get()) != cudaSuccess)
+            throw std::runtime_error("SIFT streamed KEY/histogram upload");
+        });
+        stats.h2d_bytes += uint64_t(count) * plane.RowBytes();
+      };
+  const auto download = [&](CuTexImage& texture,
+                            StreamedPlane& plane,
+                            int first,
+                            int count,
+                            int offset,
+                            int loaded) {
+    timed(stats.d2h_seconds, [&] {
+      if (texture.CopyToHost(host.get()) != cudaSuccess)
+        throw std::runtime_error("SIFT streamed KEY/histogram download");
+    });
+    stats.d2h_bytes += uint64_t(loaded) * plane.RowBytes();
+    timed(stats.file_seconds, [&] {
+      plane.WriteRows(first,
+                      count,
+                      host.get() + size_t(offset) * plane.Width() * 4,
+                      options.cancelled);
+    });
+    stats.file_written_bytes += uint64_t(count) * plane.RowBytes();
+  };
+  {
+    CuTexImage dogs[3], key;
+    struct Drain {
+      ~Drain() { cudaDeviceSynchronize(); }
+    } drain;
+    for (auto& dog : dogs)
+      if (!dog.InitTexture(width, int(plan.staging_rows)))
+        throw std::runtime_error("SIFT streamed KEY source allocation");
+    if (!key.InitTexture(width, int(plan.staging_rows), 4))
+      throw std::runtime_error("SIFT streamed KEY output allocation");
+    stats.gpu_staging_bytes = size_t(dogs[0].GetDataSize()) +
+                              size_t(dogs[1].GetDataSize()) +
+                              size_t(dogs[2].GetDataSize()) +
+                              size_t(key.GetDataSize()) + 33 * sizeof(float);
+    for (int first = 0; first < height;) {
+      const int count = int(std::min(plan.rows, size_t(height - first)));
+      const int begin = std::max(0, first - 1);
+      const int end =
+          int(std::min(int64_t(height), int64_t(first) + count + 1));
+      const int loaded = end - begin;
+      upload(dogs[0], previous, begin, loaded);
+      upload(dogs[1], current, begin, loaded);
+      upload(dogs[2], next, begin, loaded);
+      key.SetImageSize(width, loaded);
+      timed(stats.kernel_seconds, [&] {
+        // The resident scratch border is undefined. Initialize only inert
+        // backing storage; InitHist excludes every such byte. Do NOT compare
+        // these bytes to resident Gaussian scratch or interpret them as keys.
+        if (cudaMemset(key._cuData, 0, size_t(loaded) * width * 16) !=
+            cudaSuccess)
+          throw std::runtime_error("SIFT streamed KEY inert storage");
+        // All retained interior pixels have exactly +/-1 row of original
+        // data. ComputeKEY has no floating coordinate operations: dx/dy/ds
+        // are unchanged, and absolute row identity is the backing file row.
+        // Bind explicitly here rather than the legacy wrapper, whose error
+        // logging can clear a failed texture-binding status.
+        auto p =
+            dogs[0].BindTexture(texDataDesc, cudaCreateChannelDesc<float>());
+        auto c =
+            dogs[1].BindTexture(texDataDesc, cudaCreateChannelDesc<float>());
+        auto n =
+            dogs[2].BindTexture(texDataDesc, cudaCreateChannelDesc<float>());
+        if (!p.handle || !c.handle || !n.handle)
+          throw std::runtime_error("SIFT streamed KEY texture binding");
+        const float threshold0 =
+            (GlobalUtil::_SubpixelLocalization ? 0.8f : 1.0f) * Tdog;
+        const float edge = (Tedge + 1) * (Tedge + 1) / Tedge;
+#ifdef KEY_OFFSET_ONE
+        dim3 grid((width - 1 + KEY_BLOCK_DIMX - 1) / KEY_BLOCK_DIMX,
+                  (loaded - 1 + KEY_BLOCK_DIMY - 1) / KEY_BLOCK_DIMY);
+#else
+        dim3 grid((width + KEY_BLOCK_DIMX - 1) / KEY_BLOCK_DIMX,
+                  (loaded + KEY_BLOCK_DIMY - 1) / KEY_BLOCK_DIMY);
+#endif
+        dim3 block(KEY_BLOCK_DIMX, KEY_BLOCK_DIMY);
+        ComputeKEY_Kernel<<<grid, block>>>(p.handle,
+                                           c.handle,
+                                           n.handle,
+                                           static_cast<float4*>(key._cuData),
+                                           width,
+                                           width - 1,
+                                           loaded - 1,
+                                           threshold0,
+                                           Tdog,
+                                           edge,
+                                           GlobalUtil::_SubpixelLocalization);
+        finish();
+      });
+      download(key, *result.key, first, count, first - begin, loaded);
+      first += count;
+    }
+  }  // Release every KEY GPU buffer before the histogram pair is allocated.
+  result.key->Seal();
+  int source_width = width;
+  StreamedPlane* source = result.key.get();
+  for (int destination_width = exact_domain ? HistogramWidth(width)
+                                            : (width + 2) >> 2;
+       ;) {
+    auto output = std::make_unique<StreamedPlane>(
+        options.scratch_directory, destination_width, height, 4);
+    {
+      const size_t rows =
+          std::min({size_t(height),
+                    size_t(65535),
+                    (plan.gpu_bytes - 132) /
+                        (16 * (size_t(source_width) + destination_width)),
+                    plan.host_bytes / (16 * size_t(source_width))});
+      CuTexImage input, hist;
+      struct Drain {
+        ~Drain() { cudaDeviceSynchronize(); }
+      } drain;
+      if (!input.InitTexture(source_width, int(rows), 4) ||
+          !hist.InitTexture(destination_width, int(rows), 4))
+        throw std::runtime_error("SIFT streamed histogram allocation");
+      stats.gpu_staging_bytes =
+          std::max(stats.gpu_staging_bytes,
+                   size_t(input.GetDataSize()) + size_t(hist.GetDataSize()) +
+                       33 * sizeof(float));
+      for (int row = 0; row < height;) {
+        const int count = int(std::min(rows, size_t(height - row)));
+        upload(input, *source, row, count);
+        hist.SetImageSize(destination_width, count);
+        timed(stats.kernel_seconds, [&] {
+          const bool initial = source == result.key.get();
+          auto texture =
+              input.BindTexture(texDataDesc,
+                                initial ? cudaCreateChannelDesc<float4>()
+                                        : cudaCreateChannelDesc<int4>());
+          if (!texture.handle)
+            throw std::runtime_error("SIFT streamed histogram texture binding");
+          if (initial) {
+            dim3 grid(
+                (destination_width + HIST_INIT_WIDTH - 1) / HIST_INIT_WIDTH,
+                count);
+            dim3 block(HIST_INIT_WIDTH, 1);
+            InitHist_Kernel<<<grid, block>>>(texture.handle,
+                                             static_cast<int4*>(hist._cuData),
+                                             source_width,
+                                             destination_width,
+                                             count,
+                                             row,
+                                             height);
+          } else {
+            // Reduction groups four adjacent int4s within the same absolute
+            // row. Launch geometry does not change grouping or addition order.
+            dim3 grid(
+                (destination_width + HIST_INIT_WIDTH - 1) / HIST_INIT_WIDTH,
+                count);
+            dim3 block(HIST_INIT_WIDTH, 1);
+            ReduceHist_Kernel<<<grid, block>>>(texture.handle,
+                                               static_cast<int4*>(hist._cuData),
+                                               source_width,
+                                               destination_width,
+                                               count);
+          }
+          finish();
+        });
+        download(hist, *output, row, count, 0, count);
+        row += count;
+      }
+    }
+    output->Seal();
+    source = output.get();
+    source_width = destination_width;
+    result.histograms.push_back(std::move(output));
+    if (destination_width == 1) break;  // Same TraverseHistogram stopping rule.
+    destination_width = (destination_width + 3) >> 2;
+  }
+  stats.scratch_bytes = stats.file_written_bytes;
+  CheckStreamCancellation(options.cancelled);
+  stats.seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+          .count();
+  return result;
+}
 
-void __global__ ListGen_Kernel(cudaTextureObject_t texDataList, cudaTextureObject_t texDataI4, int4* d_list, int list_len, int width)
-{
-	int idx1 = IMUL(blockIdx.x, blockDim.x) + threadIdx.x;
-    int4 pos = tex1Dfetch<int4>(texDataList, idx1);
-	int idx2 = IMUL(pos.y, width) + pos.x;
-	int4 temp = tex1Dfetch<int4>(texDataI4, idx2);
-	int  sum1 = temp.x + temp.y;
-	int  sum2 = sum1 + temp.z;
-	pos.x <<= 2;
-	if(pos.z >= sum2)
-	{
-		pos.x += 3;
-		pos.z -= sum2;
-	}else if(pos.z >= sum1)
-	{
-		pos.x += 2;
-		pos.z -= sum1;
-	}else if(pos.z >= temp.x)
-	{
-		pos.x += 1;
-		pos.z -= temp.x;
-	}
+void __global__ ListGen_Kernel(cudaTextureObject_t texDataList,
+                               cudaTextureObject_t texDataI4,
+                               int4* d_list,
+                               int list_len,
+                               int width,
+                               bool packed = false) {
+  int idx1 = IMUL(blockIdx.x, blockDim.x) + threadIdx.x;
+  if (idx1 >= list_len) return;
+  int4 pos = tex1Dfetch<int4>(texDataList, idx1);
+  int idx2 = packed ? idx1 : IMUL(pos.y, width) + pos.x;
+  int4 temp = tex1Dfetch<int4>(texDataI4, idx2);
+  int sum1 = temp.x + temp.y;
+  int sum2 = sum1 + temp.z;
+  pos.x <<= 2;
+  if (pos.z >= sum2) {
+    pos.x += 3;
+    pos.z -= sum2;
+  } else if (pos.z >= sum1) {
+    pos.x += 2;
+    pos.z -= sum1;
+  } else if (pos.z >= temp.x) {
+    pos.x += 1;
+    pos.z -= temp.x;
+  }
   if (idx1 < list_len) {
     d_list[idx1] = pos;
   }
@@ -801,6 +1513,182 @@ void ProgramCU::GenerateList(CuTexImage* list, CuTexImage* hist)
                                   hist->GetImgWidth());
 }
 
+siftgpu::StreamListResult ProgramCU::GenerateListStreamed(
+    siftgpu::StreamKeyResult& detection,
+    const siftgpu::StreamFilterOptions& options) {
+  using namespace siftgpu;
+  const auto start = std::chrono::steady_clock::now();
+  CheckStreamCancellation(options.cancelled);
+  ListPlan plan(options.gpu_bytes, options.host_bytes);
+  if (!detection.key || !detection.key->Complete() ||
+      detection.key->Channels() != 4 || detection.histograms.empty())
+    throw std::invalid_argument("SIFT streamed list requires KEY/histograms");
+  const int height = detection.key->Height();
+  int width = detection.key->Width();
+  if (height >= (1 << 23) || width >= (1 << 23) ||
+      int64_t(width) * height > INT32_MAX)
+    throw std::invalid_argument("SIFT streamed list integer domain");
+  for (const auto& plane : detection.histograms) {
+    // Exact ceil and legacy rounded first grouping coincide on supported
+    // rounded widths; detection has already established border semantics.
+    width = (width + 3) / 4;
+    if (!plane || !plane->Complete() || plane->Channels() != 4 ||
+        plane->Height() != height || plane->Width() != width)
+      throw std::invalid_argument("SIFT streamed list histogram shape");
+  }
+  if (width != 1)
+    throw std::invalid_argument("SIFT streamed list missing histogram root");
+  StreamListResult result;
+  auto& stats = result.stats;
+  // These are int4 bit patterns throughout, including host float storage.
+  // Never convert histogram values to float or change traversal arithmetic.
+  std::vector<float> positions(plan.records * 4), packed(plan.records * 4);
+  float cell[4];
+  auto read = [&](StreamedPlane& plane, int x, int y, float* target) {
+    const auto time = std::chrono::steady_clock::now();
+    plane.ReadRecord(x, y, target, options.cancelled);
+    stats.file_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - time)
+            .count();
+    stats.file_read_bytes += 16;
+  };
+  auto& root = *detection.histograms.back();
+  int64_t total = 0;
+  for (int row = 0; row < height; ++row) {
+    read(root, 0, row, cell);
+    int counts[4];
+    std::memcpy(counts, cell, 16);
+    // Resident GenerateFeatureList clamps negative root counts to zero.
+    for (int count : counts) total += std::max(0, count);
+    if (total > INT32_MAX)
+      throw std::overflow_error("SIFT streamed list count overflow");
+  }
+  // Resident unconditionally descends once even with a single root. Its
+  // nonzero tiny-domain result is not qualified; do not silently fix it.
+  if (total && detection.histograms.size() == 1)
+    throw std::runtime_error("SIFT nonzero single-level list is unqualified");
+  result.count = int(total);
+  stats.host_staging_bytes = plan.host_bytes;
+  if (total) {
+    result.records = std::make_unique<StreamedPlane>(
+        options.scratch_directory, 1, result.count, 4);
+    result.records->Reserve();
+    CheckStreamCancellation(options.cancelled);
+    CuTexImage list, histogram;
+    struct Drain {
+      ~Drain() { cudaDeviceSynchronize(); }
+    } drain;
+    if (!list.InitTexture(int(plan.records), 1, 4) ||
+        !histogram.InitTexture(int(plan.records), 1, 4))
+      throw std::runtime_error("SIFT streamed list GPU allocation");
+    stats.gpu_staging_bytes =
+        size_t(list.GetDataSize()) + size_t(histogram.GetDataSize()) + 132;
+    auto finish = [&] {
+      if (cudaGetLastError() != cudaSuccess ||
+          cudaDeviceSynchronize() != cudaSuccess)
+        throw std::runtime_error("SIFT streamed list CUDA failure");
+    };
+    auto upload = [&](CuTexImage& texture, const float* data, int n) {
+      const auto time = std::chrono::steady_clock::now();
+      texture.SetImageSize(n, 1);
+      if (cudaMemcpy(
+              texture._cuData, data, size_t(n) * 16, cudaMemcpyHostToDevice) !=
+          cudaSuccess)
+        throw std::runtime_error("SIFT streamed list upload");
+      stats.h2d_bytes += size_t(n) * 16;
+      stats.h2d_seconds +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - time)
+              .count();
+    };
+    auto download = [&](int n) {
+      const auto time = std::chrono::steady_clock::now();
+      if (cudaMemcpy(positions.data(),
+                     list._cuData,
+                     size_t(n) * 16,
+                     cudaMemcpyDeviceToHost) != cudaSuccess)
+        throw std::runtime_error("SIFT streamed list download");
+      stats.d2h_bytes += size_t(n) * 16;
+      stats.d2h_seconds +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - time)
+              .count();
+    };
+    // Seed cursor is row, channel, rank: precisely the resident ii/jj loop.
+    int row = -1, channel = 3, rank = 0, count = 0;
+    for (int first = 0; first < result.count;) {
+      CheckStreamCancellation(options.cancelled);
+      const int n = int(std::min(plan.records, size_t(result.count - first)));
+      for (int i = 0; i < n; ++i) {
+        while (rank == count) {
+          ++channel;
+          if (channel >= 4) {
+            ++row;
+            read(root, 0, row, cell);
+            channel = 0;
+          }
+          int counts[4];
+          std::memcpy(counts, cell, 16);
+          count = std::max(0, counts[channel]);
+          rank = 0;
+        }
+        const int seed[4] = {channel, row, rank++, 0};
+        std::memcpy(positions.data() + 4 * i, seed, 16);
+      }
+      upload(list, positions.data(), n);
+      for (int hi = int(detection.histograms.size()) - 2; hi >= 0; --hi) {
+        auto& plane = *detection.histograms[hi];
+        for (int i = 0; i < n; ++i) {
+          int position[4];
+          std::memcpy(position, positions.data() + 4 * i, 16);
+          read(plane, position[0], position[1], packed.data() + 4 * i);
+          int values[4];
+          std::memcpy(values, packed.data() + 4 * i, 16);
+          int64_t sum = 0;
+          for (int value : values) {
+            if (value < 0)
+              throw std::runtime_error("SIFT streamed negative histogram");
+            sum += value;
+          }
+          if (sum > INT32_MAX || position[2] < 0 || position[2] >= sum)
+            throw std::runtime_error("SIFT streamed invalid histogram rank");
+        }
+        upload(histogram, packed.data(), n);
+        auto list_tex =
+            list.BindTexture(texDataDesc, cudaCreateChannelDesc<int4>());
+        auto hist_tex =
+            histogram.BindTexture(texDataDesc, cudaCreateChannelDesc<int4>());
+        if (!list_tex.handle || !hist_tex.handle)
+          throw std::runtime_error("SIFT streamed list texture binding");
+        const auto time = std::chrono::steady_clock::now();
+        ListGen_Kernel<<<(n + LISTGEN_BLOCK_DIM - 1) / LISTGEN_BLOCK_DIM,
+                         LISTGEN_BLOCK_DIM>>>(list_tex.handle,
+                                              hist_tex.handle,
+                                              static_cast<int4*>(list._cuData),
+                                              n,
+                                              plane.Width(),
+                                              true);
+        finish();
+        stats.kernel_seconds += std::chrono::duration<double>(
+                                    std::chrono::steady_clock::now() - time)
+                                    .count();
+        download(n);
+      }
+      const auto time = std::chrono::steady_clock::now();
+      result.records->WriteRows(first, n, positions.data(), options.cancelled);
+      stats.file_seconds +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - time)
+              .count();
+      stats.file_written_bytes += size_t(n) * 16;
+      first += n;
+    }
+    result.records->Seal();
+    stats.scratch_bytes = result.records->Bytes();
+  }
+  CheckStreamCancellation(options.cancelled);
+  stats.seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+          .count();
+  return result;
+}
 void __global__ ComputeOrientation_Kernel(cudaTextureObject_t texDataF2,
                                           cudaTextureObject_t texDataF4,
                                           cudaTextureObject_t texDataList,
@@ -812,7 +1700,10 @@ void __global__ ComputeOrientation_Kernel(cudaTextureObject_t texDataF2,
 										  int num_orientation,
 										  int existing_keypoint,
 										  int subpixel,
-										  int keepsign)
+										  int keepsign,
+                                          int gradient_first_row = 0,
+                                          bool gathered_key = false,
+                                          int4* window_bounds = nullptr)
 {
 	const float ten_degree_per_radius = 5.7295779513082320876798154814105;
 	const float radius_per_ten_degrees = 1.0 / 5.7295779513082320876798154814105;
@@ -830,7 +1721,7 @@ void __global__ ComputeOrientation_Kernel(cudaTextureObject_t texDataF2,
 		key.z = sigma;
 		if(subpixel || keepsign)
 		{
-			float4 offset = tex1Dfetch<float4>(texDataF4, IMUL(width, ikey.y) + ikey.x);
+			float4 offset = tex1Dfetch<float4>(texDataF4, gathered_key ? idx : IMUL(width, ikey.y) + ikey.x);
 			if(subpixel)
 			{
 				key.x += offset.y;
@@ -840,6 +1731,23 @@ void __global__ ComputeOrientation_Kernel(cudaTextureObject_t texDataF2,
 			if(keepsign) key.z *= offset.x;
 		}
 	}
+  // Read-only sampling metadata pass: the SAME key arithmetic (including
+  // device pow and subpixel/sign) defines the original float loop bounds.
+  // No floating coordinates are translated to a local origin.
+  if (window_bounds) {
+    float win = fabs(key.z) * sample_factor;
+    float ymin = max(1.5f, floorf(key.y - win) + 0.5f);
+    float ymax = min(height - 1.5f, floorf(key.y + win) + 0.5f);
+    if (!isfinite(key.x) || !isfinite(key.y) || !isfinite(key.z) ||
+        !isfinite(win)) {
+      window_bounds[idx] = make_int4(-1, -1, 0, 0);
+    } else if (!num_orientation || ymin > ymax) {
+      window_bounds[idx] = make_int4(0, 0, 0, 0);
+    } else {
+      window_bounds[idx] = make_int4(int(ymin), int(ymax), 0, 0);
+    }
+    return;
+  }
 	if(num_orientation == 0)
 	{
 		key.w = 0;
@@ -865,7 +1773,7 @@ void __global__ ComputeOrientation_Kernel(cudaTextureObject_t texDataF2,
 			float dy = y - key.y;
 			float sq_dist  = dx * dx + dy * dy;
 			if(sq_dist >= dist_threshold) continue;
-			float2 got = tex1Dfetch<float2>(texDataF2, IMUL(int(y), width) + int(x));
+			float2 got = tex1Dfetch<float2>(texDataF2, IMUL(int(y), width) + int(x) - gradient_first_row * width);
 			float weight = got.x * exp(sq_dist * factor);
 			float fidx = floorf(got.y * ten_degree_per_radius);
 			int oidx = fidx;
@@ -1014,8 +1922,207 @@ void ProgramCU::ComputeOrientation(CuTexImage* list, CuTexImage* got, CuTexImage
 	ProgramCU::CheckErrorCUDA("ComputeOrientation");
 }
 
-template <bool DYNAMIC_INDEXING> void __global__ ComputeDescriptor_Kernel(cudaTextureObject_t texDataF2, cudaTextureObject_t texDataF4, float4* d_des, int num,
-											 int width, int height, float window_factor)
+siftgpu::StreamListResult ProgramCU::ComputeOrientationStreamed(
+    siftgpu::StreamListResult& list,
+    siftgpu::StreamedPlane& gradient,
+    siftgpu::StreamedPlane& key,
+    float sigma,
+    float sigma_step,
+    const siftgpu::StreamFilterOptions& options) {
+  using namespace siftgpu;
+  const auto start = std::chrono::steady_clock::now();
+  CheckStreamCancellation(options.cancelled);
+  const int width = gradient.Width(), height = gradient.Height();
+  OrientationPlan minimum(width, 1, options.gpu_bytes, options.host_bytes);
+  if (!gradient.Complete() || gradient.Channels() != 2 || !key.Complete() ||
+      key.Channels() != 4 || key.Width() != width || key.Height() != height ||
+      width >= (1 << 23) || height >= (1 << 23) ||
+      int64_t(width) * height > INT32_MAX || list.count < 0 ||
+      !std::isfinite(sigma) || sigma <= 0 || !std::isfinite(sigma_step) ||
+      sigma_step <= 0 ||
+      (GlobalUtil::_KeepExtremumSign && !GlobalUtil::_SubpixelLocalization))
+    throw std::invalid_argument("SIFT streamed orientation domain");
+  if (list.count &&
+      (!list.records || !list.records->Complete() ||
+       list.records->Width() != 1 || list.records->Channels() != 4 ||
+       list.records->Height() < list.count))
+    throw std::invalid_argument("SIFT streamed orientation list");
+  const bool expand =
+      GlobalUtil::_MaxOrientation > 1 && !GlobalUtil::_FixedOrientation;
+  const int orientations =
+      GlobalUtil::_FixedOrientation ? 0 : GlobalUtil::_MaxOrientation;
+  if (int64_t(list.count) * (expand ? 2 : 1) > INT32_MAX)
+    throw std::overflow_error("SIFT streamed orientation expansion");
+  StreamListResult result;
+  auto& stats = result.stats;
+  if (!list.count) return result;
+  result.records = std::make_unique<StreamedPlane>(
+      options.scratch_directory, 1, list.count * (expand ? 2 : 1), 4);
+  result.records->Reserve();
+  stats.scratch_bytes = result.records->Bytes();
+  CuTexImage device_list, device_key, device_bounds;
+  struct Drain {
+    ~Drain() { cudaDeviceSynchronize(); }
+  } drain;
+  if (!device_list.InitTexture(1, 1, 4) || !device_key.InitTexture(1, 1, 4) ||
+      !device_bounds.InitTexture(1, 1, 4))
+    throw std::runtime_error("SIFT streamed orientation GPU records");
+  auto finish = [&] {
+    if (cudaGetLastError() != cudaSuccess ||
+        cudaDeviceSynchronize() != cudaSuccess)
+      throw std::runtime_error("SIFT streamed orientation CUDA failure");
+  };
+  auto transfer = [&](void* device, void* host, size_t bytes, bool upload) {
+    const auto time = std::chrono::steady_clock::now();
+    if (cudaMemcpy(upload ? device : host,
+                   upload ? host : device,
+                   bytes,
+                   upload ? cudaMemcpyHostToDevice : cudaMemcpyDeviceToHost) !=
+        cudaSuccess)
+      throw std::runtime_error("SIFT streamed orientation transfer");
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - time)
+            .count();
+    if (upload) {
+      stats.h2d_bytes += bytes;
+      stats.h2d_seconds += seconds;
+    } else {
+      stats.d2h_bytes += bytes;
+      stats.d2h_seconds += seconds;
+    }
+  };
+  for (int first = 0; first < list.count; ++first) {
+    CheckStreamCancellation(options.cancelled);
+    // Exactly 96 bytes of host records, including maximum reshape capacity.
+    int4 position, bounds;
+    float offset[4], packed[4], expanded[8];
+    auto time = std::chrono::steady_clock::now();
+    list.records->ReadRows(
+        first, 1, reinterpret_cast<float*>(&position), options.cancelled);
+    stats.file_read_bytes += 16;
+    if (position.x < 0 || position.x >= width || position.y < 0 ||
+        position.y >= height)
+      throw std::runtime_error("SIFT streamed orientation invalid feature");
+    key.ReadRecord(position.x, position.y, offset, options.cancelled);
+    stats.file_read_bytes += 16;
+    stats.file_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - time)
+            .count();
+    transfer(device_list._cuData, &position, 16, true);
+    transfer(device_key._cuData, offset, 16, true);
+    auto list_tex =
+        device_list.BindTexture(texDataDesc, cudaCreateChannelDesc<int4>());
+    auto key_tex =
+        device_key.BindTexture(texDataDesc, cudaCreateChannelDesc<float4>());
+    if (!list_tex.handle || !key_tex.handle)
+      throw std::runtime_error("SIFT streamed orientation texture binding");
+    time = std::chrono::steady_clock::now();
+    ComputeOrientation_Kernel<<<1, 16>>>(
+        0,
+        key_tex.handle,
+        list_tex.handle,
+        static_cast<float4*>(device_list._cuData),
+        1,
+        width,
+        height,
+        sigma,
+        sigma_step,
+        GlobalUtil::_OrientationGaussianFactor,
+        GlobalUtil::_OrientationGaussianFactor *
+            GlobalUtil::_OrientationWindowFactor,
+        orientations,
+        0,
+        GlobalUtil::_SubpixelLocalization,
+        GlobalUtil::_KeepExtremumSign,
+        0,
+        true,
+        static_cast<int4*>(device_bounds._cuData));
+    finish();
+    stats.kernel_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - time)
+            .count();
+    transfer(device_bounds._cuData, &bounds, 16, false);
+    if (bounds.x < 0 || bounds.y < bounds.x || bounds.y >= height)
+      throw std::runtime_error("SIFT streamed orientation invalid window");
+    const int rows = bounds.y - bounds.x + 1;
+    OrientationPlan plan(width, rows, options.gpu_bytes, options.host_bytes);
+    std::vector<float> staging(size_t(width) * rows * 2);
+    CuTexImage device_gradient;
+    // Declared after its owner, so unwind drains BEFORE releasing this window.
+    Drain window_drain;
+    if (!device_gradient.InitTexture(width, rows, 2))
+      throw std::runtime_error("SIFT streamed orientation GPU window");
+    stats.gpu_staging_bytes = std::max(stats.gpu_staging_bytes, plan.gpu_bytes);
+    stats.host_staging_bytes =
+        std::max(stats.host_staging_bytes, plan.host_bytes);
+    time = std::chrono::steady_clock::now();
+    gradient.ReadRows(bounds.x, rows, staging.data(), options.cancelled);
+    stats.file_read_bytes += staging.size() * sizeof(float);
+    stats.file_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - time)
+            .count();
+    transfer(device_gradient._cuData,
+             staging.data(),
+             staging.size() * sizeof(float),
+             true);
+    auto gradient_tex = device_gradient.BindTexture(
+        texDataDesc, cudaCreateChannelDesc<float2>());
+    if (!gradient_tex.handle)
+      throw std::runtime_error("SIFT streamed orientation gradient binding");
+    time = std::chrono::steady_clock::now();
+    ComputeOrientation_Kernel<<<1, 16>>>(
+        gradient_tex.handle,
+        key_tex.handle,
+        list_tex.handle,
+        static_cast<float4*>(device_list._cuData),
+        1,
+        width,
+        height,
+        sigma,
+        sigma_step,
+        GlobalUtil::_OrientationGaussianFactor,
+        GlobalUtil::_OrientationGaussianFactor *
+            GlobalUtil::_OrientationWindowFactor,
+        orientations,
+        0,
+        GlobalUtil::_SubpixelLocalization,
+        GlobalUtil::_KeepExtremumSign,
+        bounds.x,
+        true);
+    finish();
+    stats.kernel_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - time)
+            .count();
+    transfer(device_list._cuData, packed, 16, false);
+    int produced = 1;
+    if (expand)
+      produced = ReshapePackedOrientations(packed, 1, expanded);
+    else
+      std::memcpy(expanded, packed, 16);
+    if (produced) {
+      time = std::chrono::steady_clock::now();
+      result.records->WriteRows(
+          result.count, produced, expanded, options.cancelled);
+      stats.file_written_bytes += size_t(produced) * 16;
+      result.count += produced;
+      stats.file_seconds +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - time)
+              .count();
+    }
+  }
+  CheckStreamCancellation(options.cancelled);
+  if (result.count)
+    result.records->SealPrefix(result.count);
+  else
+    result.records.reset();
+  stats.seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+          .count();
+  return result;
+}
+
+template <bool DYNAMIC_INDEXING, bool STREAMED = false> void __global__ ComputeDescriptor_Kernel(cudaTextureObject_t texDataF2, cudaTextureObject_t texDataF4, float4* d_des, int num,
+											 int width, int height, float window_factor, int gradient_origin = 0, int2* bounds = nullptr)
 {
 	const float rpi = 4.0/ 3.14159265358979323846;
 	int idx = IMUL(blockIdx.x, blockDim.x) + threadIdx.x;
@@ -1039,6 +2146,14 @@ template <bool DYNAMIC_INDEXING> void __global__ ComputeDescriptor_Kernel(cudaTe
 	ymin = max(1.5f, floorf(pt.y - bsz) + 0.5f);
 	xmax = min(width - 1.5f, floorf(pt.x + bsz) + 0.5f);
 	ymax = min(height - 1.5f, floorf(pt.y + bsz) + 0.5f);
+	// Bounds are produced by the original per-bin floating-point expressions
+	// above. Empty bins fetch nothing; include every possible loop row even
+	// if the later rotated-bin predicate rejects it. No float translation.
+	if(STREAMED && bounds) {
+		bounds[bidx] = ymin <= ymax && xmin <= xmax
+			? make_int2(int(ymin), int(ymax)) : make_int2(0, -1);
+		return;
+	}
 	float des[9];
 #pragma unroll
 	for(int i =0; i < 9; ++i) des[i] = 0.0f;
@@ -1054,7 +2169,7 @@ template <bool DYNAMIC_INDEXING> void __global__ ComputeDescriptor_Kernel(cudaTe
 			float nyn = fabs(ny);
 			if(nxn < 1.0f && nyn < 1.0f)
 			{
-				float2 cc = tex1Dfetch<float2>(texDataF2, IMUL(int(y), width) + int(x));
+				float2 cc = tex1Dfetch<float2>(texDataF2, IMUL(STREAMED ? int(y) - gradient_origin : int(y), width) + int(x));
 				float dnx = nx + offsetpt.x;
 				float dny = ny + offsetpt.y;
 				float ww = exp(-0.125f * (dnx * dnx + dny * dny));
@@ -1239,6 +2354,204 @@ void ProgramCU::ComputeDescriptor(CuTexImage*list, CuTexImage* got, CuTexImage* 
 	CheckErrorCUDA("ComputeDescriptor");
 }
 
+siftgpu::StreamDescriptorResult ProgramCU::ComputeDescriptorStreamed(
+    siftgpu::StreamListResult& list,
+    siftgpu::StreamedPlane& gradient,
+    const siftgpu::StreamFilterOptions& options) {
+  using namespace siftgpu;
+  const auto start = std::chrono::steady_clock::now();
+  CheckStreamCancellation(options.cancelled);
+  const int width = gradient.Width(), height = gradient.Height();
+  DescriptorPlan minimum(width, 1, options.gpu_bytes, options.host_bytes);
+  if (!gradient.Complete() || gradient.Channels() != 2 || width < 3 ||
+      height < 3 || width >= (1 << 23) || height >= (1 << 23) ||
+      int64_t(width) * height > INT32_MAX || list.count < 0 ||
+      !std::isfinite(GlobalUtil::_DescriptorWindowFactor) ||
+      GlobalUtil::_DescriptorWindowFactor <= 0 ||
+      (list.count &&
+       (!list.records || !list.records->Complete() ||
+        list.records->Width() != 1 || list.records->Channels() != 4 ||
+        list.records->Height() < list.count)))
+    throw std::invalid_argument("SIFT streamed descriptor domain");
+  StreamDescriptorResult result;
+  auto& stats = result.stats;
+  if (!list.count) return result;
+  result.records = std::make_unique<StreamedPlane>(
+      options.scratch_directory, 1, list.count, 128);
+  result.records->Reserve();
+  stats.scratch_bytes = result.records->Bytes();
+  CuTexImage device_list, device_bounds, device_descriptor;
+  struct Drain {
+    ~Drain() { cudaDeviceSynchronize(); }
+  } drain;
+  if (!device_list.InitTexture(1, 1, 4) ||
+      !device_bounds.InitTexture(16, 1, 2) ||
+      !device_descriptor.InitTexture(128, 1))
+    throw std::runtime_error("SIFT streamed descriptor GPU records");
+  auto finish = [&] {
+    if (cudaGetLastError() != cudaSuccess ||
+        cudaDeviceSynchronize() != cudaSuccess)
+      throw std::runtime_error("SIFT streamed descriptor CUDA failure");
+  };
+  auto transfer = [&](void* device, void* host, size_t bytes, bool upload) {
+    const auto time = std::chrono::steady_clock::now();
+    if (cudaMemcpy(upload ? device : host,
+                   upload ? host : device,
+                   bytes,
+                   upload ? cudaMemcpyHostToDevice : cudaMemcpyDeviceToHost) !=
+        cudaSuccess)
+      throw std::runtime_error("SIFT streamed descriptor transfer");
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - time)
+            .count();
+    if (upload) {
+      stats.h2d_bytes += bytes;
+      stats.h2d_seconds += seconds;
+    } else {
+      stats.d2h_bytes += bytes;
+      stats.d2h_seconds += seconds;
+    }
+  };
+  for (int first = 0; first < list.count; ++first) {
+    CheckStreamCancellation(options.cancelled);
+    float key[4], descriptor[128];
+    int2 bounds[16];
+    auto time = std::chrono::steady_clock::now();
+    list.records->ReadRows(first, 1, key, options.cancelled);
+    stats.file_read_bytes += 16;
+    stats.file_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - time)
+            .count();
+    if (!std::isfinite(key[0]) || !std::isfinite(key[1]) ||
+        !std::isfinite(key[2]) || !std::isfinite(key[3]) || key[2] == 0 ||
+        key[0] < 0 || key[0] >= width || key[1] < 0 || key[1] >= height ||
+        !std::isfinite(key[2] * GlobalUtil::_DescriptorWindowFactor))
+      throw std::invalid_argument("SIFT streamed descriptor feature");
+    transfer(device_list._cuData, key, 16, true);
+    auto list_tex =
+        device_list.BindTexture(texDataDesc, cudaCreateChannelDesc<float4>());
+    if (!list_tex.handle)
+      throw std::runtime_error("SIFT streamed descriptor list binding");
+    time = std::chrono::steady_clock::now();
+    // Same block size and lane/bin mapping as the resident kernel. Only the
+    // first feature is live; inactive tail threads return before any access.
+    if (GlobalUtil::_UseDynamicIndexing)
+      ComputeDescriptor_Kernel<true, true>
+          <<<1, DESCRIPTOR_COMPUTE_BLOCK_SIZE>>>(
+              0,
+              list_tex.handle,
+              nullptr,
+              1,
+              width,
+              height,
+              GlobalUtil::_DescriptorWindowFactor,
+              0,
+              static_cast<int2*>(device_bounds._cuData));
+    else
+      ComputeDescriptor_Kernel<false, true>
+          <<<1, DESCRIPTOR_COMPUTE_BLOCK_SIZE>>>(
+              0,
+              list_tex.handle,
+              nullptr,
+              1,
+              width,
+              height,
+              GlobalUtil::_DescriptorWindowFactor,
+              0,
+              static_cast<int2*>(device_bounds._cuData));
+    finish();
+    stats.kernel_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - time)
+            .count();
+    transfer(device_bounds._cuData, bounds, 128, false);
+    int low = height, high = -1;
+    for (const auto& bound : bounds) {
+      if (bound.y < bound.x) continue;
+      if (bound.x < 0 || bound.y >= height)
+        throw std::runtime_error("SIFT streamed descriptor invalid bounds");
+      low = std::min(low, bound.x);
+      high = std::max(high, bound.y);
+    }
+    // An entirely empty support still needs a valid bound texture; no fetch
+    // occurs. Original zero-descriptor normalization is left unchanged.
+    if (high < low) low = high = 0;
+    const int rows = high - low + 1;
+    DescriptorPlan plan(width, rows, options.gpu_bytes, options.host_bytes);
+    stats.gpu_staging_bytes = std::max(stats.gpu_staging_bytes, plan.gpu_bytes);
+    stats.host_staging_bytes =
+        std::max(stats.host_staging_bytes, plan.host_bytes);
+    std::vector<float> staging(size_t(width) * rows * 2);
+    CuTexImage device_gradient;
+    Drain window_drain;
+    if (!device_gradient.InitTexture(width, rows, 2))
+      throw std::runtime_error("SIFT streamed descriptor GPU window");
+    time = std::chrono::steady_clock::now();
+    gradient.ReadRows(low, rows, staging.data(), options.cancelled);
+    const size_t bytes = staging.size() * sizeof(float);
+    stats.file_read_bytes += bytes;
+    stats.file_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - time)
+            .count();
+    transfer(device_gradient._cuData, staging.data(), bytes, true);
+    auto gradient_tex = device_gradient.BindTexture(
+        texDataDesc, cudaCreateChannelDesc<float2>());
+    if (!gradient_tex.handle)
+      throw std::runtime_error("SIFT streamed descriptor gradient binding");
+    time = std::chrono::steady_clock::now();
+    if (GlobalUtil::_UseDynamicIndexing)
+      ComputeDescriptor_Kernel<true, true>
+          <<<1, DESCRIPTOR_COMPUTE_BLOCK_SIZE>>>(
+              gradient_tex.handle,
+              list_tex.handle,
+              static_cast<float4*>(device_descriptor._cuData),
+              1,
+              width,
+              height,
+              GlobalUtil::_DescriptorWindowFactor,
+              low);
+    else
+      ComputeDescriptor_Kernel<false, true>
+          <<<1, DESCRIPTOR_COMPUTE_BLOCK_SIZE>>>(
+              gradient_tex.handle,
+              list_tex.handle,
+              static_cast<float4*>(device_descriptor._cuData),
+              1,
+              width,
+              height,
+              GlobalUtil::_DescriptorWindowFactor,
+              low);
+    finish();
+    if (GlobalUtil::_NormalizedSIFT) {
+      auto descriptor_tex = device_descriptor.BindTexture(
+          texDataDesc, cudaCreateChannelDesc<float4>());
+      if (!descriptor_tex.handle)
+        throw std::runtime_error(
+            "SIFT streamed descriptor normalization binding");
+      NormalizeDescriptor_Kernel<<<1, DESCRIPTOR_NORMALIZ_PER_BLOCK>>>(
+          descriptor_tex.handle,
+          static_cast<float4*>(device_descriptor._cuData),
+          1);
+      finish();
+    }
+    stats.kernel_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - time)
+            .count();
+    transfer(device_descriptor._cuData, descriptor, 512, false);
+    time = std::chrono::steady_clock::now();
+    result.records->WriteRows(first, 1, descriptor, options.cancelled);
+    stats.file_written_bytes += 512;
+    stats.file_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - time)
+            .count();
+  }
+  CheckStreamCancellation(options.cancelled);
+  result.records->Seal();
+  result.count = list.count;
+  stats.seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+          .count();
+  return result;
+}
 //////////////////////////////////////////////////////
 void ProgramCU::FinishCUDA()
 {

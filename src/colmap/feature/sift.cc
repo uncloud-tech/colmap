@@ -2,6 +2,7 @@
 
 #include "colmap/feature/sift.h"
 
+#include "colmap/feature/sift_streaming.h"
 #include "colmap/feature/utils.h"
 #include "colmap/geometry/essential_matrix.h"
 #include "colmap/math/math.h"
@@ -19,6 +20,22 @@
 #include <GL/glew.h>
 #endif  // COLMAP_GUI_ENABLED
 #endif  // COLMAP_GPU_ENABLED
+#if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
+#include <vector>
+using std::vector;
+// clang-format off: legacy base-class and GL header dependency order.
+#include "thirdparty/SiftGPU/GlobalUtil.h"
+#include "thirdparty/SiftGPU/GLTexImage.h"
+#include "thirdparty/SiftGPU/SiftPyramid.h"
+#ifndef SIFTGPU_CUDA_ENABLED
+#define SIFTGPU_CUDA_ENABLED
+#include "thirdparty/SiftGPU/PyramidCU.h"
+#undef SIFTGPU_CUDA_ENABLED
+#else
+#include "thirdparty/SiftGPU/PyramidCU.h"
+#endif
+// clang-format on
+#endif
 #include "colmap/util/eigen_alignment.h"
 
 #include "thirdparty/VLFeat/covdet.h"
@@ -47,6 +64,21 @@ bool SiftExtractionOptions::Check() const {
   CHECK_OPTION_GT(peak_threshold, 0.0);
   CHECK_OPTION_GT(edge_threshold, 0.0);
   CHECK_OPTION_GT(max_num_orientations, 0);
+  if (streaming) {
+    CHECK_OPTION_GT(streaming_gpu_bytes, 0);
+    CHECK_OPTION_GT(streaming_host_bytes, 0);
+    CHECK_OPTION_LE(streaming_gpu_bytes, std::numeric_limits<size_t>::max());
+    CHECK_OPTION_LE(streaming_host_bytes, std::numeric_limits<size_t>::max());
+    CHECK_OPTION_EQ(streaming_scratch_path.empty(), false);
+    CHECK_OPTION_EQ(estimate_affine_shape, false);
+    CHECK_OPTION_EQ(domain_size_pooling, false);
+    CHECK_OPTION_EQ(force_covariant_extractor, false);
+    CHECK_OPTION_EQ(darkness_adaptivity, false);
+    CHECK_OPTION_GE(first_octave, -1);
+    CHECK_OPTION_LE(first_octave, 0);
+    CHECK_OPTION_LE(octave_resolution, 61);
+    CHECK_OPTION_LE(max_num_orientations, 2);
+  }
   if (domain_size_pooling) {
     CHECK_OPTION_GT(dsp_min_scale, 0);
     CHECK_OPTION_GE(dsp_max_scale, dsp_min_scale);
@@ -113,7 +145,8 @@ FeatureDescriptorsData TransformVLFeatToUBCFeatureDescriptors(
 // Allocator bookkeeping/rounding and library internals remain policy.
 template <typename T>
 void ReserveSiftVector(const FeatureExtractionOptions& options,
-                       std::vector<T>* values, size_t required) {
+                       std::vector<T>* values,
+                       size_t required) {
   if (!options.reserve_host_payload || required <= values->capacity()) return;
   if (values->capacity()) {
     if (values->capacity() > std::numeric_limits<size_t>::max() / 2)
@@ -205,7 +238,8 @@ class SiftCPUFeatureExtractor : public FeatureExtractor {
       // Extract features with different orientations per DOG level.
       size_t level_idx = 0;
       int prev_level = -1;
-      options_.ReserveHostPayload(kSiftDescriptorDim, sizeof(float) + sizeof(uint8_t));
+      options_.ReserveHostPayload(kSiftDescriptorDim,
+                                  sizeof(float) + sizeof(uint8_t));
       FeatureDescriptorsFloatData desc(1, kSiftDescriptorDim);
       for (int i = 0; i < num_keypoints; ++i) {
         if (vl_keypoints[i].is != prev_level) {
@@ -222,20 +256,27 @@ class SiftCPUFeatureExtractor : public FeatureExtractor {
           // Add containers for new DOG level.
           level_idx = 0;
           if (options_.reserve_host_payload) {
-            THROW_CHECK_LE(num_keypoints, std::numeric_limits<int>::max() /
-                                          options_.sift->max_num_orientations);
-            ReserveSiftVector(options_, &level_num_features, level_num_features.size() + 1);
-            ReserveSiftVector(options_, &level_keypoints, level_keypoints.size() + 1);
+            THROW_CHECK_LE(num_keypoints,
+                           std::numeric_limits<int>::max() /
+                               options_.sift->max_num_orientations);
+            ReserveSiftVector(
+                options_, &level_num_features, level_num_features.size() + 1);
+            ReserveSiftVector(
+                options_, &level_keypoints, level_keypoints.size() + 1);
             if (level_descriptors.size() == level_descriptors.capacity()) {
               // Eigen matrix move/copy behavior is toolchain dependent. Cover
-              // a possible deep-copy relocation before growing the outer vector.
+              // a possible deep-copy relocation before growing the outer
+              // vector.
               for (const auto& level : level_descriptors)
                 options_.ReserveHostPayload(level.size());
             }
-            ReserveSiftVector(options_, &level_descriptors, level_descriptors.size() + 1);
+            ReserveSiftVector(
+                options_, &level_descriptors, level_descriptors.size() + 1);
             options_.ReserveHostPayload(
-                static_cast<uint64_t>(options_.sift->max_num_orientations) * num_keypoints,
-                sizeof(FeatureKeypoint) + (descriptors ? kSiftDescriptorDim : 0));
+                static_cast<uint64_t>(options_.sift->max_num_orientations) *
+                    num_keypoints,
+                sizeof(FeatureKeypoint) +
+                    (descriptors ? kSiftDescriptorDim : 0));
           }
           level_num_features.push_back(0);
           level_keypoints.emplace_back(options_.sift->max_num_orientations *
@@ -309,13 +350,12 @@ class SiftCPUFeatureExtractor : public FeatureExtractor {
     int num_features_with_orientations = 0;
     for (int i = level_keypoints.size() - 1; i >= 0; --i) {
       if (options_.reserve_host_payload) {
-        THROW_CHECK_LE(
-            level_num_features[i],
-            static_cast<size_t>(std::numeric_limits<int>::max() - num_features));
-        THROW_CHECK_LE(
-            level_keypoints[i].size(),
-            static_cast<size_t>(std::numeric_limits<int>::max() -
-                                num_features_with_orientations));
+        THROW_CHECK_LE(level_num_features[i],
+                       static_cast<size_t>(std::numeric_limits<int>::max() -
+                                           num_features));
+        THROW_CHECK_LE(level_keypoints[i].size(),
+                       static_cast<size_t>(std::numeric_limits<int>::max() -
+                                           num_features_with_orientations));
       }
       num_features += level_num_features[i];
       num_features_with_orientations += level_keypoints[i].size();
@@ -342,7 +382,8 @@ class SiftCPUFeatureExtractor : public FeatureExtractor {
     if (descriptors != nullptr) {
       size_t k = 0;
       // Output plus the subsequent VLFeat->UBC transform's separate matrix.
-      options_.ReserveHostPayload(num_features_with_orientations, 2 * kSiftDescriptorDim);
+      options_.ReserveHostPayload(num_features_with_orientations,
+                                  2 * kSiftDescriptorDim);
       descriptors->data.resize(num_features_with_orientations,
                                kSiftDescriptorDim);
       for (size_t i = first_level_to_keep; i < level_keypoints.size(); ++i) {
@@ -684,6 +725,17 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
     }
 
     auto extractor = std::make_unique<SiftGPUFeatureExtractor>(options);
+#if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
+    if (options.sift->streaming && (GlobalUtil::_InitPyramidWidth > 0 ||
+                                    GlobalUtil::_InitPyramidHeight > 0))
+      throw std::invalid_argument(
+          "SIFT streaming refuses resident pyramid preallocation");
+    if (options.sift->streaming &&
+        (gpu_indices[0] < 0 || gpu_indices[0] >= GetNumCudaDevices() ||
+         !PyramidCU::CheckCudaDevice(gpu_indices[0]))) {
+      throw std::runtime_error("SIFT streaming requires a usable CUDA device");
+    }
+#endif
 
     // Note that the SiftGPU object is not movable (for whatever reason).
     // If we instead create the object here and move it to the constructor, the
@@ -702,6 +754,10 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
       return nullptr;
     }
 
+#if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
+    if (options.sift->streaming && !GlobalUtil::_UseCUDA)
+      throw std::runtime_error("SIFT streaming refused non-CUDA backend");
+#endif
     return extractor;
   }
 
@@ -721,6 +777,20 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
 
     std::lock_guard<std::mutex> lock(*sift_gpu_mutexes_[sift_gpu_.gpu_index]);
 
+#if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
+    if (options_.sift->streaming) {
+      LOG(INFO) << "SIFT extraction selected_path=streamed experimental=1 "
+                   "decoder_streamed=0 aggregate_RAM_guarantee=0";
+      try {
+        return ExtractStreamed(bitmap, keypoints, descriptors);
+      } catch (const std::exception& error) {
+        LOG(ERROR) << "SIFT selected_path=streamed failed; no fallback: "
+                   << error.what();
+        throw;
+      }
+    }
+#endif
+
     // Note, that this produces slightly different results than using SiftGPU
     // directly for RGB->GRAY conversion, since it uses different weights.
     const int code = sift_gpu_.RunSIFT(bitmap.Pitch(),
@@ -739,7 +809,8 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
     // A bounded job must not release credits while a worker retains capacity.
     // Keep legacy reuse unchanged; bounded download storage is truly job-local.
     std::vector<SiftKeypoint> job_keypoints;
-    auto& download_keypoints = options_.reserve_host_payload ? job_keypoints : keypoints_buffer_;
+    auto& download_keypoints =
+        options_.reserve_host_payload ? job_keypoints : keypoints_buffer_;
     ReserveSiftVector(options_, &download_keypoints, num_features);
     options_.ReserveHostPayload(
         num_features, kSiftDescriptorDim * (sizeof(float) + sizeof(uint8_t)));
@@ -779,8 +850,183 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
   }
 
  private:
+#if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
+  bool ExtractStreamed(const Bitmap& bitmap,
+                       FeatureKeypoints* keypoints,
+                       FeatureDescriptors* descriptors) {
+    const auto& sift = *options_.sift;
+    SetBestCudaDevice(sift_gpu_.gpu_index);
+    // Do not reinterpret unsupported first octaves or silently downsample.
+    if (!GlobalUtil::_UseCUDA || bitmap.Width() <= 0 || bitmap.Height() <= 0 ||
+        bitmap.Width() > options_.EffMaxImageSize() ||
+        bitmap.Height() > options_.EffMaxImageSize())
+      throw std::invalid_argument(
+          "SIFT streaming unsupported domain; "
+          "no resizing or CPU fallback");
+    // Input history belongs to this extractor, never global filename order.
+    struct HistoryAttempt {
+      siftgpu::StreamInputHistory& history;
+      bool complete = false;
+      ~HistoryAttempt() {
+        if (!complete) history.Invalidate();
+      }
+    } history_attempt{streaming_input_history_};
+    siftgpu::StreamFilterOptions stage;
+    stage.gpu_bytes = sift.streaming_gpu_bytes;
+    stage.host_bytes = sift.streaming_host_bytes;
+    stage.scratch_directory = sift.streaming_scratch_path;
+    stage.cancelled = sift.streaming_cancelled;
+    siftgpu::CheckStreamCancellation(stage.cancelled);
+    const int factor = sift.first_octave == -1 ? 2 : 1;
+    // Match resident FitPyramid's effective octave count, not the CPU-only
+    // num_octaves setting which the existing GPU adapter does not pass.
+    const int max_octaves = std::max(
+        1,
+        int(std::floor(
+            std::log(double(std::min(bitmap.Width(), bitmap.Height())) *
+                     factor) /
+            std::log(2.0))) -
+            3);
+    const int octaves =
+        GlobalUtil::_octave_num_default < 1
+            ? max_octaves
+            : std::min(GlobalUtil::_octave_num_default, max_octaves);
+    if (octaves > 32 || sift_gpu_._level_num > 64)
+      throw std::invalid_argument(
+          "SIFT streaming level metadata exceeds bounds");
+    // Native vectors contain per-level owners/counts only, never pixel/list
+    // arrays. Cover all simultaneously retained owners and histogram levels
+    // (at most 32 for an int-height plane), including vector growth overlap.
+    const uint64_t metadata = sizeof(siftgpu::StreamInputHistory) +
+                              sizeof(siftgpu::StreamedPlane) +
+                              uint64_t(octaves) * sift_gpu_._level_num *
+                                  (4 * sizeof(siftgpu::StreamDetectionLevel) +
+                                   4 * sizeof(siftgpu::StreamListResult) +
+                                   4 * sizeof(siftgpu::StreamDescriptorResult) +
+                                   128 * sizeof(siftgpu::StreamedPlane) + 256);
+    const uint64_t retained =
+        uint64_t(keypoints->capacity()) * sizeof(FeatureKeypoint) +
+        uint64_t(descriptors->data.size()) +
+        uint64_t(keypoints_buffer_.capacity()) * sizeof(SiftKeypoint);
+    auto admit = [&](uint64_t count) {
+      return CheckSiftStreamingPayload(
+          bitmap.RowMajorData().capacity(),
+          retained,
+          stage.host_bytes,
+          metadata,
+          count,
+          sizeof(FeatureKeypoint) + kSiftDescriptorDim,
+          options_.host_budget_bytes,
+          options_.policy_host_bytes,
+          options_.reserve_host_bytes);
+    };
+    admit(0);  // Before allocating even a conversion row or backing plane.
+    if (uint64_t(bitmap.Width()) * sizeof(float) > stage.host_bytes ||
+        stage.host_bytes < 128 * sizeof(float) + 16)
+      throw std::runtime_error(
+          "SIFT streaming needs one conversion/descriptor row");
+    options_.ReserveHostPayload(stage.host_bytes + metadata);
+    auto& input = streaming_input_history_.Begin(
+        stage.scratch_directory, bitmap.Width(), bitmap.Height());
+    {
+      std::vector<float> row(bitmap.Width());
+      for (int y = 0; y < bitmap.Height(); ++y) {
+        const uint8_t* bytes =
+            bitmap.RowMajorData().data() + size_t(y) * bitmap.Pitch();
+        for (int x = 0; x < bitmap.Width(); ++x)
+          row[x] = bytes[x] / 255.0f;  // Original GLTexInput I2F arithmetic.
+        input.WriteRows(y, 1, row.data(), stage.cancelled);
+      }
+      input.Seal();
+    }
+    LOG(INFO) << "SIFT selected_path=streamed input_history_case="
+              << streaming_input_history_.Case() << " input_active_values="
+              << uint64_t(bitmap.Width()) * bitmap.Height()
+              << " input_capacity_values="
+              << streaming_input_history_.Capacity();
+    auto log_stage = [](const char* name,
+                        const siftgpu::StreamFilterStats& stats) {
+      LOG(INFO) << "SIFT selected_path=streamed stage=" << name
+                << " gpu_staging_peak_bytes=" << stats.gpu_staging_bytes
+                << " host_staging_peak_bytes=" << stats.host_staging_bytes
+                << " stage_scratch_peak_bytes=" << stats.scratch_bytes
+                << " file_read_bytes=" << stats.file_read_bytes
+                << " file_written_bytes=" << stats.file_written_bytes
+                << " h2d_bytes=" << stats.h2d_bytes
+                << " d2h_bytes=" << stats.d2h_bytes
+                << " seconds=" << stats.seconds;
+    };
+    auto detection = PyramidCU::BuildDetectionPyramidStreamed(
+        sift_gpu_, input, sift.first_octave, octaves, stage);
+    log_stage("detection_pyramid", detection.pyramid.stats);
+    auto lists = PyramidCU::GenerateFeatureListsStreamed(
+        detection,
+        GlobalUtil::_TruncateMethod,
+        GlobalUtil::_FeatureCountThreshold,
+        stage);
+    log_stage("feature_lists", lists.stats);
+    auto orientations = PyramidCU::GetFeatureOrientationsStreamed(
+        sift_gpu_,
+        detection,
+        lists,
+        GlobalUtil::_TruncateMethod,
+        GlobalUtil::_FeatureCountThreshold,
+        stage);
+    log_stage("orientations", orientations.stats);
+    // Full public arrays are irreducible at this API. Refuse BEFORE allocating
+    // them, including old caller capacities still live during replacement.
+    const uint64_t payload = admit(orientations.count);
+    options_.ReserveHostPayload(orientations.count,
+                                sizeof(FeatureKeypoint) + kSiftDescriptorDim);
+    auto result = PyramidCU::GetFeatureDescriptorsStreamed(
+        sift_gpu_, detection, orientations, stage);
+    log_stage("descriptors", result.stats);
+    FeatureKeypoints output_keypoints(result.features.count);
+    FeatureDescriptorsData output_descriptors(result.features.count,
+                                              kSiftDescriptorDim);
+    FeatureDescriptorsFloatData descriptor(1, kSiftDescriptorDim);
+    size_t index = 0;
+    for (size_t level = 0; level < result.features.levels.size(); ++level) {
+      const auto& keys = result.features.levels[level];
+      const auto& desc = result.descriptors[level];
+      for (int row = 0; row < keys.count; ++row, ++index) {
+        float xyso[4];
+        keys.records->ReadRows(row, 1, xyso, stage.cancelled);
+        desc.records->ReadRows(row, 1, descriptor.data(), stage.cancelled);
+        output_keypoints[index] =
+            FeatureKeypoint(xyso[0], xyso[1], xyso[2], xyso[3]);
+        if (sift.normalization == SiftExtractionOptions::Normalization::L2)
+          L2NormalizeFeatureDescriptors(&descriptor);
+        else if (sift.normalization ==
+                 SiftExtractionOptions::Normalization::L1_ROOT)
+          L1RootNormalizeFeatureDescriptors(&descriptor);
+        else
+          throw std::invalid_argument("SIFT normalization type not supported");
+        output_descriptors.row(index) =
+            FeatureDescriptorsToUnsignedByte(descriptor).row(0);
+      }
+    }
+    siftgpu::CheckStreamCancellation(stage.cancelled);
+    keypoints->swap(output_keypoints);
+    descriptors->data.swap(output_descriptors);
+    descriptors->type = FeatureExtractorType::SIFT;
+    LOG(INFO) << "SIFT selected_path=streamed features=" << index
+              << " known_host_payload_bytes=" << payload
+              << " host_staging_cap_bytes=" << stage.host_bytes
+              << " gpu_staging_cap_bytes=" << stage.gpu_bytes
+              << " input_file_written_bytes=" << input.BytesWritten()
+              << " final_xyso_descriptor_disk_bytes=" << uint64_t(index) * 528
+              << " external_aggregate_containment_required=1 "
+                 "page_cache_decoder_allocator_NOT_certified=1";
+    history_attempt.complete = true;
+    return true;
+  }
+#endif
   const FeatureExtractionOptions options_;
   SiftGPU sift_gpu_;
+#if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
+  siftgpu::StreamInputHistory streaming_input_history_;
+#endif
   std::vector<SiftKeypoint> keypoints_buffer_;
 };
 #endif  // COLMAP_GPU_ENABLED
@@ -789,6 +1035,16 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
 
 std::unique_ptr<FeatureExtractor> CreateSiftFeatureExtractor(
     const FeatureExtractionOptions& options) {
+  if (options.sift->streaming) {
+    THROW_CHECK(options.Check());
+    if (!options.use_gpu || !options.host_budget_bytes)
+      throw std::invalid_argument(
+          "SIFT streaming requires GPU and "
+          "FeatureExtraction.host_budget_bytes");
+#if !defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
+    throw std::invalid_argument("SIFT streaming requires a CUDA/HIP build");
+#endif
+  }
   if (options.sift->estimate_affine_shape ||
       options.sift->domain_size_pooling ||
       options.sift->force_covariant_extractor) {
@@ -1483,7 +1739,8 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
 
     if (num_matches < 0) {
       if (options_.host_budget_bytes)
-        throw std::runtime_error("budgeted GPU feature matching failed; workers must drain");
+        throw std::runtime_error(
+            "budgeted GPU feature matching failed; workers must drain");
       LOG(ERROR) << "Feature matching failed. This is probably caused by "
                     "insufficient GPU memory. Consider reducing the maximum "
                     "number of features and/or matches.";

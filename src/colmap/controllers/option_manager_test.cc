@@ -85,17 +85,22 @@ TEST(OptionManager, ExtractionByteOptionsPreserveUint64AndProjectIni) {
   const auto config_path = CreateTestDir() / "bytes.ini";
   OptionManager options;
   options.AddFeatureExtractionOptions();
-  const char* argv[] = {"colmap", "--FeatureExtraction.host_budget_bytes",
+  const char* argv[] = {"colmap",
+                        "--FeatureExtraction.host_budget_bytes",
                         "18446744073709551615",
-                        "--FeatureExtraction.policy_host_bytes", "9007199254740993",
-                        "--FeatureExtraction.reserve_host_bytes", "0",
-                        "--FeatureExtraction.use_gpu", "false"};
+                        "--FeatureExtraction.policy_host_bytes",
+                        "9007199254740993",
+                        "--FeatureExtraction.reserve_host_bytes",
+                        "0",
+                        "--FeatureExtraction.use_gpu",
+                        "false"};
   ASSERT_TRUE(options.Parse(9, const_cast<char**>(argv)));
   EXPECT_EQ(options.feature_extraction->host_budget_bytes,
             std::numeric_limits<uint64_t>::max());
   EXPECT_EQ(options.feature_extraction->policy_host_bytes, 9007199254740993ULL);
   EXPECT_EQ(options.feature_extraction->reserve_host_bytes, 0);
-  // Write must reflect typed edits after registration, not stale parser strings.
+  // Write must reflect typed edits after registration, not stale parser
+  // strings.
   options.feature_extraction->reserve_host_bytes = 4294967297ULL;
   options.Write(config_path);
   OptionManager restored;
@@ -103,24 +108,25 @@ TEST(OptionManager, ExtractionByteOptionsPreserveUint64AndProjectIni) {
   ASSERT_TRUE(restored.Read(config_path));
   EXPECT_EQ(restored.feature_extraction->host_budget_bytes,
             std::numeric_limits<uint64_t>::max());
-  EXPECT_EQ(restored.feature_extraction->policy_host_bytes, 9007199254740993ULL);
+  EXPECT_EQ(restored.feature_extraction->policy_host_bytes,
+            9007199254740993ULL);
   EXPECT_EQ(restored.feature_extraction->reserve_host_bytes, 4294967297ULL);
 }
 
 TEST(OptionManager, ExtractionByteOptionsRejectMalformedCliAndIni) {
   const auto config_path = CreateTestDir() / "invalid-bytes.ini";
-  for (const std::string option : {"host_budget_bytes", "policy_host_bytes",
-                                   "reserve_host_bytes"}) {
-    for (const std::string value : {"-1", "+1", "01", "18446744073709551616",
-                                    "1.5", "1e3", "1x", ""}) {
+  for (const std::string option :
+       {"host_budget_bytes", "policy_host_bytes", "reserve_host_bytes"}) {
+    for (const std::string value :
+         {"-1", "+1", "01", "18446744073709551616", "1.5", "1e3", "1x", ""}) {
       SCOPED_TRACE(option + "=" + value);
       OptionManager options;
       options.AddFeatureExtractionOptions();
       const std::string flag = "--FeatureExtraction." + option;
       const char* argv[] = {"colmap", flag.c_str(), value.c_str()};
       EXPECT_FALSE(options.Parse(3, const_cast<char**>(argv)));
-      std::ofstream(config_path) << "[FeatureExtraction]\n" << option << "="
-                                 << value << "\n";
+      std::ofstream(config_path) << "[FeatureExtraction]\n"
+                                 << option << "=" << value << "\n";
       EXPECT_FALSE(options.Read(config_path));
     }
   }
@@ -350,6 +356,30 @@ TEST(OptionManager, ParseWithOptions) {
   EXPECT_EQ(*options.image_path, image_path);
   EXPECT_EQ(options.feature_extraction->max_image_size, 1024);
   EXPECT_EQ(options.feature_extraction->sift->max_num_features, 2048);
+}
+
+TEST(OptionManager, SiftStreamingControlsRemainExplicit) {
+  OptionManager options;
+  options.AddFeatureExtractionOptions();
+  EXPECT_FALSE(options.feature_extraction->sift->streaming);
+  const std::vector<std::string> args = {
+      "colmap",
+      "--SiftExtraction.streaming",
+      "0",
+      "--SiftExtraction.streaming_gpu_bytes",
+      "65536",
+      "--SiftExtraction.streaming_host_bytes",
+      "32768",
+      "--SiftExtraction.streaming_scratch_path",
+      "scratch"};
+  std::vector<char*> argv;
+  for (const auto& arg : args) argv.push_back(const_cast<char*>(arg.c_str()));
+  ASSERT_TRUE(options.Parse(argv.size(), argv.data()));
+  EXPECT_FALSE(options.feature_extraction->sift->streaming);
+  EXPECT_EQ(options.feature_extraction->sift->streaming_gpu_bytes, 65536);
+  EXPECT_EQ(options.feature_extraction->sift->streaming_host_bytes, 32768);
+  EXPECT_EQ(options.feature_extraction->sift->streaming_scratch_path,
+            "scratch");
 }
 
 TEST(OptionManager, ParseWithProjectPath) {
