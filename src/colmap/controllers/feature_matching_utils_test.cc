@@ -146,6 +146,31 @@ void MatchPairsWithoutVerification(
   data.database->ClearTwoViewGeometries();
 }
 
+#if defined(COLMAP_GPU_ENABLED) && !defined(COLMAP_CUDA_ENABLED) && \
+    !defined(COLMAP_HIP_ENABLED)
+TEST(FeatureMatcherController, OpenGlBudgetRefusesWithoutCpuFallback) {
+  auto data = CreateTestData(2);
+  auto options = DefaultMatchingOptions();
+  options.use_gpu = true;
+  ASSERT_TRUE(options.Check());
+  EXPECT_TRUE(options.RequiresOpenGL());
+  // Budgeted GPU matching already requires native CUDA. OpenGL availability
+  // must neither imply CUDA device enumeration nor silently select CPU.
+  options.host_budget_bytes = 1024 * 1024;
+  options.device_budget_bytes = 1024 * 1024;
+  const TwoViewGeometryOptions geometry;
+  try {
+    FeatureMatcherController controller(options, geometry, data.cache);
+    FAIL() << "budgeted OpenGL matching must refuse, not fall back";
+  } catch (const std::invalid_argument& error) {
+    EXPECT_STREQ(error.what(),
+                 "budgeted GPU matching requires native CUDA backend");
+  }
+  EXPECT_TRUE(options.use_gpu);
+  EXPECT_TRUE(options.RequiresOpenGL());
+}
+#endif
+
 TEST(FeatureMatcherController, MatchEmptyPairs) {
   auto data = CreateTestData(3);
   data.database->ClearMatches();

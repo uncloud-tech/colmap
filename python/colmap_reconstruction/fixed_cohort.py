@@ -40,10 +40,10 @@ from .model import _add, _mul, current_owned_shape_minimum, exact_int
 # adapter is experimental and explicit opt-in only; the default stays resident.
 # This repin does not select streaming or alter any fixed-cohort shape term:
 # no allowance, reserve or safety policy is reduced and no savings are credited.
-# CUDA graph API compatibility refresh: preserve default dependency edges.
+# Compile-availability refresh: explicit non-CUDA refusals, no GPU fallback.
 # Math, allocations, allowances/reserves and containment remain unchanged.
 _FIXED_COHORT_FINGERPRINT = (
-    "392974c69a5c7b18837dc6d1971e364baa5549fea88ebdf53c1aa1713bbb2b03"
+    "95a4ad6683e5d9d33f08261fe919173911a4c70b9612ee2a8bc26532b38511a0"
 )
 _PROFILE = "fresh-fixed-cohort/current-owned-shape-lower-bound-v1/unqualified"
 _ROOT = Path(__file__).resolve().parents[2]

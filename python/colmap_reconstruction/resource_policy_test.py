@@ -115,6 +115,7 @@ class GeneratedPolicyBindingTest(unittest.TestCase):
             "b41c771795106d745a92c6aa9e17289456084d616b371e74fc27e88fd3ddd6a7",
             "db80cbddf70eac7cd7bf04a4d8388802578ea215839222263de258dee3fb39d2",
             "f81ae887315a8d8f2ea1c6b2b03a0af0860a5969a5986c26e68482f33d3364a9",
+            "392974c69a5c7b18837dc6d1971e364baa5549fea88ebdf53c1aa1713bbb2b03",
             "18ba1102892dc048ae8f3ec5c43d5eeb81c986986acecd1821500e2c014adf83",
         ):
             with (

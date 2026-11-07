@@ -14,10 +14,10 @@ VERSION = "experimental-stereo-v1"
 # extractor remains resident. This binding does not enable automatic streaming
 # selection or qualify whole-pipeline streaming/fit or native numerical results.
 # Conservative allowances/reserves remain unchanged: no staging savings credit.
-# CUDA graph API compatibility refresh: preserve default dependency edges.
+# Compile-availability refresh: explicit non-CUDA refusals, no GPU fallback.
 # Math, allocations, allowances/reserves and containment remain unchanged.
 ALLOCATION_FINGERPRINT = (
-    "392974c69a5c7b18837dc6d1971e364baa5549fea88ebdf53c1aa1713bbb2b03"
+    "95a4ad6683e5d9d33f08261fe919173911a4c70b9612ee2a8bc26532b38511a0"
 )
 DEFAULTS = {
     "loader_scratch_host_bytes": 512 * 1024**2,
