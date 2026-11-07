@@ -2,6 +2,7 @@
 """Public CI event/security contract; no third-party test dependencies."""
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -72,11 +73,51 @@ class LeanMvsCiTest(unittest.TestCase):
             text.rindex("uses: actions/checkout@v7"),
         )
         self.assertIn(
-            "container:\n      image: "
             "nvidia/cuda:12.8.1-devel-ubuntu24.04@sha256:"
             "4b9ed5fa8361736996499f64ecebf25d4ec37ff56e4d11323ccde10aa36e0c43",
             text,
         )
+
+    def test_cuda_matrix_preserves_coverage_and_isolates_diagnostics(self):
+        text = (ROOT / ".github/workflows/lean-mvs.yml").read_text()
+        cuda = text.split("  cuda-compile:\n", 1)[1]
+        self.assertIn("    name: ${{ matrix.name }}\n", cuda)
+        self.assertIn("      fail-fast: false\n", cuda)
+        entries = re.findall(
+            r'          - cuda: "([^"]+)"\n'
+            r"            name: ([^\n]+)\n"
+            r"            image: ([^\n]+)\n",
+            cuda,
+        )
+        self.assertEqual(
+            entries,
+            [
+                (
+                    "12.8",
+                    "Native CUDA compile and link (no GPU execution)",
+                    "nvidia/cuda:12.8.1-devel-ubuntu24.04@sha256:"
+                    "4b9ed5fa8361736996499f64ecebf25d4ec37ff56e4d11323ccde10aa36e0c43",
+                ),
+                (
+                    "13.2",
+                    "Native CUDA 13.2 compile and link (no GPU execution)",
+                    "nvidia/cuda:13.2.1-devel-ubuntu24.04@sha256:"
+                    "44a9504c6dfb50b1241464241b02a93871928f373de6f5a644cf5fe9f080aa63",
+                ),
+            ],
+        )
+        self.assertIn("container:\n      image: ${{ matrix.image }}", cuda)
+        self.assertIn(
+            "name: mvs-cuda-compile-diagnostics-${{ matrix.cuda }}", cuda
+        )
+        self.assertEqual(len({entry[0] for entry in entries}), 2)
+        self.assertEqual(len({entry[1] for entry in entries}), 2)
+        self.assertIn("runs-on: blacksmith-32vcpu-ubuntu-2404", cuda)
+        self.assertIn("timeout-minutes: 60", cuda)
+        self.assertIn("bash scripts/ci/build_mvs_cuda.sh 2>&1 | tee", cuda)
+        self.assertIn("set -euo pipefail", cuda)
+        self.assertNotIn("ctest", cuda)
+        self.assertNotIn("--gpus", cuda)
 
     def test_container_trust_is_limited_to_checked_out_workspace(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as directory:
