@@ -10,6 +10,79 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
 class BlackwellBuildSelectionTest(unittest.TestCase):
+    def test_workspace_execution_fixture_uses_host_compiler(self):
+        mvs = ROOT / "src/colmap/mvs"
+        cmake = (mvs / "CMakeLists.txt").read_text()
+        registration = cmake.split(
+            "    COLMAP_ADD_TEST(\n"
+            "        NAME owned_fixed_cohort_pipeline_test",
+            1,
+        )[1].split("\n    )", 1)[0]
+        registration = (
+            "COLMAP_ADD_TEST(NAME owned_fixed_cohort_pipeline_test"
+            + registration
+            + "\n)"
+        )
+        sources = registration.split("SRCS", 1)[1].split("LINK_LIBS", 1)[0]
+        sources = sources.split()
+        workspace = next(
+            name for name in sources if "workspace_execution" in name
+        )
+        contents = (mvs / workspace).read_text()
+        self.assertNotRegex(
+            contents,
+            r"\b(?:__global__|__device__|__shared__|__constant__)\b|<<<",
+        )
+        self.assertEqual(contents.count("TEST(FixedCohortWorkspaceGpu,"), 2)
+        with TemporaryDirectory(prefix=".host-fixture-", dir=ROOT) as tmp:
+            source = pathlib.Path(tmp)
+            for name in sources:
+                (source / name).write_text((mvs / name).read_text())
+            # Exercise the real test macro and registration. Other sources
+            # remain CUDA in production; no SDK/compiler is faked here.
+            device_sources = " ".join(
+                name for name in sources if name != workspace
+            )
+            (source / "CMakeLists.txt").write_text(f'''
+cmake_minimum_required(VERSION 3.24)
+project(WorkspaceFixtureLanguage LANGUAGES CXX)
+enable_testing()
+include("{ROOT.as_posix()}/cmake/CMakeHelper.cmake")
+set(TESTS_ENABLED ON)
+set(FOLDER_NAME mvs)
+add_library(colmap_mvs_cuda INTERFACE)
+add_library(colmap_gtest_main INTERFACE)
+set_source_files_properties({device_sources} PROPERTIES HEADER_FILE_ONLY ON)
+{registration}
+set_target_properties(colmap_mvs_owned_fixed_cohort_pipeline_test
+    PROPERTIES LINKER_LANGUAGE CXX)
+get_source_file_property(language {workspace} LANGUAGE)
+get_target_property(links colmap_mvs_owned_fixed_cohort_pipeline_test
+    LINK_LIBRARIES)
+file(WRITE "${{CMAKE_BINARY_DIR}}/language" "${{language}}")
+file(WRITE "${{CMAKE_BINARY_DIR}}/links" "${{links}}")
+''')
+            build = source / "build"
+            result = subprocess.run(
+                ["cmake", "-S", str(source), "-B", str(build)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                result.returncode, 0, result.stdout + result.stderr
+            )
+            self.assertEqual((build / "language").read_text(), "CXX")
+            self.assertEqual(
+                (build / "links").read_text(),
+                "colmap_mvs_cuda;colmap_gtest_main",
+            )
+            self.assertIn(
+                "mvs/owned_fixed_cohort_pipeline_test",
+                (build / "CTestTestfile.cmake").read_text(),
+            )
+        generator = mvs / "testdata/generate_fixed_cohort_workspace_fixture.py"
+        self.assertIn(f"../{workspace}", generator.read_text())
+
     def configure(self, architectures, opt_in=None):
         with TemporaryDirectory(prefix=".blackwell-test-", dir=ROOT) as tmp:
             source = pathlib.Path(tmp)

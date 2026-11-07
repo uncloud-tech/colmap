@@ -636,6 +636,7 @@ std::cout << admitted.host << " " << admitted.device;
 
 class WorkspaceFixtureBindingTest(unittest.TestCase):
     def test_canonical_generated_workspace_binding(self):
+        import hashlib
         import runpy
         from pathlib import Path
 
@@ -657,6 +658,14 @@ class WorkspaceFixtureBindingTest(unittest.TestCase):
                 self.assertNotIn(reference["reference"], sources)
         header = tool["emit_header"](spec, root)
         self.assertIn("MakeWorkspaceFixture", header)
+        test_name = "../owned_fixed_cohort_workspace_execution_test.cc"
+        test_source = (
+            root / "src/colmap/mvs/testdata" / test_name
+        ).read_bytes()
+        test_identity = (
+            test_name + ":" + hashlib.sha256(test_source).hexdigest()
+        )
+        self.assertIn(tool["cpp"](test_identity + ";"), header)
         self.assertIn("b.max_active_owners = 1", header)
         self.assertIn("b.max_active_owners = 2", header)
         generator = runpy.run_path(
