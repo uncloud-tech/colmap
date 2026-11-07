@@ -7,6 +7,7 @@
 #include "colmap/controllers/image_reader.h"
 #include "colmap/controllers/option_manager.h"
 #include "colmap/exe/gui.h"
+#include "colmap/exe/photo_directory_summary.h"
 #include "colmap/feature/sift.h"
 #include "colmap/sensor/models.h"
 #include "colmap/util/cancellation.h"
@@ -15,7 +16,11 @@
 #include "colmap/util/opengl_utils.h"
 #include "colmap/util/threading.h"
 
+#include "thirdparty/SiftGPU/SiftRequirements.h"
+
 #include <chrono>
+#include <iostream>
+#include <sstream>
 
 namespace colmap {
 

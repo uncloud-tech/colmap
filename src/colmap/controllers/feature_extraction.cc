@@ -154,6 +154,10 @@ class FeatureExtractorThread : public ExtractionWorker {
         THROW_CHECK_NOTNULL(current_credit_.get());
         current_credit_->Grow(bytes);
       };
+      extraction_options_.acquire_host_payload = [this](uint64_t bytes) {
+        THROW_CHECK_NOTNULL(current_credit_.get());
+        return current_credit_->Fork(bytes);
+      };
     }
 
     if (extraction_options_.sift->streaming) {

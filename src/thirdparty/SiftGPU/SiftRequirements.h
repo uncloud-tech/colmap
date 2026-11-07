@@ -66,29 +66,57 @@ inline uint64_t SiftPayloadCapacity(uint64_t cap,
   return raw > policy ? raw - policy : 0;
 }
 
-// Host growth charges travel with the existing image credit through the writer.
-// Current persistent capacities are prepaid again on each input; every possible
-// old/new vector relocation is charged before resize, without changing growth.
+// Temporary payload remains image-owned. Retained native buffers instead hold
+// independent tickets on that same ledger until their actual free/replacement.
+using SiftHostCredit = std::shared_ptr<colmap::ExtractionBudget::Ticket>;
+using SiftHostAcquire = std::function<SiftHostCredit(uint64_t)>;
 inline thread_local std::function<void(uint64_t)> active_sift_host_reserve;
+inline thread_local SiftHostAcquire active_sift_host_acquire;
 struct SiftHostBudgetScope {
   std::function<void(uint64_t)> previous;
-  explicit SiftHostBudgetScope(std::function<void(uint64_t)> reserve)
-      : previous(std::move(active_sift_host_reserve)) {
+  SiftHostAcquire previous_acquire;
+  explicit SiftHostBudgetScope(std::function<void(uint64_t)> reserve,
+                               SiftHostAcquire acquire = {})
+      : previous(std::move(active_sift_host_reserve)),
+        previous_acquire(std::move(active_sift_host_acquire)) {
     active_sift_host_reserve = std::move(reserve);
+    active_sift_host_acquire = std::move(acquire);
   }
-  ~SiftHostBudgetScope() { active_sift_host_reserve = std::move(previous); }
+  ~SiftHostBudgetScope() {
+    active_sift_host_reserve = std::move(previous);
+    active_sift_host_acquire = std::move(previous_acquire);
+  }
 };
 inline void SiftReserveHost(uint64_t bytes) {
   if (active_sift_host_reserve) active_sift_host_reserve(bytes);
 }
+inline SiftHostCredit SiftAcquireHost(uint64_t bytes) {
+  return active_sift_host_acquire ? active_sift_host_acquire(bytes) : nullptr;
+}
 template <class T>
-void SiftResizeHostVector(std::vector<T>& values, size_t count) {
-  if (active_sift_host_reserve && count > values.capacity()) {
+void SiftResizeHostVector(std::vector<T>& values,
+                          size_t count,
+                          SiftHostCredit* retained = nullptr) {
+  SiftHostCredit next;
+  uint64_t reserved = 0;
+  if ((active_sift_host_reserve || (retained && active_sift_host_acquire)) &&
+      count > values.capacity()) {
     const auto capacity = std::max<uint64_t>(
         count, colmap::ExtractionMultiply(values.capacity(), 2));
-    SiftReserveHost(colmap::ExtractionMultiply(capacity, sizeof(T)));
+    const auto bytes = colmap::ExtractionMultiply(capacity, sizeof(T));
+    reserved = bytes;
+    if (retained && active_sift_host_acquire)
+      next =
+          SiftAcquireHost(bytes);  // Old credit stays live through relocation.
+    else if (active_sift_host_reserve)
+      SiftReserveHost(bytes);
   }
-  values.resize(count);
+  values.resize(count);  // Preserve the native vector's allocation strategy.
+  if (next) {
+    next->Shrink(reserved -
+                 colmap::ExtractionMultiply(values.capacity(), sizeof(T)));
+    *retained = std::move(next);
+  }
 }
 inline uint64_t SiftStreamingMetadata(int octaves, int levels) {
   return sizeof(StreamInputHistory) + sizeof(StreamedPlane) +

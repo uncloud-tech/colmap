@@ -87,3 +87,65 @@ int main() {
                             '-I' + str(ROOT / 'src'), str(cc), '-o', str(binary)],
                            check=True, text=True)
             subprocess.run([str(binary)], check=True, capture_output=True, text=True)
+
+    def test_retained_host_credits_outlive_writer_and_cover_relocation(self):
+        source = r'''
+#include "thirdparty/SiftGPU/SiftRequirements.h"
+#include <cassert>
+#include <future>
+int main() {
+  colmap::ExtractionBudget budget(2060,0,0); // 2000 raw bytes, one 3% margin.
+  auto image = budget.Acquire(100, [] { return false; });
+  std::shared_ptr<colmap::ExtractionBudget::Ticket> retained;
+  std::vector<float> values;
+  std::shared_ptr<colmap::ExtractionBudget::Ticket> converted;
+  {
+    siftgpu::SiftHostBudgetScope scope([&](uint64_t bytes) {image->Grow(bytes);}, [&](uint64_t bytes) {
+      return image->Fork(bytes);
+    });
+    siftgpu::SiftResizeHostVector(values,100,&retained);
+    converted=siftgpu::SiftAcquireHost(300);
+  }
+  assert(budget.Used()==800);
+  image.reset(); // Writer retires its image; native buffers remain live.
+  assert(budget.Used()==700);
+  std::promise<void> waiting;
+  std::once_flag notified;
+  auto reader=std::async(std::launch::async,[&] {
+    return budget.Acquire(1800, [] {return false;}, [&] {
+      std::call_once(notified,[&] {waiting.set_value();});
+    });
+  });
+  assert(waiting.get_future().wait_for(std::chrono::seconds(2))==std::future_status::ready);
+  {
+    // The next input has a distinct image credit, not an old writer credit.
+    auto next=budget.Acquire(0,[] {return false;});
+    siftgpu::SiftHostBudgetScope scope([&](uint64_t bytes) {next->Grow(bytes);}, [&](uint64_t bytes) {
+      return next->Fork(bytes);
+    });
+    bool refused=false;
+    try {siftgpu::SiftResizeHostVector(values,500,&retained);}
+    catch(const std::runtime_error&) {refused=true;}
+    assert(refused && values.size()==100 && budget.Used()==700);
+    converted.reset(); // Existing converted-input replacement/free boundary.
+    siftgpu::SiftResizeHostVector(values,200,&retained);
+    assert(budget.Used()==values.capacity()*sizeof(float));
+    assert(budget.Peak()>=1200); // Old and new vector capacities coexisted.
+  }
+  std::vector<float>().swap(values); // Actual buffer is freed BEFORE its credit.
+  retained.reset();
+  auto admitted=reader.get();
+  assert(budget.Used()==1800);
+  admitted.reset();
+  assert(budget.Used()==0);
+}
+'''
+        with tempfile.TemporaryDirectory(dir=ROOT / 'python/tests') as directory:
+            cc = Path(directory) / 'test.cc'
+            binary = Path(directory) / 'test'
+            cc.write_text(source)
+            subprocess.run([os.environ.get('CXX', 'g++'), '-std=c++17', '-pthread',
+                            *shlex.split(os.environ.get('CXXFLAGS', '')),
+                            '-I' + str(ROOT / 'src'), str(cc), '-o', str(binary)],
+                           check=True, text=True)
+            subprocess.run([str(binary)], check=True, text=True, timeout=10)

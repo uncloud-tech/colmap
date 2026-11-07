@@ -28,6 +28,7 @@
 
 #ifndef _SIFT_PYRAMID_H
 #define _SIFT_PYRAMID_H
+#include "SiftRequirements.h"
 
 
 class GLTexImage;
@@ -93,12 +94,11 @@ public:
 	int		    _alignment;
     int         _siftgpu_failed;
 public:
+    // Declared before vectors: credits retire after vector destruction.
+    siftgpu::SiftHostCredit _keypoint_credit, _descriptor_credit;
 	vector<float>	_keypoint_buffer;
 	vector<float>	_descriptor_buffer;
-    size_t HostCapacityBytes() const {
-      return (_keypoint_buffer.capacity()+_descriptor_buffer.capacity())*sizeof(float)+
-             _keypoint_index.capacity()*sizeof(int);
-    }
+
 private:
 	inline  void PrepareBuffer();
 protected:

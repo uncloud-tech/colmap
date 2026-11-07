@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "colmap/controllers/extraction_resource.h"
 #include "colmap/feature/types.h"
 #include "colmap/sensor/bitmap.h"
 
@@ -49,6 +50,9 @@ struct FeatureExtractionOptions : public FeatureExtractionTypeOptions {
   // Internal worker callback. Charges before owned allocation; never waits.
   // Conservative scratch credits retire with the image, after the writer.
   std::function<void(uint64_t)> reserve_host_payload;
+  // Native retained owners hold these independent credits until actual free.
+  std::function<std::shared_ptr<ExtractionBudget::Ticket>(uint64_t)>
+      acquire_host_payload;
   void ReserveHostPayload(uint64_t count, uint64_t element_size = 1) const;
 
   // Number of threads for feature extraction.

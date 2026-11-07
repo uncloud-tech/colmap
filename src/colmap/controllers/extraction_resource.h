@@ -83,6 +83,20 @@ class ExtractionBudget {
     }
     Ticket(const Ticket&) = delete;
     Ticket& operator=(const Ticket&) = delete;
+    // Independent actual-owner lifetime on the SAME phase ledger. Allocation
+    // growth never waits, including when reader admission is already blocked.
+    std::shared_ptr<Ticket> Fork(uint64_t bytes) {
+      auto ticket = std::shared_ptr<Ticket>(new Ticket(state_));
+      ticket->Grow(bytes);
+      return ticket;
+    }
+    void Shrink(uint64_t bytes) {
+      std::lock_guard<std::mutex> lock(state_->mutex);
+      if (bytes > bytes_) throw std::logic_error("extraction credit underflow");
+      bytes_ -= bytes;
+      state_->used -= bytes;
+      state_->changed.notify_all();
+    }
     void Grow(uint64_t bytes) {
       std::lock_guard<std::mutex> lock(state_->mutex);
       const auto next = ExtractionAdd(state_->used, bytes);

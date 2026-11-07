@@ -13,6 +13,8 @@
 #include "colmap/util/opengl_utils.h"
 #include "colmap/util/string.h"
 
+#include "thirdparty/SiftGPU/SiftRequirements.h"
+
 #if defined(COLMAP_GPU_ENABLED)
 #include "thirdparty/SiftGPU/SiftGPU.h"
 #if !defined(COLMAP_GUI_ENABLED)
@@ -747,7 +749,7 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
 #if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
     if ((options.sift->streaming || options.sift->auto_resource_check) &&
         (GlobalUtil::_InitPyramidWidth > 0 ||
-                                    GlobalUtil::_InitPyramidHeight > 0))
+         GlobalUtil::_InitPyramidHeight > 0))
       throw std::invalid_argument(
           "SIFT streaming refuses resident pyramid preallocation");
     if ((options.sift->streaming || options.sift->auto_resource_check) &&
@@ -818,12 +820,9 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
             ? std::function<void(uint64_t)>([this](uint64_t bytes) {
                 options_.ReserveHostPayload(bytes);
               })
-            : std::function<void(uint64_t)>());
-    if (options_.sift->auto_resource_check && !options_.sift->streaming) {
-      options_.ReserveHostPayload(sift_gpu_.GetResidentHostCapacityBytes());
-      options_.ReserveHostPayload(uint64_t(bitmap.Width()) * bitmap.Height(),
-                                  sizeof(float));
-    }
+            : std::function<void(uint64_t)>(),
+        options_.sift->auto_resource_check ? options_.acquire_host_payload
+                                           : siftgpu::SiftHostAcquire());
 
 #if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
     if (options_.sift->streaming) {
@@ -1082,10 +1081,11 @@ std::unique_ptr<FeatureExtractor> CreateSiftFeatureExtractor(
   if (options.sift->auto_resource_check) {
     THROW_CHECK(options.Check());
     if (!options.use_gpu || !options.host_budget_bytes ||
-        options.num_threads != 1)
+        options.num_threads != 1 || !options.reserve_host_payload ||
+        !options.acquire_host_payload)
       throw std::invalid_argument(
           "SIFT auto resource checks require one CUDA extractor and host "
-          "budget");
+          "budget with owner-lifetime credit callbacks");
 #if !defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED) || \
     !defined(__linux__)
     throw std::invalid_argument(

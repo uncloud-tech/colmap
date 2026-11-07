@@ -597,7 +597,7 @@ void PyramidCU::ReshapeFeatureListCPU()
 
 #ifdef NO_DUPLICATE_DOWNLOAD
 		float oss = os * (1 << (i / param._dog_level_num));
-		siftgpu::SiftResizeHostVector(_keypoint_buffer,(uint64_t(_featureNum)+fcount)*4);
+		siftgpu::SiftResizeHostVector(_keypoint_buffer,(uint64_t(_featureNum)+fcount)*4,&_keypoint_credit);
 		float* ds = &_keypoint_buffer[_featureNum * 4];
 		float* fs = buffer2;
 		for(int k = 0;  k < fcount; k++, ds+=4, fs+=4)
@@ -806,7 +806,7 @@ void PyramidCU::GenerateFeatureList(int i, int j, int reduction_count, vector<in
 	if(fcount > 0)
 	{
 		_featureNum += fcount;
-		siftgpu::SiftResizeHostVector(_keypoint_buffer,uint64_t(fcount)*4);
+		siftgpu::SiftResizeHostVector(_keypoint_buffer,uint64_t(fcount)*4,&_keypoint_credit);
 		//vector<int> ikbuf(fcount*4);
 		int* ibuf = (int*) (&_keypoint_buffer[0]);
 

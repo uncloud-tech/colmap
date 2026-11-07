@@ -37,6 +37,7 @@ using namespace std;
 #include "GlobalUtil.h"
 
 #include "GLTexImage.h"
+#include "SiftRequirements.h"
 #include "FrameBufferObject.h"
 #include "ShaderMan.h"
 
@@ -917,6 +918,7 @@ int GLTexInput::SetImageData( int width,  int height, const void * data,
 	int ws, hs, done = 1;
 
 	if(_converted_data) {delete [] _converted_data; _converted_data  = NULL; }
+    _converted_credit.reset(); // Existing free-before-replace boundary.
 
 	_rgb_converted = 1;
     _data_modified = 0;
@@ -982,7 +984,13 @@ int GLTexInput::SetImageData( int width,  int height, const void * data,
             return 0;
         }else if(_down_sampled > 0 || gl_format != GL_LUMINANCE || gl_type != GL_FLOAT)
         {
+		    auto converted_credit = siftgpu::SiftAcquireHost(
+                colmap::ExtractionMultiply(
+                    colmap::ExtractionMultiply(uint64_t(_imgWidth),
+                                               uint64_t(_imgHeight)),
+                    sizeof(float)));
 		    _converted_data = new float [_imgWidth * _imgHeight];
+            _converted_credit = std::move(converted_credit);
             if(gl_type == GL_UNSIGNED_BYTE)
 		        DownSamplePixelDataI2F(gl_format, width, height, 1<<_down_sampled,
                                         ((const unsigned char*) data), _converted_data, skip);
