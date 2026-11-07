@@ -70,6 +70,7 @@ EXTRACTION_ALLOCATION_SOURCES = (
     "src/thirdparty/SiftGPU/SiftGPU.h",
     "src/thirdparty/SiftGPU/SiftPyramid.h",
     "src/thirdparty/SiftGPU/StreamedPlane.h",
+    "src/thirdparty/SiftGPU/SiftRequirements.h",
     "src/thirdparty/SiftGPU/CudaImageDomain.h",
     "src/thirdparty/SiftGPU/ProgramCU.cu",
     "src/colmap/exe/feature.cc",

@@ -26,6 +26,7 @@
 
 #ifndef GL_TEX_IMAGE_H
 #define GL_TEX_IMAGE_H
+#include <memory>
 
 class GlobalUtil;
 class GLTexImage :public GlobalUtil 
@@ -100,6 +101,7 @@ public:
     int      _data_modified;
 
     //////////////////////////
+    std::shared_ptr<void> _converted_credit;
 	float *        _converted_data;
     const void*    _pixel_data;
 public:

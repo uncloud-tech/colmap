@@ -7,6 +7,7 @@
 #include "colmap/controllers/image_reader.h"
 #include "colmap/controllers/option_manager.h"
 #include "colmap/exe/gui.h"
+#include "colmap/exe/photo_directory_summary.h"
 #include "colmap/feature/sift.h"
 #include "colmap/sensor/models.h"
 #include "colmap/util/cancellation.h"
@@ -15,7 +16,12 @@
 #include "colmap/util/opengl_utils.h"
 #include "colmap/util/threading.h"
 
+#include "thirdparty/SiftGPU/SiftRequirements.h"
+
 #include <chrono>
+#include <fstream>
+#include <iostream>
+#include <sstream>
 
 namespace colmap {
 
@@ -63,6 +69,122 @@ void UpdateImageReaderOptionsFromCameraMode(ImageReaderOptions& options,
   }
 }
 
+// Metadata/CPU only: never initializes an extractor or warms its input history.
+int RunSiftExtractionPlan(int argc, char** argv) {
+  try {
+    std::string dimensions, dimensions_path;
+    bool dimensions_supplied = false, path_supplied = false;
+    uint64_t host = 0, device = 0, disk = 0, hp = 0, dp = 0, hr = 0, dr = 0;
+    // Keep byte parsing on the existing canonical adapter, without exposing
+    // generic unsigned Boost options or broadening the base manager's API.
+    class SiftPlanOptionManager : public OptionManager {
+     public:
+      using BaseOptionManager::AddDefaultByteOption;
+      void AddSequenceInput(const std::string& name,
+                            std::string* value,
+                            bool* supplied) {
+        desc_->add_options()(
+            name.c_str(),
+            boost::program_options::value<std::string>()->notifier(
+                [value, supplied](const std::string& text) {
+                  *value = text;
+                  *supplied = true;
+                }),
+            "Exactly one input: comma-separated dimensions or file with one "
+            "WIDTHxHEIGHT per line");
+        RegisterOption(name, value);
+      }
+    };
+    SiftPlanOptionManager options;
+    options.AddSequenceInput("dimensions", &dimensions, &dimensions_supplied);
+    options.AddSequenceInput(
+        "dimensions_path", &dimensions_path, &path_supplied);
+    options.AddDefaultByteOption("host_capacity_bytes", &host);
+    options.AddDefaultByteOption("device_capacity_bytes", &device);
+    options.AddDefaultByteOption("disk_capacity_bytes", &disk);
+    options.AddDefaultByteOption("policy_host_bytes", &hp);
+    options.AddDefaultByteOption("policy_device_bytes", &dp);
+    options.AddDefaultByteOption("reserve_host_bytes", &hr);
+    options.AddDefaultByteOption("reserve_device_bytes", &dr);
+    if (!options.Parse(argc, argv)) return EXIT_FAILURE;
+    if (dimensions_supplied == path_supplied ||
+        (dimensions_supplied && dimensions.empty()) ||
+        (path_supplied && dimensions_path.empty()))
+      throw std::invalid_argument(
+          "SIFT plan requires exactly one non-empty --dimensions or "
+          "--dimensions_path");
+    std::vector<std::pair<int, int>> shapes;
+    auto append_shape = [&shapes](const std::string& shape) {
+      std::istringstream pair(shape);
+      int w = 0, h = 0;
+      char x = 0, tail = 0;
+      if (!(pair >> w >> x >> h) || x != 'x' || (pair >> tail))
+        throw std::invalid_argument(
+            "SIFT dimensions require ordered WIDTHxHEIGHT pairs");
+      shapes.emplace_back(w, h);
+    };
+    std::string shape;
+    if (path_supplied) {
+      std::ifstream sequence(dimensions_path);
+      if (!sequence.is_open())
+        throw std::runtime_error("cannot open SIFT dimensions file: " +
+                                 dimensions_path);
+      while (std::getline(sequence, shape)) append_shape(shape);
+      if (sequence.bad() || !sequence.eof())
+        throw std::runtime_error("cannot read SIFT dimensions file: " +
+                                 dimensions_path);
+    } else {
+      std::istringstream sequence(dimensions);
+      while (std::getline(sequence, shape, ',')) append_shape(shape);
+    }
+    const auto r = siftgpu::SiftSequenceRequirements(shapes);
+    const auto selected =
+        siftgpu::SiftSelect(r, host, device, hp, dp, hr, dr, disk);
+    std::string reason;
+    AppendQuotedJsonString(reason, selected.reason);
+    std::cout << "{\"schema_version\":1,\"mode\":\"" << selected.mode
+              << "\",\"reason\":" << reason
+              << ",\"classification\":\"admitted-estimate/"
+                 "data-dependent-runtime-checked\""
+              << ",\"resident_host_required_bytes\":"
+              << siftgpu::SiftRequired(r.resident_host, hp, hr)
+              << ",\"resident_device_required_bytes\":"
+              << siftgpu::SiftRequired(r.resident_device, dp, dr)
+              << ",\"stream_supported\":"
+              << (r.stream_supported ? "true" : "false")
+              << ",\"stream_host_required_bytes\":"
+              << siftgpu::SiftRequired(r.stream_host, hp, hr)
+              << ",\"stream_device_required_bytes\":"
+              << siftgpu::SiftRequired(r.stream_device, dp, dr)
+              << ",\"streaming_gpu_bytes\":"
+              << siftgpu::SiftPayloadCapacity(device, dp, dr)
+              << ",\"streaming_host_bytes\":"
+              << (siftgpu::SiftPayloadCapacity(host, hp, hr) >
+                          r.stream_host - r.stream_staging_host
+                      ? siftgpu::SiftPayloadCapacity(host, hp, hr) -
+                            (r.stream_host - r.stream_staging_host)
+                      : 0)
+              << ",\"scratch_static_bytes\":" << r.scratch_bytes
+              << ",\"input_history_bytes\":" << r.input_history_bytes
+              << ",\"retained_pyramid_width\":" << r.retained_width
+              << ",\"retained_pyramid_height\":" << r.retained_height
+              << ",\"host_capacity_bytes\":" << host
+              << ",\"device_capacity_bytes\":" << device
+              << ",\"disk_capacity_bytes\":" << disk
+              << ",\"num_threads\":1,\"mode_transitions\":false,\"output_"
+                 "growth\":\"runtime-checked before allocation; soft feature "
+                 "limiter may overshoot\",\"scratch_growth\":\"count-dependent "
+                 "files reserve disk before "
+                 "writing\",\"unknown\":\"decoder/driver/allocator/charged "
+                 "page cache covered only by policy allowances; NOT "
+                 "physical-fit or other-phase guarantee\"}\n";
+    return EXIT_SUCCESS;  // Refusal is a typed plan, not partial extraction
+                          // success.
+  } catch (const std::exception& error) {
+    LOG(ERROR) << "SIFT plan refused: " << error.what();
+    return EXIT_FAILURE;
+  }
+}
 int RunFeatureExtractor(int argc, char** argv) {
   try {
     std::filesystem::path image_list_path;
@@ -211,7 +333,8 @@ int RunExhaustiveMatcher(int argc, char** argv) {
     auto matcher = CreateExhaustiveFeatureMatcher(*options.exhaustive_pairing,
                                                   *options.feature_matching,
                                                   *options.two_view_geometry,
-                                                  *options.database_path, result);
+                                                  *options.database_path,
+                                                  result);
 
     if (app != nullptr) {
       RunThreadWithOpenGLContext(matcher.get());

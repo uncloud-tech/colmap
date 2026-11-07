@@ -27,6 +27,7 @@
 
 #ifndef GPU_SIFT_H
 #define GPU_SIFT_H
+#include <stddef.h>
 
 #if  defined(_WIN32)
 	#ifdef SIFTGPU_DLL

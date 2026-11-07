@@ -107,6 +107,7 @@ int main(int argc, char** argv) {
   commands.emplace_back("exhaustive_matcher",
                         &colmap::RunExhaustiveMatcher,
                         kSupportsGracefulShutdown);
+  commands.emplace_back("sift_extraction_plan", &colmap::RunSiftExtractionPlan);
   commands.emplace_back("feature_extractor",
                         &colmap::RunFeatureExtractor,
                         kSupportsGracefulShutdown);

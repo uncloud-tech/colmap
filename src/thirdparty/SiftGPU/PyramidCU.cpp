@@ -41,6 +41,7 @@ using namespace std;
 #include "ProgramCU.h"
 #include "PyramidCU.h"
 #include "CudaImageDomain.h"
+#include "SiftRequirements.h"
 
 
 namespace {
@@ -388,18 +389,8 @@ int PyramidCU::ResizeFeatureStorage()
     // Bound each such traversal, including exact/rounded domain transitions:
     // ceil(raw_width / 4) also equals the legacy rounded width's first
     // reduction. Later active octaves are no larger than that first octave.
-    vector<pair<int, int>> shapes(_hpLevelNum, {0, 0});
-    int width = _pyramid_width, height = _pyramid_height;
-    for (int first = 0; first < _pyramid_octave_num; ++first) {
-        TraverseHistogram(width, height, true, _hpLevelNum - first / 2,
-                          [&](int slot, int w, int h) {
-            auto& shape = shapes[slot];
-            if (size_t(w) * h > size_t(shape.first) * shape.second)
-                shape = {w, h};
-        });
-        width = max(1, width >> 1);
-        height = max(1, height >> 1);
-    }
+    const auto shapes=siftgpu::SiftHistogramCapacityShapes(
+        _pyramid_width,_pyramid_height,_pyramid_octave_num,_hpLevelNum);
     for (i = 0; i < _hpLevelNum; ++i) {
         const auto shape = shapes[i];
         // InitTexture retains the existing overflow/index-limit checks.
@@ -471,6 +462,9 @@ void PyramidCU::GetFeatureDescriptors()
 		for(int j = 0; j < param._dog_level_num; j++, ftex++, idx++, got++)
 		{
 			if(_levelFeatureNum[idx]==0) continue;
+            if (siftgpu::active_sift_device_budget &&
+                uint64_t(_levelFeatureNum[idx])*128*sizeof(float)>uint64_t(_descriptorTex->GetDataSize()))
+              throw std::runtime_error("SIFT resident descriptor capacity insufficient for actual count; no capacity/quality fallback");
             ProgramCU::ComputeDescriptor(ftex, got, _descriptorTex, IsUsingRectDescription());//process
 			_descriptorTex->CopyToHost(pd); //readback descriptor
 			pd += 128*_levelFeatureNum[idx];
@@ -568,7 +562,9 @@ void PyramidCU::ReshapeFeatureListCPU()
 		sz = _levelFeatureNum[i];
 		if(sz > szmax ) szmax = sz;
 	}
-	float * buffer = new float[szmax*16];
+	siftgpu::SiftReserveHost(uint64_t(szmax)*16*sizeof(float));
+	std::unique_ptr<float[]> buffer_owner(new float[size_t(szmax)*16]);
+    float* buffer=buffer_owner.get();
 	float * buffer1 = buffer;
 	float * buffer2 = buffer + szmax*4;
 
@@ -601,7 +597,7 @@ void PyramidCU::ReshapeFeatureListCPU()
 
 #ifdef NO_DUPLICATE_DOWNLOAD
 		float oss = os * (1 << (i / param._dog_level_num));
-		_keypoint_buffer.resize((_featureNum + fcount) * 4);
+		siftgpu::SiftResizeHostVector(_keypoint_buffer,(uint64_t(_featureNum)+fcount)*4,&_keypoint_credit);
 		float* ds = &_keypoint_buffer[_featureNum * 4];
 		float* fs = buffer2;
 		for(int k = 0;  k < fcount; k++, ds+=4, fs+=4)
@@ -614,7 +610,7 @@ void PyramidCU::ReshapeFeatureListCPU()
 #endif
 		_featureNum += fcount;
 	}
-	delete[] buffer;
+
 	if(GlobalUtil::_verbose)
 	{
 		std::cout<<"#Features MO:\t"<<_featureNum<<endl;
@@ -795,7 +791,7 @@ void PyramidCU::GenerateFeatureList(int i, int j, int reduction_count, vector<in
 	
 	//htex has the row reduction result
 	len = htex->GetImgHeight() * 4;
-	hbuffer.resize(len);
+	siftgpu::SiftResizeHostVector(hbuffer,len);
 	ProgramCU::FinishCUDA();
 	htex->CopyToHost(&hbuffer[0]);
 	
@@ -810,7 +806,7 @@ void PyramidCU::GenerateFeatureList(int i, int j, int reduction_count, vector<in
 	if(fcount > 0)
 	{
 		_featureNum += fcount;
-		_keypoint_buffer.resize(fcount * 4);
+		siftgpu::SiftResizeHostVector(_keypoint_buffer,uint64_t(fcount)*4,&_keypoint_credit);
 		//vector<int> ikbuf(fcount*4);
 		int* ibuf = (int*) (&_keypoint_buffer[0]);
 

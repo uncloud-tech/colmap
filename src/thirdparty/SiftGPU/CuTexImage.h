@@ -25,12 +25,14 @@
 #define CU_TEX_IMAGE_H
 
 #include "colmap/util/cuda_to_hip.h"
+#include "SiftRequirements.h"
 
 class GLTexImage;
 
 class CuTexImage
 {
 protected:
+    std::shared_ptr<siftgpu::SiftDeviceBudget> resource_budget_;
 	void*		_cuData;
 	int			_numChannel;
 	size_t			_numBytes;

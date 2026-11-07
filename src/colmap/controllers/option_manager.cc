@@ -330,6 +330,16 @@ void OptionManager::AddFeatureExtractionOptions() {
       "POSIX disk required; Windows streaming is unsupported and fails closed. "
       "This experimental path does not qualify whole-workflow streaming. "
       "No silent resizing or option changes.");
+  AddDefaultOption("SiftExtraction.auto_resource_check",
+                   &feature_extraction->sift->auto_resource_check,
+                   "Installed photos CLI fixed-mode resource checks; no "
+                   "automatic native fallback.");
+  AddDefaultByteOption("SiftExtraction.device_budget_bytes",
+                       &feature_extraction->sift->device_budget_bytes);
+  AddDefaultByteOption("SiftExtraction.policy_device_bytes",
+                       &feature_extraction->sift->policy_device_bytes);
+  AddDefaultByteOption("SiftExtraction.reserve_device_bytes",
+                       &feature_extraction->sift->reserve_device_bytes);
   AddDefaultByteOption("SiftExtraction.streaming_gpu_bytes",
                        &feature_extraction->sift->streaming_gpu_bytes);
   AddDefaultByteOption("SiftExtraction.streaming_host_bytes",

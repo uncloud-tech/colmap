@@ -2,11 +2,38 @@
 
 #pragma once
 
+#include "colmap/controllers/extraction_resource.h"
+
 #include <cstdint>
+#include <functional>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 
 namespace colmap {
+
+// Reserve streamed working owners on the existing phase ledger. Public output
+// arrays are separately image-owned through the database writer.
+inline std::shared_ptr<ExtractionBudget::Ticket> ReserveSiftStreamingScratch(
+    uint64_t staging_bytes,
+    uint64_t metadata_bytes,
+    const std::function<std::shared_ptr<ExtractionBudget::Ticket>(uint64_t)>&
+        acquire,
+    const std::function<void(uint64_t)>& reserve) {
+  const auto bytes = ExtractionAdd(staging_bytes, metadata_bytes);
+  if (acquire) {
+    // Reuse the existing phase ledger without retaining its image ticket.
+    // Unlike extractor history/capacities, this working set can drain while a
+    // reader is waiting for admission. Its credit dies after the working
+    // owners.
+    auto phase = acquire(0);
+    if (!phase) throw std::invalid_argument("missing SIFT phase host credit");
+    return phase->Fork(bytes, false);
+  }
+  // Preserve the optional callback behavior for direct explicit native callers.
+  if (reserve) reserve(bytes);
+  return {};
+}
 
 // Known owned live payload only, NOT an aggregate RSS/page-cache certificate.
 // The caller includes decoded Bitmap and retained output capacities, then

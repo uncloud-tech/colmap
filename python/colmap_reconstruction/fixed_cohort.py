@@ -3,22 +3,29 @@
 
 All caller pixels and frozen copies, policy-selected returned host maps and
 all PHOTO device snapshots stay charged throughout. OutputPolicy is the sole
-native execution/inventory binding: default retains both host phases; final-only
-returns GEO only (16 rather than 32 bytes per reference pixel). Private source
+native execution/inventory binding: default retains both host phases; \
+final-only
+returns GEO only (16 rather than 32 bytes per reference pixel). Private \
+source
 padding preserves ordinal multiplicity. Opt-in shared PHOTO charges a padded
 host/device union once in PHOTO only; host validation-copy transients remain
-per owner. Global padding can increase memory; default stays private. Explicit
+per owner. Global padding can increase memory; default stays private. \
+Explicit
 unknown pitch/array/context/allocator bytes are NOT
-calibrated coefficients or physical-fit proof. Native admission applies the ONE
+calibrated coefficients or physical-fit proof. Native admission applies the \
+ONE
 aggregate 3% margin; this producer does not apply any item margins.
 
 Only loaded grayscale shape metadata is evaluated: no file-map identities,
-pixel allocations, GPU queries, source sorting or execution. Source content is
-bound with the existing resident allocation closure/algorithm, not a new digest
+pixel allocations, GPU queries, source sorting or execution. Source content \
+is
+bound with the existing resident allocation closure/algorithm, not a new \
+digest
 scheme. The pin includes the optional final-GEO-only disposition and existing
 workspace adapter/shared validation and native observed-FREE admission entry,
 pending independent review, NOT inherited current-phase-v1/optimized-PHOTO
-qualification. Capacity observation/selection remains native-only; this producer
+qualification. Capacity observation/selection remains native-only; this \
+producer
 still emits the same raw inventory without any free-memory or context credit.
 This producer covers native
 execution only; workspace decode/resize scratch and
@@ -43,7 +50,7 @@ from .model import _add, _mul, current_owned_shape_minimum, exact_int
 # Compile-availability refresh: explicit non-CUDA refusals, no GPU fallback.
 # Math, allocations, allowances/reserves and containment remain unchanged.
 _FIXED_COHORT_FINGERPRINT = (
-    "95a4ad6683e5d9d33f08261fe919173911a4c70b9612ee2a8bc26532b38511a0"
+    "125c534cf8748cb77a5c6c5790a7747e794feeaa87d8d856bbc3e7582d315416"
 )
 _PROFILE = "fresh-fixed-cohort/current-owned-shape-lower-bound-v1/unqualified"
 _ROOT = Path(__file__).resolve().parents[2]
@@ -364,7 +371,9 @@ class FixedCohortBudget:
         # without C++ universal-character/surrogate or quote injection issues.
         def text(value):
             return (
-                '"' + "".join(f"\\{b:03o}" for b in value.encode("utf-8")) + '"'
+                '"'
+                + "".join(f"\\{b:03o}" for b in value.encode("utf-8"))
+                + ('"')
             )
 
         def charge(b):
@@ -454,9 +463,12 @@ def forecast_fixed_cohort(
 
     Process is caller-classified raw storage (not a new coefficient). Live
     process credits require independent per-observation provenance and remain
-    INCLUDED in process. Unknown is positive, explicit and never inferred from
-    free memory. Source/device/options/order binding does not hash caller pixels
-    or calibration: native still validates actual inputs and frozen invocation.
+    INCLUDED in process. Unknown is positive, explicit and never inferred \
+from
+    free memory. Source/device/options/order binding does not hash caller \
+pixels
+    or calibration: native still validates actual inputs and frozen \
+invocation.
     """
     if not isinstance(photo_source_storage, PhotoSourceStorage):
         raise ValueError("expected typed PhotoSourceStorage")

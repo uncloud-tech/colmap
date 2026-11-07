@@ -336,6 +336,7 @@ CLOSURE = (
     "src/thirdparty/SiftGPU/SiftPyramid.h",
     "src/thirdparty/SiftGPU/SiftPyramid.cpp",
     "src/thirdparty/SiftGPU/StreamedPlane.h",
+    "src/thirdparty/SiftGPU/SiftRequirements.h",
     "src/thirdparty/SiftGPU/CudaImageDomain.h",
     "src/thirdparty/SiftGPU/CuTexImage.h",
     "src/thirdparty/SiftGPU/CuTexImage.cpp",

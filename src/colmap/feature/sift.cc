@@ -13,6 +13,8 @@
 #include "colmap/util/opengl_utils.h"
 #include "colmap/util/string.h"
 
+#include "thirdparty/SiftGPU/SiftRequirements.h"
+
 #if defined(COLMAP_GPU_ENABLED)
 #include "thirdparty/SiftGPU/SiftGPU.h"
 #if !defined(COLMAP_GUI_ENABLED)
@@ -64,6 +66,18 @@ bool SiftExtractionOptions::Check() const {
   CHECK_OPTION_GT(peak_threshold, 0.0);
   CHECK_OPTION_GT(edge_threshold, 0.0);
   CHECK_OPTION_GT(max_num_orientations, 0);
+  if (auto_resource_check) {
+    CHECK_OPTION_GT(device_budget_bytes, 0);
+    CHECK_OPTION_EQ(first_octave, -1);
+    CHECK_OPTION_EQ(octave_resolution, 3);
+    CHECK_OPTION_EQ(max_num_features, 8192);
+    CHECK_OPTION_EQ(max_num_orientations, 2);
+    CHECK_OPTION_EQ(upright, false);
+    CHECK_OPTION_EQ(estimate_affine_shape, false);
+    CHECK_OPTION_EQ(domain_size_pooling, false);
+    CHECK_OPTION_EQ(force_covariant_extractor, false);
+    CHECK_OPTION_EQ(darkness_adaptivity, false);
+  }
   if (streaming) {
     CHECK_OPTION_GT(streaming_gpu_bytes, 0);
     CHECK_OPTION_GT(streaming_host_bytes, 0);
@@ -635,6 +649,13 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
     THROW_CHECK(!options_.sift->estimate_affine_shape);
     THROW_CHECK(!options_.sift->domain_size_pooling);
     THROW_CHECK(!options_.sift->force_covariant_extractor);
+    if (options_.sift->auto_resource_check) {
+      device_budget_ = std::make_shared<siftgpu::SiftDeviceBudget>(
+          options_.sift->device_budget_bytes,
+          options_.sift->policy_device_bytes,
+          options_.sift->reserve_device_bytes);
+      device_budget_->Replace(0, 132);
+    }
   }
 
   static std::unique_ptr<FeatureExtractor> Create(
@@ -726,11 +747,12 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
 
     auto extractor = std::make_unique<SiftGPUFeatureExtractor>(options);
 #if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
-    if (options.sift->streaming && (GlobalUtil::_InitPyramidWidth > 0 ||
-                                    GlobalUtil::_InitPyramidHeight > 0))
+    if ((options.sift->streaming || options.sift->auto_resource_check) &&
+        (GlobalUtil::_InitPyramidWidth > 0 ||
+         GlobalUtil::_InitPyramidHeight > 0))
       throw std::invalid_argument(
           "SIFT streaming refuses resident pyramid preallocation");
-    if (options.sift->streaming &&
+    if ((options.sift->streaming || options.sift->auto_resource_check) &&
         (gpu_indices[0] < 0 || gpu_indices[0] >= GetNumCudaDevices() ||
          !PyramidCU::CheckCudaDevice(gpu_indices[0]))) {
       throw std::runtime_error("SIFT streaming requires a usable CUDA device");
@@ -741,6 +763,7 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
     // If we instead create the object here and move it to the constructor, the
     // program segfaults inside SiftGPU.
 
+    siftgpu::SiftDeviceBudgetScope device_scope(extractor->device_budget_);
     extractor->sift_gpu_.ParseParam(sift_gpu_args_cstr.size(),
                                     sift_gpu_args_cstr.data());
 
@@ -755,7 +778,8 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
     }
 
 #if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
-    if (options.sift->streaming && !GlobalUtil::_UseCUDA)
+    if ((options.sift->streaming || options.sift->auto_resource_check) &&
+        !GlobalUtil::_UseCUDA)
       throw std::runtime_error("SIFT streaming refused non-CUDA backend");
 #endif
     return extractor;
@@ -776,6 +800,29 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
                    sift_gpu_.GetMaxDimension());
 
     std::lock_guard<std::mutex> lock(*sift_gpu_mutexes_[sift_gpu_.gpu_index]);
+    struct DeviceEvidence {
+      const std::shared_ptr<siftgpu::SiftDeviceBudget>& budget;
+      ~DeviceEvidence() {
+        if (budget)
+          LOG(INFO) << "SIFT actual_device_payload_bytes=" << budget->Used()
+                    << " peak_device_payload_bytes=" << budget->Peak()
+                    << " driver_allocator_unknown=1";
+      }
+    } device_evidence{device_budget_};
+    if (device_budget_)
+      LOG(INFO)
+          << "SIFT fixed_mode="
+          << (options_.sift->streaming ? "streamed" : "resident")
+          << " classification=admitted-estimate/data-dependent-runtime-checked";
+    siftgpu::SiftDeviceBudgetScope device_scope(device_budget_);
+    siftgpu::SiftHostBudgetScope host_scope(
+        options_.sift->auto_resource_check
+            ? std::function<void(uint64_t)>([this](uint64_t bytes) {
+                options_.ReserveHostPayload(bytes);
+              })
+            : std::function<void(uint64_t)>(),
+        options_.sift->auto_resource_check ? options_.acquire_host_payload
+                                           : siftgpu::SiftHostAcquire());
 
 #if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
     if (options_.sift->streaming) {
@@ -897,13 +944,8 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
     // Native vectors contain per-level owners/counts only, never pixel/list
     // arrays. Cover all simultaneously retained owners and histogram levels
     // (at most 32 for an int-height plane), including vector growth overlap.
-    const uint64_t metadata = sizeof(siftgpu::StreamInputHistory) +
-                              sizeof(siftgpu::StreamedPlane) +
-                              uint64_t(octaves) * sift_gpu_._level_num *
-                                  (4 * sizeof(siftgpu::StreamDetectionLevel) +
-                                   4 * sizeof(siftgpu::StreamListResult) +
-                                   4 * sizeof(siftgpu::StreamDescriptorResult) +
-                                   128 * sizeof(siftgpu::StreamedPlane) + 256);
+    const uint64_t metadata =
+        siftgpu::SiftStreamingMetadata(octaves, sift_gpu_._level_num);
     const uint64_t retained =
         uint64_t(keypoints->capacity()) * sizeof(FeatureKeypoint) +
         uint64_t(descriptors->data.size()) +
@@ -925,7 +967,13 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
         stage.host_bytes < 128 * sizeof(float) + 16)
       throw std::runtime_error(
           "SIFT streaming needs one conversion/descriptor row");
-    options_.ReserveHostPayload(stage.host_bytes + metadata);
+    // Declared before all working owners: release only after their actual free,
+    // not after the asynchronous database writer retires the public outputs.
+    const auto scratch_credit =
+        ReserveSiftStreamingScratch(stage.host_bytes,
+                                    metadata,
+                                    options_.acquire_host_payload,
+                                    options_.reserve_host_payload);
     auto& input = streaming_input_history_.Begin(
         stage.scratch_directory, bitmap.Width(), bitmap.Height());
     {
@@ -1023,6 +1071,7 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
   }
 #endif
   const FeatureExtractionOptions options_;
+  std::shared_ptr<siftgpu::SiftDeviceBudget> device_budget_;
   SiftGPU sift_gpu_;
 #if defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
   siftgpu::StreamInputHistory streaming_input_history_;
@@ -1035,6 +1084,20 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
 
 std::unique_ptr<FeatureExtractor> CreateSiftFeatureExtractor(
     const FeatureExtractionOptions& options) {
+  if (options.sift->auto_resource_check) {
+    THROW_CHECK(options.Check());
+    if (!options.use_gpu || !options.host_budget_bytes ||
+        options.num_threads != 1 || !options.reserve_host_payload ||
+        !options.acquire_host_payload)
+      throw std::invalid_argument(
+          "SIFT auto resource checks require one CUDA extractor and host "
+          "budget with owner-lifetime credit callbacks");
+#if !defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED) || \
+    !defined(__linux__)
+    throw std::invalid_argument(
+        "SIFT auto resource checks require Linux CUDA build");
+#endif
+  }
   if (options.sift->streaming) {
     THROW_CHECK(options.Check());
     if (!options.use_gpu || !options.host_budget_bytes)

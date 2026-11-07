@@ -333,3 +333,45 @@ qualify actual PHOTO/GEO S8 and S20 tile16/32 outputs against equivalent ordered
 inputs/options/PRNG controls, sample-limit/unsupported/cancellation cases, mapped
 fusion outputs, physical peaks and unprofiled performance. CPU contract tests
 alone do not establish those GPU/quality/performance results.
+
+### Automatic SIFT residency in the photos-only CLI
+
+The installed photos-only CLI selects **one SIFT mode for the entire extraction
+process**, before constructing the extractor. It prefers resident CUDA SIFT when
+its native whole-sequence initial-owner estimate is admitted. Otherwise it uses
+the existing file-backed streamed route when its known staging, decoded-image,
+metadata and static scratch requirements are admitted. Neither-fit plans refuse
+with host/device/disk byte figures, without resizing or falling back. Extraction
+uses one resizer/extractor thread to preserve the ordered input history; the
+requested thread setting remains available to later phases.
+
+The photos CLI writes `planning/extraction-dimensions.txt` and passes
+`--dimensions_path FILE`, with one ordered `WIDTHxHEIGHT` pair per line. This
+avoids operating-system argument-length limits without limiting photo count.
+The file follows existing preview cleanup and approved-workspace copying.
+Legacy `--dimensions 6048x4032,4032x6048` remains supported; exactly one non-empty
+input source is required. Both forms accept ordered
+post-EXIF working dimensions and explicit `--host_capacity_bytes`,
+`--device_capacity_bytes`, `--disk_capacity_bytes`, `--policy_host_bytes`,
+`--policy_device_bytes`, `--reserve_host_bytes`, `--reserve_device_bytes`.
+This CPU-only inventory models the photos CLI's default SIFT configuration;
+it performs no extraction, GPU initialization or future-max preallocation.
+The plan records componentwise retained pyramid dimensions separately from
+flat input-history capacity. The CLI records the decision in its approved plan
+and rechecks admission before launching; a changed mode requires a fresh plan.
+
+Admission is an **estimate with data-dependent runtime checks**, not guaranteed
+completion or physical RAM/VRAM containment. The feature-count setting is soft:
+whole-level limiting can overshoot. Native device capacities and host growth
+are checked before allocation; streamed orientation/descriptor sampling windows
+and count-dependent scratch reservations can still refuse. Scratch uses the
+owned, unlinked disk-backed planes and existing cancellation/cleanup; tmpfs and
+ramfs are unsupported. Decoder, driver, allocator and charged page-cache usage
+remain policy allowances, not certified bounds. Static spill requirements are
+reported; count-dependent I/O and total transfers remain unknown before detection.
+Partial databases after a failed extraction are not complete reconstructions.
+
+Stock `feature_extractor` retains its resident default and existing explicit
+streaming controls. Automatic resource checks are Linux CUDA only; Windows is
+not qualified. No change here qualifies matching, SfM, undistortion, stereo,
+fusion, arbitrary hardware, performance parity or whole-pipeline streaming.

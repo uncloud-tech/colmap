@@ -154,6 +154,10 @@ class FeatureExtractorThread : public ExtractionWorker {
         THROW_CHECK_NOTNULL(current_credit_.get());
         current_credit_->Grow(bytes);
       };
+      extraction_options_.acquire_host_payload = [this](uint64_t bytes) {
+        THROW_CHECK_NOTNULL(current_credit_.get());
+        return current_credit_->Fork(bytes);
+      };
     }
 
     if (extraction_options_.sift->streaming) {
@@ -653,7 +657,8 @@ class FeatureExtractorController : public Thread {
       if (budget_)
         admit_header = [&](int w, int h, int channels) {
           const int max_size = extraction_options_.EffMaxImageSize();
-          if (extraction_options_.sift->streaming &&
+          if ((extraction_options_.sift->streaming ||
+               extraction_options_.sift->auto_resource_check) &&
               (w > max_size || h > max_size))
             throw std::invalid_argument(
                 "SIFT streaming refuses implicit image resizing; input exceeds "

@@ -35,6 +35,7 @@ using namespace std;
 #include "GlobalUtil.h"
 #include "SiftPyramid.h"
 #include "SiftGPU.h"
+#include "SiftRequirements.h"
 
 
 #ifdef DEBUG_SIFTGPU
@@ -217,12 +218,12 @@ void SiftPyramid::PrepareBuffer()
 	if(!(_existing_keypoints & SIFT_SKIP_ORIENTATION))
 	{
 		//_keypoint_buffer.resize(4 * (_featureNum +align));
-		_keypoint_buffer.resize(4 * (_featureNum + GlobalUtil::_texMaxDim)); //11/19/2008
+		siftgpu::SiftResizeHostVector(_keypoint_buffer,4ULL*(uint64_t(_featureNum)+GlobalUtil::_texMaxDim),&_keypoint_credit); //11/19/2008
 	}
 	if(GlobalUtil::_DescriptorPPT)
 	{
 		//_descriptor_buffer.resize(128*(_featureNum + align));
-		_descriptor_buffer.resize(128 * _featureNum + 16 * GlobalUtil::_texMaxDim);//11/19/2008
+		siftgpu::SiftResizeHostVector(_descriptor_buffer,128ULL*_featureNum+16ULL*GlobalUtil::_texMaxDim,&_descriptor_credit);//11/19/2008
 	}
 
 }

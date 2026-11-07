@@ -1,34 +1,44 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""Real frontend processes with a synthetic native boundary, not GPU qualification."""
+"""Real frontend processes with a synthetic native boundary, not \
+GPU qualification."""
+
 import json
 import os
 import pty
 import select
 import signal
-import time
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from pathlib import Path
 
 from colmap_reconstruction.resource_policy import ALLOCATION_FINGERPRINT
 
 
-@unittest.skipUnless(sys.platform == 'linux' and os.geteuid() != 0,
-                     'frontend execution requires non-root Linux')
+@unittest.skipUnless(
+    sys.platform == "linux" and os.geteuid() != 0,
+    "frontend execution requires non-root Linux",
+)
 class ApprovalTest(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent)
+        self.temp = tempfile.TemporaryDirectory(
+            dir=Path(__file__).resolve().parent
+        )
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.photos = self.root / 'photos'
+        self.photos = self.root / "photos"
         self.photos.mkdir()
-        (self.photos / 'photo.jpg').write_bytes(b'original')
-        self.workspace = self.root / 'output'
-        self.calls = self.root / 'calls.jsonl'
-        self.native = self.root / 'native'
-        self.native.write_text('#!' + sys.executable + '\n' + '''
+        (self.photos / "photo.jpg").write_bytes(b"original")
+        self.workspace = self.root / "output"
+        self.calls = self.root / "calls.jsonl"
+        self.native = self.root / "native"
+        self.native.write_text(
+            "#!"
+            + sys.executable
+            + "\n"
+            + """
 import json, os, sys, signal
 from pathlib import Path
 with Path(os.environ['TEST_CALLS']).open('a') as log:
@@ -36,34 +46,76 @@ with Path(os.environ['TEST_CALLS']).open('a') as log:
 command = sys.argv[1]
 if command == 'reconstruction_info':
     if len(sys.argv) > 2 and os.environ.get('TEST_MUTATE_ON_REOBSERVE'):
-        calls = [json.loads(line) for line in Path(os.environ['TEST_CALLS']).read_text().splitlines()]
+        calls = [json.loads(line) for line in \
+Path(os.environ['TEST_CALLS']).read_text().splitlines()]
         if sum(call[0] == 'reconstruction_info' for call in calls) >= 3:
-            Path(os.environ['TEST_MUTATE_ON_REOBSERVE']).write_bytes(b'changed at launch boundary')
+            \
+Path(os.environ['TEST_MUTATE_ON_REOBSERVE']).write_bytes(b'changed at \
+launch boundary')
     if len(sys.argv) > 2 and os.environ.get('TEST_BLOCK_QUERY'):
         with open(os.environ['TEST_BLOCK_QUERY'], 'w') as fifo:
             fifo.write(str(os.getpid()) + '\\n')
         signal.pause()
-    if '--gpu_index' in sys.argv and os.environ.get('TEST_POSTAPPROVAL_QUERY_FAIL'):
-        calls = [json.loads(line) for line in Path(os.environ['TEST_CALLS']).read_text().splitlines()]
+    if '--gpu_index' in sys.argv and \
+os.environ.get('TEST_POSTAPPROVAL_QUERY_FAIL'):
+        calls = [json.loads(line) for line in \
+Path(os.environ['TEST_CALLS']).read_text().splitlines()]
         if sum('--gpu_index' in call for call in calls) == 2:
-            print('CUDA device access lost; restore device access and rerun', file=sys.stderr)
+            print('CUDA device access lost; restore device access and \
+rerun', file=sys.stderr)
             sys.exit(3)
     if len(sys.argv) > 2 and os.environ.get('TEST_QUERY_FAIL'):
         print('CUDA device unavailable', file=sys.stderr)
         sys.exit(3)
-    print(json.dumps(dict(schema_version=1, cuda_compiled=not bool(os.environ.get('TEST_NO_CUDA')),
+    print(json.dumps(dict(schema_version=1, cuda_compiled=not \
+bool(os.environ.get('TEST_NO_CUDA')),
         source_commit='a' * 40, allocation_fingerprint=FINGERPRINT,
         available_host_bytes=32 * 1024**3,
-        available_device_bytes=(int(Path(os.environ['TEST_FREE']).read_text()) if Path(os.environ['TEST_FREE']).exists() else 16 * 1024**3),
-        device_uuid=(Path(os.environ['TEST_DEVICE']).read_text() if Path(os.environ['TEST_DEVICE']).exists() else next((d['device_uuid'] for d in json.loads(os.environ.get('TEST_INVENTORY', '[]')) if '--gpu_index' in sys.argv and d['ordinal'] == int(sys.argv[sys.argv.index('--gpu_index') + 1])), 'GPU-test')),
-        device_inventory=json.loads(os.environ.get('TEST_INVENTORY', '[{"ordinal":0,"usable":true,"compute_capability_major":8,"compute_capability_minor":9,"available_device_bytes":"17179869184","device_uuid":"GPU-test"},{"ordinal":2,"usable":true,"compute_capability_major":8,"compute_capability_minor":9,"available_device_bytes":"17179869184","device_uuid":"GPU-test"}]')))))
+        \
+available_device_bytes=(int(Path(os.environ['TEST_FREE']).read_text()) if \
+Path(os.environ['TEST_FREE']).exists() else 16 * 1024**3),
+        device_uuid=(Path(os.environ['TEST_DEVICE']).read_text() if \
+Path(os.environ['TEST_DEVICE']).exists() else next((d['device_uuid'] for d \
+in json.loads(os.environ.get('TEST_INVENTORY', '[]')) if '--gpu_index' in \
+sys.argv and d['ordinal'] == int(sys.argv[sys.argv.index('--gpu_index') + \
+1])), 'GPU-test')),
+        device_inventory=json.loads(os.environ.get('TEST_INVENTORY', \
+'[{"ordinal":0,"usable":true,"compute_capability_major":8,"compute_capabilit\
+y_minor":9,"available_device_bytes":"17179869184","device_uuid":"GPU-test"},\
+{"ordinal":2,"usable":true,"compute_capability_major":8,"compute_capability_\
+minor":9,"available_device_bytes":"17179869184","device_uuid":"GPU-test"}]')\
+))))
+elif command == 'sift_extraction_plan':
+    if '--dimensions_path' in sys.argv:
+        dimensions = Path(sys.argv[sys.argv.index('--dimensions_path') + 1])
+        assert dimensions.parent.name == 'planning'
+        rows = dimensions.read_text().splitlines()
+        if os.environ.get('TEST_EXIF'):
+            assert rows == ['3001x4004']
+        count = int(os.environ.get('TEST_MANY_PHOTOS', '0'))
+        if count:
+            assert len(dimensions.read_bytes()) > 128 * 1024
+            assert rows == [f'{4004 + 4 * (i % 2)}x3001' for i in \
+range(count)]
+    elif os.environ.get('TEST_MANY_PHOTOS'):
+        raise AssertionError('large sequence must use file transport')
+    print(json.dumps(dict(schema_version=1, \
+mode=os.environ.get('TEST_SIFT_MODE','resident'),
+        reason='synthetic boundary fixture', num_threads=1, \
+mode_transitions=False,
+        resident_host_required_bytes=100, resident_device_required_bytes=200,
+        stream_host_required_bytes=50, stream_device_required_bytes=60,
+        streaming_gpu_bytes=1000, streaming_host_bytes=1000, \
+scratch_static_bytes=500)))
 elif os.environ.get('TEST_SIDECAR') and command == 'feature_extractor':
     image_list = Path(sys.argv[sys.argv.index('--image_list_path') + 1])
     workspace = Path(sys.argv[sys.argv.index('--database_path') + 1]).parent
     assert image_list == workspace / 'planning/extraction-images.txt'
     assert image_list.read_bytes() == b'photo.jpg\\n'
-    sys.exit(17)  # List really consumed at the native boundary; no GPU claim.
-elif os.environ.get('TEST_SFM_PROCEED') and command in ('feature_extractor', 'exhaustive_matcher'):
+    sys.exit(17)  # List really consumed at the native boundary; no GPU \
+claim.
+elif os.environ.get('TEST_SFM_PROCEED') and command in \
+('feature_extractor', 'exhaustive_matcher'):
     pass
 elif os.environ.get('TEST_SFM_PROCEED') and command == 'mapper':
     (Path(sys.argv[sys.argv.index('--output_path') + 1]) / '0').mkdir()
@@ -73,61 +125,115 @@ elif os.environ.get('TEST_SFM_PROCEED') and command == 'image_undistorter':
     images = Path(sys.argv[sys.argv.index('--output_path') + 1]) / 'images'
     images.mkdir(parents=True)
     (images / 'photo.jpg').write_bytes(b'warped image fixture')
-elif os.environ.get('TEST_SFM_PROCEED') and command == 'optimized_dense_plan':
+elif os.environ.get('TEST_SFM_PROCEED') and command == \
+'optimized_dense_plan':
     workspace = Path(sys.argv[sys.argv.index('--workspace_path') + 1])
-    # Prescribed native response: these native quality options must survive dispatch.
-    options = dict(max_image_size=-1, num_samples=7, random_seed=42, gpu_index='2',
+    # Prescribed native response: these native quality options must survive \
+dispatch.
+    options = dict(max_image_size=-1, num_samples=7, random_seed=42, \
+gpu_index='2',
                    num_iterations=5, window_radius=5, window_step=1)
     jobs = [dict(reference=0, sources=[1], options=options),
             dict(reference=1, sources=[0], options=options)]
-    Path(sys.argv[sys.argv.index('--output_path') + 1]).write_text(json.dumps(dict(
-        schema_version=1, workspace_path=str(workspace), build=dict(revision='a' * 8),
-        phases={phase: dict(jobs=jobs, requested_options=options) for phase in ('photo', 'geo')},
-        images=[dict(index=index, name='photo.jpg', path=str(workspace / 'images/photo.jpg'),
-                     width=6405, height=4187) for index in (0, 1)], input_files=[])))
+    Path(sys.argv[sys.argv.index('--output_path') + \
+1]).write_text(json.dumps(dict(
+        schema_version=1, workspace_path=str(workspace), \
+build=dict(revision='a' * 8),
+        phases={phase: dict(jobs=jobs, requested_options=options) for phase \
+in ('photo', 'geo')},
+        images=[dict(index=index, name='photo.jpg', path=str(workspace / \
+'images/photo.jpg'),
+                     width=6405, height=4187) for index in (0, 1)], \
+input_files=[])))
 elif command == 'photo_directory_summary':
-    print(json.dumps(dict(schema_version=1, header_only=True, orientation_applied=False,
-        photo_count=1, photos=[dict(path='photo.jpg', width=4004, height=3001, orientation=None)],
-        non_image_files=['photo.xmp'] if os.environ.get('TEST_SIDECAR') else [],
+    count = int(os.environ.get('TEST_MANY_PHOTOS', '0'))
+    photos = ([dict(path=f'photo-{i:05d}.jpg', width=4004 + 4 * (i % 2),
+                   height=3001, orientation=None) for i in range(count)]
+              if count else [dict(path='photo.jpg', width=4004, height=3001,
+                   orientation=int(os.environ['TEST_EXIF']) if \
+os.environ.get('TEST_EXIF') else None)])
+    print(json.dumps(dict(schema_version=1, header_only=True, \
+orientation_applied=False,
+        photo_count=len(photos), photos=photos,
+        non_image_files=['photo.xmp'] if os.environ.get('TEST_SIDECAR') \
+else [],
         problems=[], build=dict(revision='a' * 8, cuda_compiled=True))))
 else:
     print('TEST native execution reached', file=sys.stderr)
     sys.exit(17)
-'''.replace('FINGERPRINT', repr(ALLOCATION_FINGERPRINT)))
+""".replace("FINGERPRINT", repr(ALLOCATION_FINGERPRINT))
+        )
         self.native.chmod(0o700)
-        self.argv = [sys.executable, '-m', 'colmap_reconstruction.cli',
-                     '--experimental-local', '--colmap', str(self.native),
-                     '--photos', str(self.photos), '--workspace', str(self.workspace)]
-        self.query_tmp = self.root / 'query-tmp'
+        self.argv = [
+            sys.executable,
+            "-m",
+            "colmap_reconstruction.cli",
+            "--experimental-local",
+            "--colmap",
+            str(self.native),
+            "--photos",
+            str(self.photos),
+            "--workspace",
+            str(self.workspace),
+        ]
+        self.query_tmp = self.root / "query-tmp"
         self.query_tmp.mkdir()
-        self.device_state = self.root / 'device-state'
-        self.env = dict(os.environ, TEST_CALLS=str(self.calls), TMPDIR=str(self.query_tmp),
-                        TEST_DEVICE=str(self.device_state), TEST_FREE=str(self.root / 'free'))
+        self.device_state = self.root / "device-state"
+        self.env = dict(
+            os.environ,
+            TEST_CALLS=str(self.calls),
+            TMPDIR=str(self.query_tmp),
+            TEST_DEVICE=str(self.device_state),
+            TEST_FREE=str(self.root / "free"),
+        )
 
-    def invoke(self, *options, stdin=''):
-        return subprocess.run(self.argv + list(options), input=stdin, text=True,
-                              capture_output=True, env=self.env, timeout=10)
+    def invoke(self, *options, stdin=""):
+        return subprocess.run(
+            self.argv + list(options),
+            input=stdin,
+            text=True,
+            capture_output=True,
+            env=self.env,
+            timeout=10,
+        )
 
     def commands(self):
-        return ([json.loads(line) for line in self.calls.read_text().splitlines()]
-                if self.calls.exists() else [])
+        return (
+            [json.loads(line) for line in self.calls.read_text().splitlines()]
+            if self.calls.exists()
+            else []
+        )
 
     def assert_preview_only(self):
         self.assertFalse(self.workspace.exists())
-        self.assertEqual((self.photos / 'photo.jpg').read_bytes(), b'original')
-        self.assertTrue(all(call[0] in ('reconstruction_info', 'photo_directory_summary')
-                            for call in self.commands()))
+        self.assertEqual((self.photos / "photo.jpg").read_bytes(), b"original")
+        self.assertTrue(
+            all(
+                call[0]
+                in (
+                    "reconstruction_info",
+                    "photo_directory_summary",
+                    "sift_extraction_plan",
+                )
+                for call in self.commands()
+            )
+        )
 
     def interactive(self):
         master, slave = pty.openpty()
         self.addCleanup(os.close, master)
-        process = subprocess.Popen(self.argv, stdin=slave, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, env=self.env)
+        process = subprocess.Popen(
+            self.argv,
+            stdin=slave,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=self.env,
+        )
         os.close(slave)
         self.addCleanup(lambda: process.poll() is None and process.kill())
-        output = b''
+        output = b""
         deadline = time.monotonic() + 10
-        while b'Approve this plan?' not in output:
+        while b"Approve this plan?" not in output:
             self.assertGreater(deadline - time.monotonic(), 0, output.decode())
             ready, _, _ = select.select([process.stdout], [], [], 1)
             if ready:
@@ -136,10 +242,12 @@ else:
                 output += chunk
         return process, master, output
 
-    def test_preview_ignores_default_cached_and_cwd_temp_locations_inside_photos(self):
+    def test_preview_keeps_default_cached_and_cwd_temps_outside_photos(
+        self,
+    ):
         # Exercise main in fresh processes while controlling the stdlib temp
         # facility, not the frontend's planning/approval implementation.
-        bootstrap = '''
+        bootstrap = """
 import os, sys, tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -152,108 +260,145 @@ def protect_inputs(event, args):
         path = Path(os.fsdecode(args[0])).resolve()
         if path.is_relative_to(photos) and args[2] & os.O_CREAT:
             raise RuntimeError('temporary probe attempted inside photos')
-    if event == 'os.mkdir' and Path(args[0]).resolve().is_relative_to(photos):
+    if event == 'os.mkdir' and \
+Path(args[0]).resolve().is_relative_to(photos):
         raise RuntimeError('temporary directory attempted inside photos')
 sys.addaudithook(protect_inputs)
 if mode == 'cached':
     tempfile.tempdir = str(photos)
     raise SystemExit(main(sys.argv[3:]))
 tempfile.tempdir = None
-candidates = [str(photos)] if mode == 'default' else [str(photos / 'missing'), os.getcwd()]
-with patch.object(tempfile, '_candidate_tempdir_list', return_value=candidates):
+candidates = [str(photos)] if mode == 'default' else [str(photos / \
+'missing'), os.getcwd()]
+with patch.object(tempfile, '_candidate_tempdir_list', \
+return_value=candidates):
     raise SystemExit(main(sys.argv[3:]))
-'''
-        environment = {key: value for key, value in self.env.items()
-                       if key not in ('TMPDIR', 'TEMP', 'TMP')}
+"""
+        environment = {
+            key: value
+            for key, value in self.env.items()
+            if key not in ("TMPDIR", "TEMP", "TMP")
+        }
         # These subprocesses run from photos, so use an absolute module path.
-        environment['PYTHONPATH'] = str(Path(__file__).resolve().parents[1])
-        for mode in ('default', 'cached', 'cwd-fallback'):
+        environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+        for mode in ("default", "cached", "cwd-fallback"):
             with self.subTest(mode=mode):
-                result = subprocess.run([sys.executable, '-c', bootstrap, mode,
-                    str(self.photos), *self.argv[3:], '--plan-only'], cwd=self.photos,
-                    env=environment, capture_output=True, text=True, timeout=10)
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        bootstrap,
+                        mode,
+                        str(self.photos),
+                        *self.argv[3:],
+                        "--plan-only",
+                    ],
+                    cwd=self.photos,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn('Effective plan', result.stdout)
+                self.assertIn("Effective plan", result.stdout)
                 self.assert_preview_only()
-                self.assertEqual([path.name for path in self.photos.iterdir()], ['photo.jpg'])
-                self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
+                self.assertEqual(
+                    [path.name for path in self.photos.iterdir()],
+                    [("photo.jpg")],
+                )
+                self.assertEqual(list(self.root.glob("colmap-preview-*")), [])
 
     def test_interactive_yes_launches_only_after_approval(self):
         process, terminal, preview = self.interactive()
         self.assert_preview_only()
-        os.write(terminal, b'yes\n')
+        os.write(terminal, b"yes\n")
         tail, _ = process.communicate(timeout=10)
-        self.assertEqual(process.returncode, 2, tail.decode())  # synthetic native exit 17
-        self.assertIn('feature_extractor', [call[0] for call in self.commands()])
+        self.assertEqual(
+            process.returncode, 2, tail.decode()
+        )  # synthetic native exit 17
+        self.assertIn(
+            "feature_extractor", [call[0] for call in self.commands()]
+        )
         self.assertTrue(self.workspace.is_dir())
 
-    def test_symlink_retarget_with_identical_bytes_requires_fresh_approval(self):
-        first = self.root / 'first.jpg'
-        second = self.root / 'second.jpg'
-        first.write_bytes(b'original')
-        second.write_bytes(b'original')
-        photo = self.photos / 'photo.jpg'
+    def test_symlink_retarget_with_identical_bytes_requires_fresh_approval(
+        self,
+    ):
+        first = self.root / "first.jpg"
+        second = self.root / "second.jpg"
+        first.write_bytes(b"original")
+        second.write_bytes(b"original")
+        photo = self.photos / "photo.jpg"
         photo.unlink()
         photo.symlink_to(first)
         process, terminal, _ = self.interactive()
         photo.unlink()
         photo.symlink_to(second)
-        os.write(terminal, b'yes\n')
+        os.write(terminal, b"yes\n")
         tail, _ = process.communicate(timeout=10)
         self.assertEqual(process.returncode, 2, tail.decode())
-        self.assertIn(b'photo inputs/inventory changed', tail)
+        self.assertIn(b"photo inputs/inventory changed", tail)
         self.assert_preview_only()
-        self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
+        self.assertEqual(list(self.root.glob("colmap-preview-*")), [])
 
     def test_approved_sidecar_image_list_is_consumed_from_owned_workspace(self):
-        self.env['TEST_SIDECAR'] = '1'
-        sidecar = self.photos / 'photo.xmp'
-        sidecar.write_bytes(b'original sidecar')
+        self.env["TEST_SIDECAR"] = "1"
+        sidecar = self.photos / "photo.xmp"
+        sidecar.write_bytes(b"original sidecar")
         process, terminal, _ = self.interactive()
         self.assertFalse(self.workspace.exists())
-        preview = list(self.root.glob('colmap-preview-*'))
+        preview = list(self.root.glob("colmap-preview-*"))
         self.assertEqual(len(preview), 1)
-        self.assertEqual((preview[0] / 'planning/extraction-images.txt').read_bytes(), b'photo.jpg\n')
-        os.write(terminal, b'yes\n')
+        self.assertEqual(
+            (preview[0] / "planning/extraction-images.txt").read_bytes(),
+            b"photo.jpg\n",
+        )
+        os.write(terminal, b"yes\n")
         tail, _ = process.communicate(timeout=10)
         self.assertEqual(process.returncode, 2, tail.decode())
-        self.assertIn(b'native exit 17: feature_extractor', tail)
-        extraction = next(call for call in self.commands() if call[0] == 'feature_extractor')
-        image_list = Path(extraction[extraction.index('--image_list_path') + 1])
-        self.assertEqual(image_list, self.workspace / 'planning/extraction-images.txt')
-        self.assertEqual(image_list.read_bytes(), b'photo.jpg\n')
-        self.assertEqual(sidecar.read_bytes(), b'original sidecar')
-        self.assertEqual((self.photos / 'photo.jpg').read_bytes(), b'original')
-        self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
+        self.assertIn(b"native exit 17: feature_extractor", tail)
+        extraction = next(
+            call for call in self.commands() if call[0] == "feature_extractor"
+        )
+        image_list = Path(extraction[extraction.index("--image_list_path") + 1])
+        self.assertEqual(
+            image_list, self.workspace / "planning/extraction-images.txt"
+        )
+        self.assertEqual(image_list.read_bytes(), b"photo.jpg\n")
+        self.assertEqual(sidecar.read_bytes(), b"original sidecar")
+        self.assertEqual((self.photos / "photo.jpg").read_bytes(), b"original")
+        self.assertEqual(list(self.root.glob("colmap-preview-*")), [])
 
     def test_changed_photo_refuses_before_output_creation(self):
         process, terminal, _ = self.interactive()
-        (self.photos / 'photo.jpg').write_bytes(b'changed')
-        os.write(terminal, b'yes\n')
+        (self.photos / "photo.jpg").write_bytes(b"changed")
+        os.write(terminal, b"yes\n")
         tail, _ = process.communicate(timeout=10)
         self.assertEqual(process.returncode, 2, tail.decode())
-        self.assertIn(b'changed', tail)
+        self.assertIn(b"changed", tail)
         self.assertFalse(self.workspace.exists())
-        self.assertNotIn('feature_extractor', [call[0] for call in self.commands()])
+        self.assertNotIn(
+            "feature_extractor", [call[0] for call in self.commands()]
+        )
 
     def test_interactive_reject_cleans_preview_without_output(self):
         process, terminal, _ = self.interactive()
-        self.assertTrue(list(self.root.glob('colmap-preview-*')))
-        os.write(terminal, b'no\n')
+        self.assertTrue(list(self.root.glob("colmap-preview-*")))
+        os.write(terminal, b"no\n")
         tail, _ = process.communicate(timeout=10)
         self.assertEqual(process.returncode, 2, tail.decode())
-        self.assertIn(b'plan rejected', tail)
+        self.assertIn(b"plan rejected", tail)
         self.assert_preview_only()
-        self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
+        self.assertEqual(list(self.root.glob("colmap-preview-*")), [])
 
     def test_interactive_eof_cancels_without_output(self):
         process, terminal, _ = self.interactive()
-        os.write(terminal, b'\x04')
+        os.write(terminal, b"\x04")
         tail, _ = process.communicate(timeout=10)
         self.assertEqual(process.returncode, 2, tail.decode())
-        self.assertIn(b'EOF', tail)
+        self.assertIn(b"EOF", tail)
         self.assert_preview_only()
-        self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
+        self.assertEqual(list(self.root.glob("colmap-preview-*")), [])
 
     def test_signal_during_approval_cleans_without_output(self):
         for signum, expected in ((signal.SIGINT, 130), (signal.SIGTERM, 143)):
@@ -262,275 +407,705 @@ with patch.object(tempfile, '_candidate_tempdir_list', return_value=candidates):
                 process.send_signal(signum)
                 tail, _ = process.communicate(timeout=10)
                 self.assertEqual(process.returncode, expected, tail.decode())
-                self.assertIn(b'cancelled', tail)
+                self.assertIn(b"cancelled", tail)
                 self.assert_preview_only()
-                self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
+                self.assertEqual(list(self.root.glob("colmap-preview-*")), [])
 
     def test_changed_executable_refuses_before_output(self):
         process, terminal, _ = self.interactive()
-        with self.native.open('a') as stream:
-            stream.write('\n# changed executable\n')
-        os.write(terminal, b'yes\n')
+        with self.native.open("a") as stream:
+            stream.write("\n# changed executable\n")
+        os.write(terminal, b"yes\n")
         tail, _ = process.communicate(timeout=10)
         self.assertEqual(process.returncode, 2, tail.decode())
-        self.assertIn(b'executable changed', tail)
+        self.assertIn(b"executable changed", tail)
         self.assert_preview_only()
 
     def test_added_photo_refuses_before_output(self):
         process, terminal, _ = self.interactive()
-        (self.photos / 'new.jpg').write_bytes(b'new input')
-        os.write(terminal, b'yes\n')
+        (self.photos / "new.jpg").write_bytes(b"new input")
+        os.write(terminal, b"yes\n")
         tail, _ = process.communicate(timeout=10)
         self.assertEqual(process.returncode, 2, tail.decode())
-        self.assertIn(b'inventory changed', tail)
+        self.assertIn(b"inventory changed", tail)
         self.assert_preview_only()
 
     def test_yes_approves_but_does_not_replace_engineering_consent(self):
-        self.argv.remove('--experimental-local')
-        result = self.invoke('--yes')
+        self.argv.remove("--experimental-local")
+        result = self.invoke("--yes")
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('explicit --experimental-local consent required', result.stderr)
+        self.assertIn(
+            "explicit --experimental-local consent required", result.stderr
+        )
         self.assertFalse(self.workspace.exists())
         self.assertFalse(self.calls.exists())
 
-    def test_admitted_extraction_preserves_selected_options(self):
-        result = self.invoke('--yes', '--threads', '3', '--gpu-index', '2',
-                             '--max-image-size', '1600', '--source-cap', '8',
-                             '--num-samples', '7', '--random-seed', '42', '--tile', '32')
-        self.assertEqual(result.returncode, 2)  # intentional native exit, not full qualification
-        calls = self.commands()
-        self.assertIn('feature_extractor', [call[0] for call in calls], result.stderr)
-        extraction = next(call for call in calls if call[0] == 'feature_extractor')
-        for option, expected in {'--image_path': str(self.photos),
-                '--FeatureExtraction.max_image_size': '4004',
-                '--FeatureExtraction.type': 'SIFT', '--FeatureExtraction.use_gpu': 'true',
-                '--SiftExtraction.first_octave': '-1', '--FeatureExtraction.gpu_index': '2',
-                '--FeatureExtraction.num_threads': '3'}.items():
-            self.assertEqual(extraction[extraction.index(option) + 1], expected)
-        plan = json.loads((self.workspace / 'planning/approved-plan.json').read_text())
-        for key, expected in dict(threads=3, gpu_index=2, max_image_size=1600,
-                source_cap=8, num_samples=7, random_seed=42, tile=32).items():
-            self.assertEqual(plan['options'][key], expected)
-        self.assertEqual(len([call for call in calls if call[0] == 'reconstruction_info']), 4)
+    def test_large_ordered_sequence_uses_owned_file_not_an_argv_payload(self):
+        self.env["TEST_MANY_PHOTOS"] = "15000"
+        result = self.invoke("--plan-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        query = next(
+            call
+            for call in self.commands()
+            if call[0] == "sift_extraction_plan"
+        )
+        self.assertIn("--dimensions_path", query)
+        self.assertNotIn("--dimensions", query)
+        self.assertTrue(all(len(arg.encode()) < 128 * 1024 for arg in query))
+        self.assert_preview_only()
+        self.assertEqual(list(self.root.glob("colmap-preview-*")), [])
 
-    def test_approved_pipeline_commands_preserve_quality_and_dispatch_options(self):
-        self.env['TEST_SFM_PROCEED'] = '1'
-        result = self.invoke('--yes', '--threads', '3', '--gpu-index', '2',
-                             '--max-image-size', '1600', '--source-cap', '8',
-                             '--num-samples', '7', '--random-seed', '42', '--tile', '32',
-                             '--no-lookahead')
-        self.assertEqual(result.returncode, 2, result.stderr)  # synthetic dense exit 17
+    def test_auto_sift_selection_is_process_wide_and_serialized(self):
+        result = self.invoke("--yes", "--threads", "3")
+        calls = self.commands()
+        self.assertIn(
+            "sift_extraction_plan", [call[0] for call in calls], result.stderr
+        )
+        extraction = next(
+            call for call in calls if call[0] == "feature_extractor"
+        )
+        self.assertEqual(
+            extraction[extraction.index("--FeatureExtraction.num_threads") + 1],
+            "1",
+        )
+        self.assertEqual(
+            extraction[
+                extraction.index("--SiftExtraction.auto_resource_check") + 1
+            ],
+            "true",
+        )
+        self.assertEqual(
+            extraction[extraction.index("--SiftExtraction.streaming") + 1],
+            "false",
+        )
+
+    def test_streamed_selection_passes_owned_scratch_and_component_budgets(
+        self,
+    ):
+        self.env["TEST_SIFT_MODE"] = "streamed"
+        result = self.invoke("--yes")
+        self.assertEqual(
+            result.returncode, 2
+        )  # prescribed native exit, not GPU proof
+        extraction = next(
+            call for call in self.commands() if call[0] == "feature_extractor"
+        )
+        for option, expected in {
+            "--SiftExtraction.streaming": "true",
+            "--SiftExtraction.streaming_gpu_bytes": "1000",
+            "--SiftExtraction.streaming_host_bytes": "1000",
+            "--SiftExtraction.streaming_scratch_path": str(self.workspace),
+        }.items():
+            self.assertEqual(extraction[extraction.index(option) + 1], expected)
+        plan = json.loads(
+            (self.workspace / "planning/approved-plan.json").read_text()
+        )
+        self.assertEqual(
+            plan["effective_dispatch"]["extraction"]["selection"]["mode"],
+            "streamed",
+        )
+        self.assertEqual(plan["effective_dispatch"]["extraction"]["threads"], 1)
+
+    def test_neither_fit_plan_preserves_actionable_phase_bounds_without_launch(
+        self,
+    ):
+        self.env["TEST_SIFT_MODE"] = "refused"
+        result = self.invoke("--yes")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("SIFT neither mode admitted", result.stderr)
+        self.assertIn("resident_device_required_bytes", result.stderr)
+        self.assertIn("stream_host_required_bytes", result.stderr)
+        self.assertIn("scratch_static_bytes", result.stderr)
+        self.assertNotIn(
+            "feature_extractor", [call[0] for call in self.commands()]
+        )
+        self.assertFalse(self.workspace.exists())
+
+    def test_selection_uses_exif_working_dimensions_without_resizing(self):
+        self.env["TEST_EXIF"] = "6"
+        result = self.invoke("--plan-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        plan = next(
+            call
+            for call in self.commands()
+            if call[0] == "sift_extraction_plan"
+        )
+        self.assertIn("--dimensions_path", plan)
+        self.assertNotIn("--dimensions", plan)
+        self.assert_preview_only()
+
+    def test_admitted_extraction_preserves_selected_options(self):
+        result = self.invoke(
+            "--yes",
+            "--threads",
+            "3",
+            "--gpu-index",
+            "2",
+            "--max-image-size",
+            "1600",
+            "--source-cap",
+            "8",
+            "--num-samples",
+            "7",
+            "--random-seed",
+            "42",
+            "--tile",
+            "32",
+        )
+        self.assertEqual(
+            result.returncode, 2
+        )  # intentional native exit, not full qualification
+        calls = self.commands()
+        self.assertIn(
+            "feature_extractor", [call[0] for call in calls], result.stderr
+        )
+        extraction = next(
+            call for call in calls if call[0] == "feature_extractor"
+        )
+        for option, expected in {
+            "--image_path": str(self.photos),
+            "--FeatureExtraction.max_image_size": "4004",
+            "--FeatureExtraction.type": "SIFT",
+            "--FeatureExtraction.use_gpu": "true",
+            "--SiftExtraction.first_octave": "-1",
+            "--FeatureExtraction.gpu_index": "2",
+            "--FeatureExtraction.num_threads": "1",
+        }.items():
+            self.assertEqual(extraction[extraction.index(option) + 1], expected)
+        plan = json.loads(
+            (self.workspace / "planning/approved-plan.json").read_text()
+        )
+        for key, expected in dict(
+            threads=3,
+            gpu_index=2,
+            max_image_size=1600,
+            source_cap=8,
+            num_samples=7,
+            random_seed=42,
+            tile=32,
+        ).items():
+            self.assertEqual(plan["options"][key], expected)
+        self.assertEqual(
+            len([call for call in calls if call[0] == "reconstruction_info"]), 4
+        )
+
+    def test_approved_pipeline_commands_preserve_quality_and_dispatch_options(
+        self,
+    ):
+        self.env["TEST_SFM_PROCEED"] = "1"
+        result = self.invoke(
+            "--yes",
+            "--threads",
+            "3",
+            "--gpu-index",
+            "2",
+            "--max-image-size",
+            "1600",
+            "--source-cap",
+            "8",
+            "--num-samples",
+            "7",
+            "--random-seed",
+            "42",
+            "--tile",
+            "32",
+            "--no-lookahead",
+        )
+        self.assertEqual(
+            result.returncode, 2, result.stderr
+        )  # synthetic dense exit 17
         calls = {call[0]: call for call in self.commands()}
         expected = {
-            'exhaustive_matcher': {'--FeatureMatching.gpu_index': '2', '--FeatureMatching.num_threads': '3'},
-            'mapper': {'--Mapper.num_threads': '3', '--Mapper.ba_gpu_index': '2'},
-            'image_undistorter': {'--max_image_size': '1600', '--blank_pixels': '0',
-                '--min_scale': '0.2', '--max_scale': '2', '--num_patch_match_src_images': '8',
-                '--num_threads': '3'},
-            'optimized_dense_plan': {'--source_cap': '8', '--num_samples': '7',
-                '--gpu_index': '2', '--random_seed': '42', '--owned_tex_lookahead': 'false'},
-            'experimental_fixed_cohort': {'--tile_threads': '32', '--output_policy': 'final_geo_only',
-                '--auto_active_owners': '1', '--auto_phase_active_owners': '1',
-                '--photo_source_storage': 'auto', '--PatchMatchStereo.max_image_size': '-1',
-                '--PatchMatchStereo.num_samples': '7', '--PatchMatchStereo.random_seed': '42',
-                '--PatchMatchStereo.gpu_index': '2', '--PatchMatchStereo.num_iterations': '5',
-                '--PatchMatchStereo.window_radius': '5', '--PatchMatchStereo.window_step': '1'}}
+            "exhaustive_matcher": {
+                "--FeatureMatching.gpu_index": "2",
+                "--FeatureMatching.num_threads": "3",
+            },
+            "mapper": {
+                "--Mapper.num_threads": "3",
+                "--Mapper.ba_gpu_index": "2",
+            },
+            "image_undistorter": {
+                "--max_image_size": "1600",
+                "--blank_pixels": "0",
+                "--min_scale": "0.2",
+                "--max_scale": "2",
+                "--num_patch_match_src_images": "8",
+                "--num_threads": "3",
+            },
+            "optimized_dense_plan": {
+                "--source_cap": "8",
+                "--num_samples": "7",
+                "--gpu_index": "2",
+                "--random_seed": "42",
+                "--owned_tex_lookahead": "false",
+            },
+            "experimental_fixed_cohort": {
+                "--tile_threads": "32",
+                "--output_policy": "final_geo_only",
+                "--auto_active_owners": "1",
+                "--auto_phase_active_owners": "1",
+                "--photo_source_storage": "auto",
+                "--PatchMatchStereo.max_image_size": "-1",
+                "--PatchMatchStereo.num_samples": "7",
+                "--PatchMatchStereo.random_seed": "42",
+                "--PatchMatchStereo.gpu_index": "2",
+                "--PatchMatchStereo.num_iterations": "5",
+                "--PatchMatchStereo.window_radius": "5",
+                "--PatchMatchStereo.window_step": "1",
+            },
+        }
         for command, options in expected.items():
             self.assertIn(command, calls, result.stderr)
             for name, value in options.items():
-                self.assertEqual(calls[command][calls[command].index(name) + 1], value)
-        plan = json.loads((self.workspace / 'planning/approved-plan.json').read_text())
-        self.assertEqual(plan['effective_dispatch']['fusion'],
-                         dict(backend='CPU', threads=1, use_mmap=True, use_cache=False))
-        self.assertEqual(plan['resolution']['undistortion']['resolved_dimensions'], None)
-        self.assertIn('Resolved dense dimensions', result.stderr)
+                self.assertEqual(
+                    calls[command][calls[command].index(name) + 1], value
+                )
+        plan = json.loads(
+            (self.workspace / "planning/approved-plan.json").read_text()
+        )
+        self.assertEqual(
+            plan["effective_dispatch"]["fusion"],
+            dict(backend="CPU", threads=1, use_mmap=True, use_cache=False),
+        )
+        self.assertEqual(
+            plan["resolution"]["undistortion"]["resolved_dimensions"], None
+        )
+        self.assertIn("Resolved dense dimensions", result.stderr)
 
     def test_input_change_during_reobservation_refuses_before_extraction(self):
-        self.env['TEST_MUTATE_ON_REOBSERVE'] = str(self.photos / 'photo.jpg')
-        result = self.invoke('--yes')
+        self.env["TEST_MUTATE_ON_REOBSERVE"] = str(self.photos / "photo.jpg")
+        result = self.invoke("--yes")
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('photo inputs/inventory changed', result.stderr)
-        self.assertNotIn('feature_extractor', [call[0] for call in self.commands()])
+        self.assertIn("photo inputs/inventory changed", result.stderr)
+        self.assertNotIn(
+            "feature_extractor", [call[0] for call in self.commands()]
+        )
 
     def test_auto_selects_most_free_visible_device_without_output(self):
-        self.env['TEST_INVENTORY'] = json.dumps([
-            dict(ordinal=0, usable=True, compute_capability_major=8, compute_capability_minor=9, available_device_bytes=str(8 * 1024**3), device_uuid='GPU-zero'),
-            dict(ordinal=2, usable=True, compute_capability_major=8, compute_capability_minor=9, available_device_bytes=str(24 * 1024**3), device_uuid='GPU-two')])
-        result = self.invoke('--plan-only')
+        self.env["TEST_INVENTORY"] = json.dumps(
+            [
+                dict(
+                    ordinal=0,
+                    usable=True,
+                    compute_capability_major=8,
+                    compute_capability_minor=9,
+                    available_device_bytes=str(8 * 1024**3),
+                    device_uuid="GPU-zero",
+                ),
+                dict(
+                    ordinal=2,
+                    usable=True,
+                    compute_capability_major=8,
+                    compute_capability_minor=9,
+                    available_device_bytes=str(24 * 1024**3),
+                    device_uuid="GPU-two",
+                ),
+            ]
+        )
+        result = self.invoke("--plan-only")
         self.assertEqual(result.returncode, 0, result.stderr)
-        plan = json.loads(result.stdout.split('Effective plan (approval required): ')[1])
-        self.assertEqual(plan['effective_dispatch']['extraction']['gpu_index'], 2)
-        self.assertEqual(plan['device_selection']['mode'], 'auto')
-        self.assertEqual(len(plan['device_inventory']), 2)
-        self.assertEqual([d['ordinal'] for d in plan['effective_dispatch']['stereo']['approved_devices']], [0, 2])
-        self.assertIn('PHOTO and GEO', plan['effective_dispatch']['stereo']['distribution'])
+        plan = json.loads(
+            result.stdout.split("Effective plan (approval required): ")[1]
+        )
+        self.assertEqual(
+            plan["effective_dispatch"]["extraction"]["gpu_index"], 2
+        )
+        self.assertEqual(plan["device_selection"]["mode"], "auto")
+        self.assertEqual(len(plan["device_inventory"]), 2)
+        self.assertEqual(
+            [
+                d["ordinal"]
+                for d in plan["effective_dispatch"]["stereo"][
+                    "approved_devices"
+                ]
+            ],
+            [0, 2],
+        )
+        self.assertIn(
+            "PHOTO and GEO",
+            plan["effective_dispatch"]["stereo"]["distribution"],
+        )
         # Inventory FREE selects; a fresh authoritative exact query admits.
-        self.assertEqual(plan['hardware_observation']['available_device_bytes'], 16 * 1024**3)
-        queries = [call for call in self.commands() if call[0] == 'reconstruction_info']
-        self.assertEqual(queries[0][1], '--deadline_seconds')
-        self.assertEqual(queries[1][1:3], ['--gpu_index', '2'])
+        self.assertEqual(
+            plan["hardware_observation"]["available_device_bytes"], 16 * 1024**3
+        )
+        queries = [
+            call
+            for call in self.commands()
+            if call[0] == ("reconstruction_info")
+        ]
+        self.assertEqual(queries[0][1], "--deadline_seconds")
+        self.assertEqual(queries[1][1:3], ["--gpu_index", "2"])
         self.assert_preview_only()
 
-    def test_mixed_compute_capability_auto_refuses_before_preview_or_execution(self):
+    def test_mixed_compute_capability_auto_refuses_before_preview_or_execution(
+        self,
+    ):
         for capabilities in ((8, 6, 8, 9), (8, 9, 9, 0)):
-            inventory = [dict(ordinal=0, usable=True, available_device_bytes='19000000000',
-                              device_uuid='GPU-zero', compute_capability_major=capabilities[0],
-                              compute_capability_minor=capabilities[1]),
-                         dict(ordinal=2, usable=True, available_device_bytes='9000000000',
-                              device_uuid='GPU-two', compute_capability_major=capabilities[2],
-                              compute_capability_minor=capabilities[3])]
-            self.env['TEST_INVENTORY'] = json.dumps(inventory)
-            for mode in ('--plan-only', '--yes'):
+            inventory = [
+                dict(
+                    ordinal=0,
+                    usable=True,
+                    available_device_bytes="19000000000",
+                    device_uuid="GPU-zero",
+                    compute_capability_major=capabilities[0],
+                    compute_capability_minor=capabilities[1],
+                ),
+                dict(
+                    ordinal=2,
+                    usable=True,
+                    available_device_bytes="9000000000",
+                    device_uuid="GPU-two",
+                    compute_capability_major=capabilities[2],
+                    compute_capability_minor=capabilities[3],
+                ),
+            ]
+            self.env["TEST_INVENTORY"] = json.dumps(inventory)
+            for mode in ("--plan-only", "--yes"):
                 with self.subTest(capabilities=capabilities, mode=mode):
                     result = self.invoke(mode)
                     self.assertEqual(result.returncode, 2, result.stderr)
-                    self.assertIn('mixed compute capabilities', result.stderr)
-                    self.assertIn('--gpu-index', result.stderr)
-                    self.assertNotIn('Effective plan (approval required):', result.stdout)
-                    self.assertTrue(all(call[0] == 'reconstruction_info' and
-                                        '--gpu_index' not in call for call in self.commands()))
+                    self.assertIn("mixed compute capabilities", result.stderr)
+                    self.assertIn("--gpu-index", result.stderr)
+                    self.assertNotIn(
+                        "Effective plan (approval required):", result.stdout
+                    )
+                    self.assertTrue(
+                        all(
+                            call[0] == "reconstruction_info"
+                            and "--gpu_index" not in call
+                            for call in self.commands()
+                        )
+                    )
                     self.assert_preview_only()
 
-    def test_compute_capability_selection_preserves_homogeneous_auto_and_exact_override(self):
+    def test_compute_capability_keeps_homogeneous_auto_and_exact_override(
+        self,
+    ):
         # sm89 matches the retained L40 qualification. sm90 here proves only
         # frontend policy, not native capability or numerical qualification.
-        for major, minor, explicit in ((8, 9, None), (9, 0, None), (8, 9, 0), (8, 9, 2)):
-            inventory = [dict(ordinal=2, usable=True, available_device_bytes='9000000000',
-                              device_uuid='GPU-two', compute_capability_major=major,
-                              compute_capability_minor=minor),
-                         dict(ordinal=0, usable=True, available_device_bytes='19000000000',
-                              device_uuid='GPU-zero', compute_capability_major=major,
-                              compute_capability_minor=minor)]
+        for major, minor, explicit in (
+            (8, 9, None),
+            (9, 0, None),
+            (8, 9, 0),
+            (8, 9, 2),
+        ):
+            inventory = [
+                dict(
+                    ordinal=2,
+                    usable=True,
+                    available_device_bytes="9000000000",
+                    device_uuid="GPU-two",
+                    compute_capability_major=major,
+                    compute_capability_minor=minor,
+                ),
+                dict(
+                    ordinal=0,
+                    usable=True,
+                    available_device_bytes="19000000000",
+                    device_uuid="GPU-zero",
+                    compute_capability_major=major,
+                    compute_capability_minor=minor,
+                ),
+            ]
             if explicit is not None:
                 # The explicit selection must remain exact, even when it has
                 # less FREE than the other usable, different-capability GPU.
-                inventory[0]['compute_capability_minor'] = 6
+                inventory[0]["compute_capability_minor"] = 6
             else:
-                inventory.append(dict(ordinal=7, usable=False, available_device_bytes=None,
-                    device_uuid='GPU-unusable', compute_capability_major=7,
-                    compute_capability_minor=5, reason='context unavailable'))
-            self.env['TEST_INVENTORY'] = json.dumps(inventory)
+                inventory.append(
+                    dict(
+                        ordinal=7,
+                        usable=False,
+                        available_device_bytes=None,
+                        device_uuid="GPU-unusable",
+                        compute_capability_major=7,
+                        compute_capability_minor=5,
+                        reason="context unavailable",
+                    )
+                )
+            self.env["TEST_INVENTORY"] = json.dumps(inventory)
             with self.subTest(major=major, minor=minor, explicit=explicit):
-                options = [] if explicit is None else ['--gpu-index', str(explicit)]
-                result = self.invoke('--plan-only', *options)
+                options = (
+                    [] if explicit is None else ["--gpu-index", str(explicit)]
+                )
+                result = self.invoke("--plan-only", *options)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                plan = json.loads(result.stdout.split('Effective plan (approval required): ')[1])
+                plan = json.loads(
+                    result.stdout.split("Effective plan (approval required): ")[
+                        1
+                    ]
+                )
                 selected = 0 if explicit is None else explicit
-                for stage in ('extraction', 'matching'):
-                    self.assertEqual(plan['effective_dispatch'][stage]['gpu_index'], selected)
-                self.assertEqual(plan['device_selection']['device_uuid'],
-                                 'GPU-zero' if selected == 0 else 'GPU-two')
-                stereo = plan['effective_dispatch']['stereo']
-                self.assertEqual([d['ordinal'] for d in stereo['approved_devices']],
-                                 [0, 2] if explicit is None else [explicit])
-                self.assertEqual(plan['device_inventory'], inventory)
-                self.assertEqual(plan['device_selection']['ordinal'], 0 if explicit is None else explicit)
+                for stage in ("extraction", "matching"):
+                    self.assertEqual(
+                        plan["effective_dispatch"][stage]["gpu_index"], selected
+                    )
+                self.assertEqual(
+                    plan["device_selection"]["device_uuid"],
+                    "GPU-zero" if selected == 0 else "GPU-two",
+                )
+                stereo = plan["effective_dispatch"]["stereo"]
+                self.assertEqual(
+                    [d["ordinal"] for d in stereo["approved_devices"]],
+                    [0, 2] if explicit is None else [explicit],
+                )
+                self.assertEqual(plan["device_inventory"], inventory)
+                self.assertEqual(
+                    plan["device_selection"]["ordinal"],
+                    0 if explicit is None else explicit,
+                )
                 if explicit is not None:
-                    self.assertEqual(stereo['distribution'], 'exact single-device path')
+                    self.assertEqual(
+                        stereo["distribution"], "exact single-device path"
+                    )
                 self.assert_preview_only()
 
     def test_visible_selection_single_ties_unusable_and_exact_override(self):
         cases = [
-            ([dict(ordinal=3, usable=True, compute_capability_major=8, compute_capability_minor=9, available_device_bytes='9000000000', device_uuid='GPU-three')], [], 3, 'auto'),
-            ([dict(ordinal=2, usable=True, compute_capability_major=8, compute_capability_minor=9, available_device_bytes='9000000000', device_uuid='GPU-two'),
-              dict(ordinal=0, usable=True, compute_capability_major=8, compute_capability_minor=9, available_device_bytes='9000000000', device_uuid='GPU-zero')], [], 0, 'auto'),
-            ([dict(ordinal=0, usable=False, available_device_bytes=None, device_uuid='', reason='context unavailable'),
-              dict(ordinal=2, usable=True, compute_capability_major=8, compute_capability_minor=9, available_device_bytes='9000000000', device_uuid='GPU-two')], [], 2, 'auto'),
-            ([dict(ordinal=0, usable=True, compute_capability_major=8, compute_capability_minor=9, available_device_bytes='19000000000', device_uuid='GPU-zero'),
-              dict(ordinal=2, usable=True, compute_capability_major=8, compute_capability_minor=9, available_device_bytes='9000000000', device_uuid='GPU-two')], ['--gpu-index', '2'], 2, 'explicit')]
+            (
+                [
+                    dict(
+                        ordinal=3,
+                        usable=True,
+                        compute_capability_major=8,
+                        compute_capability_minor=9,
+                        available_device_bytes="9000000000",
+                        device_uuid="GPU-three",
+                    )
+                ],
+                [],
+                3,
+                "auto",
+            ),
+            (
+                [
+                    dict(
+                        ordinal=2,
+                        usable=True,
+                        compute_capability_major=8,
+                        compute_capability_minor=9,
+                        available_device_bytes="9000000000",
+                        device_uuid="GPU-two",
+                    ),
+                    dict(
+                        ordinal=0,
+                        usable=True,
+                        compute_capability_major=8,
+                        compute_capability_minor=9,
+                        available_device_bytes="9000000000",
+                        device_uuid="GPU-zero",
+                    ),
+                ],
+                [],
+                0,
+                "auto",
+            ),
+            (
+                [
+                    dict(
+                        ordinal=0,
+                        usable=False,
+                        available_device_bytes=None,
+                        device_uuid="",
+                        reason="context unavailable",
+                    ),
+                    dict(
+                        ordinal=2,
+                        usable=True,
+                        compute_capability_major=8,
+                        compute_capability_minor=9,
+                        available_device_bytes="9000000000",
+                        device_uuid="GPU-two",
+                    ),
+                ],
+                [],
+                2,
+                "auto",
+            ),
+            (
+                [
+                    dict(
+                        ordinal=0,
+                        usable=True,
+                        compute_capability_major=8,
+                        compute_capability_minor=9,
+                        available_device_bytes="19000000000",
+                        device_uuid="GPU-zero",
+                    ),
+                    dict(
+                        ordinal=2,
+                        usable=True,
+                        compute_capability_major=8,
+                        compute_capability_minor=9,
+                        available_device_bytes="9000000000",
+                        device_uuid="GPU-two",
+                    ),
+                ],
+                ["--gpu-index", "2"],
+                2,
+                "explicit",
+            ),
+        ]
         for inventory, options, expected, mode in cases:
-            with self.subTest(expected=expected, mode=mode, inventory=inventory):
-                self.env['TEST_INVENTORY'] = json.dumps(inventory)
-                result = self.invoke('--plan-only', *options)
+            with self.subTest(
+                expected=expected, mode=mode, inventory=inventory
+            ):
+                self.env["TEST_INVENTORY"] = json.dumps(inventory)
+                result = self.invoke("--plan-only", *options)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                plan = json.loads(result.stdout.split('Effective plan (approval required): ')[1])
-                self.assertEqual(plan['device_selection']['ordinal'], expected)
-                self.assertEqual(plan['device_selection']['mode'], mode)
-                self.assertEqual(plan['device_inventory'], inventory)
-                self.assertIn('not fastest-device', plan['device_selection']['limitations'])
-                self.assertEqual(plan['effective_dispatch']['extraction']['threads'], 1)
-                stereo = plan['effective_dispatch']['stereo']
-                approved = [d['ordinal'] for d in stereo['approved_devices']]
-                self.assertEqual(approved, [expected] if mode == 'explicit' else
-                                 sorted(d['ordinal'] for d in inventory if d['usable']))
-                if mode == 'explicit':
-                    self.assertEqual(stereo['distribution'], 'exact single-device path')
+                plan = json.loads(
+                    result.stdout.split("Effective plan (approval required): ")[
+                        1
+                    ]
+                )
+                self.assertEqual(plan["device_selection"]["ordinal"], expected)
+                self.assertEqual(plan["device_selection"]["mode"], mode)
+                self.assertEqual(plan["device_inventory"], inventory)
+                self.assertIn(
+                    "not fastest-device",
+                    plan["device_selection"]["limitations"],
+                )
+                self.assertEqual(
+                    plan["effective_dispatch"]["extraction"]["threads"], 1
+                )
+                stereo = plan["effective_dispatch"]["stereo"]
+                approved = [d["ordinal"] for d in stereo["approved_devices"]]
+                self.assertEqual(
+                    approved,
+                    [expected]
+                    if mode == "explicit"
+                    else sorted(d["ordinal"] for d in inventory if d["usable"]),
+                )
+                if mode == "explicit":
+                    self.assertEqual(
+                        stereo["distribution"], "exact single-device path"
+                    )
                 self.assert_preview_only()
 
-    def test_no_device_unusable_and_invalid_explicit_refuse_without_fallback(self):
-        cases = [([], []),
-                 ([dict(ordinal=0, usable=False, reason='context failed')], []),
-                 ([dict(ordinal=0, usable=True, compute_capability_major=8, compute_capability_minor=9, available_device_bytes='9000000000', device_uuid='GPU-zero')], ['--gpu-index', '7']),
-                 ([dict(ordinal=0, usable=True, compute_capability_major=8, compute_capability_minor=9, available_device_bytes='9000000000', device_uuid='GPU-zero'),
-                   dict(ordinal=2, usable=False, reason='permission denied')], ['--gpu-index', '2'])]
+    def test_no_device_unusable_and_invalid_explicit_refuse_without_fallback(
+        self,
+    ):
+        cases = [
+            ([], []),
+            ([dict(ordinal=0, usable=False, reason="context failed")], []),
+            (
+                [
+                    dict(
+                        ordinal=0,
+                        usable=True,
+                        compute_capability_major=8,
+                        compute_capability_minor=9,
+                        available_device_bytes="9000000000",
+                        device_uuid="GPU-zero",
+                    )
+                ],
+                ["--gpu-index", "7"],
+            ),
+            (
+                [
+                    dict(
+                        ordinal=0,
+                        usable=True,
+                        compute_capability_major=8,
+                        compute_capability_minor=9,
+                        available_device_bytes="9000000000",
+                        device_uuid="GPU-zero",
+                    ),
+                    dict(ordinal=2, usable=False, reason="permission denied"),
+                ],
+                ["--gpu-index", "2"],
+            ),
+        ]
         for inventory, options in cases:
             with self.subTest(inventory=inventory, options=options):
-                self.env['TEST_INVENTORY'] = json.dumps(inventory)
-                result = self.invoke('--yes', *options)
+                self.env["TEST_INVENTORY"] = json.dumps(inventory)
+                result = self.invoke("--yes", *options)
                 self.assertEqual(result.returncode, 2, result.stderr)
-                self.assertIn('no usable visible CUDA device', result.stderr)
-                self.assertIn('CUDA_VISIBLE_DEVICES', result.stderr)
+                self.assertIn("no usable visible CUDA device", result.stderr)
+                self.assertIn("CUDA_VISIBLE_DEVICES", result.stderr)
                 self.assertIn(json.dumps(inventory), result.stderr)
                 self.assert_preview_only()
-        result = self.invoke('--yes', '--gpu-index', '-1')
+        result = self.invoke("--yes", "--gpu-index", "-1")
         self.assertEqual(result.returncode, 2)
         self.assert_preview_only()
 
     def test_changed_device_refuses_instead_of_silently_switching_gpu(self):
         process, terminal, _ = self.interactive()
-        self.device_state.write_text('GPU-replacement')
-        os.write(terminal, b'yes\n')
+        self.device_state.write_text("GPU-replacement")
+        os.write(terminal, b"yes\n")
         tail, _ = process.communicate(timeout=10)
         self.assertEqual(process.returncode, 2, tail.decode())
-        self.assertIn(b'device identity changed', tail)
+        self.assertIn(b"device identity changed", tail)
         self.assertFalse(self.workspace.exists())
-        self.assertNotIn('feature_extractor', [call[0] for call in self.commands()])
+        self.assertNotIn(
+            "feature_extractor", [call[0] for call in self.commands()]
+        )
 
     def test_plan_only_without_cuda_build_is_honestly_unavailable(self):
-        self.env['TEST_NO_CUDA'] = '1'
-        result = self.invoke('--plan-only')
+        self.env["TEST_NO_CUDA"] = "1"
+        result = self.invoke("--plan-only")
         self.assertEqual(result.returncode, 2)
-        self.assertIn('plan unavailable', result.stderr)
-        self.assertIn('CPU fallback unsupported', result.stderr)
-        self.assertNotIn('Effective plan', result.stdout)
+        self.assertIn("plan unavailable", result.stderr)
+        self.assertIn("CPU fallback unsupported", result.stderr)
+        self.assertNotIn("Effective plan", result.stdout)
         self.assert_preview_only()
-        self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
+        self.assertEqual(list(self.root.glob("colmap-preview-*")), [])
 
     def test_plan_only_failed_cuda_query_preserves_actionable_diagnostic(self):
-        self.env['TEST_QUERY_FAIL'] = '1'
-        result = self.invoke('--plan-only')
+        self.env["TEST_QUERY_FAIL"] = "1"
+        result = self.invoke("--plan-only")
         self.assertEqual(result.returncode, 2)
-        self.assertIn('CUDA device unavailable', result.stderr)
-        self.assertIn('plan unavailable', result.stderr)
-        self.assertNotIn('Effective plan', result.stdout)
+        self.assertIn("CUDA device unavailable", result.stderr)
+        self.assertIn("plan unavailable", result.stderr)
+        self.assertNotIn("Effective plan", result.stdout)
         self.assert_preview_only()
-        self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
+        self.assertEqual(list(self.root.glob("colmap-preview-*")), [])
 
-    def test_postapproval_failed_cuda_query_preserves_diagnostic_before_cleanup(self):
-        self.env['TEST_POSTAPPROVAL_QUERY_FAIL'] = '1'
-        result = self.invoke('--yes')
+    def test_postapproval_failed_cuda_query_preserves_diagnostic_before_cleanup(
+        self,
+    ):
+        self.env["TEST_POSTAPPROVAL_QUERY_FAIL"] = "1"
+        result = self.invoke("--yes")
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('Effective plan (approval required):', result.stdout)
-        self.assertIn('CUDA device access lost; restore device access and rerun', result.stderr)
-        queries = [call for call in self.commands() if call[0] == 'reconstruction_info']
+        self.assertIn("Effective plan (approval required):", result.stdout)
+        self.assertIn(
+            "CUDA device access lost; restore device access and rerun",
+            result.stderr,
+        )
+        queries = [
+            call
+            for call in self.commands()
+            if call[0] == ("reconstruction_info")
+        ]
         self.assertEqual(len(queries), 3)
-        self.assertEqual(queries[0][1], '--deadline_seconds')
-        self.assertEqual([call[1:3] for call in queries[1:]], [['--gpu_index', '0']] * 2)
+        self.assertEqual(queries[0][1], "--deadline_seconds")
+        self.assertEqual(
+            [call[1:3] for call in queries[1:]], [["--gpu_index", "0"]] * 2
+        )
         self.assert_preview_only()
-        self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
+        self.assertEqual(list(self.root.glob("colmap-preview-*")), [])
 
     def test_signal_during_native_query_drains_child_and_cleans_preview(self):
         for signum, expected in ((signal.SIGINT, 130), (signal.SIGTERM, 143)):
             with self.subTest(signal=signum):
-                fifo = self.root / ('query-started-%d' % signum)
+                fifo = self.root / f"query-started-{signum:d}"
                 os.mkfifo(fifo)
                 descriptor = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
                 self.addCleanup(os.close, descriptor)
-                self.env['TEST_BLOCK_QUERY'] = str(fifo)
+                self.env["TEST_BLOCK_QUERY"] = str(fifo)
                 with tempfile.TemporaryFile() as output:
-                    process = subprocess.Popen(self.argv + ['--plan-only'], stdout=output,
-                                               stderr=output, env=self.env)
-                    self.addCleanup(lambda: process.poll() is None and process.kill())
+                    process = subprocess.Popen(
+                        self.argv + ["--plan-only"],
+                        stdout=output,
+                        stderr=output,
+                        env=self.env,
+                    )
+                    self.addCleanup(
+                        lambda process=process: (
+                            process.poll() is None and process.kill()
+                        )
+                    )
                     ready, _, _ = select.select([descriptor], [], [], 10)
                     self.assertTrue(ready)
                     child_pid = int(os.read(descriptor, 100))
@@ -540,67 +1115,79 @@ with patch.object(tempfile, '_candidate_tempdir_list', return_value=candidates):
                     with self.assertRaises(ProcessLookupError):
                         os.kill(child_pid, 0)
                 self.assert_preview_only()
-                self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
+                self.assertEqual(list(self.root.glob("colmap-preview-*")), [])
 
     def test_small_free_fluctuation_does_not_request_reapproval(self):
         process, terminal, _ = self.interactive()
-        (self.root / 'free').write_text(str(16 * 1024**3 - 1))
-        os.write(terminal, b'yes\n')
+        (self.root / "free").write_text(str(16 * 1024**3 - 1))
+        os.write(terminal, b"yes\n")
         tail, _ = process.communicate(timeout=10)
-        self.assertIn('feature_extractor', [call[0] for call in self.commands()])
-        self.assertNotIn(b'Approve this plan?', tail)
+        self.assertIn(
+            "feature_extractor", [call[0] for call in self.commands()]
+        )
+        self.assertNotIn(b"Approve this plan?", tail)
 
     def test_capacity_loss_refuses_without_quality_fallback(self):
         process, terminal, _ = self.interactive()
-        (self.root / 'free').write_text('1')
-        os.write(terminal, b'yes\n')
+        (self.root / "free").write_text("1")
+        os.write(terminal, b"yes\n")
         tail, _ = process.communicate(timeout=10)
         self.assertEqual(process.returncode, 2)
-        self.assertIn(b'device reserve unavailable', tail)
+        self.assertIn(b"device reserve unavailable", tail)
         self.assertFalse(self.workspace.exists())
-        self.assertNotIn('feature_extractor', [call[0] for call in self.commands()])
+        self.assertNotIn(
+            "feature_extractor", [call[0] for call in self.commands()]
+        )
 
     def test_approval_wait_respects_invocation_deadline(self):
-        self.argv += ['--timeout-seconds', '1.5']
+        self.argv += ["--timeout-seconds", "1.5"]
         process, terminal, _ = self.interactive()
         tail, _ = process.communicate(timeout=5)
         self.assertEqual(process.returncode, 2)
-        self.assertIn(b'deadline expired', tail)
+        self.assertIn(b"deadline expired", tail)
         self.assert_preview_only()
-        self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
+        self.assertEqual(list(self.root.glob("colmap-preview-*")), [])
 
     def test_workspace_inside_photos_refuses_without_input_mutation(self):
-        self.argv[self.argv.index('--workspace') + 1] = str(self.photos / 'output')
-        result = self.invoke('--plan-only')
+        self.argv[self.argv.index("--workspace") + 1] = str(
+            self.photos / "output"
+        )
+        result = self.invoke("--plan-only")
         self.assertEqual(result.returncode, 2)
-        self.assertIn('outside photos', result.stderr)
-        self.assertEqual([path.name for path in self.photos.iterdir()], ['photo.jpg'])
+        self.assertIn("outside photos", result.stderr)
+        self.assertEqual(
+            [path.name for path in self.photos.iterdir()], ["photo.jpg"]
+        )
         self.assertFalse(self.calls.exists())
 
     def test_query_tmpdir_inside_photos_is_ignored_without_input_mutation(self):
-        self.env.update({name: str(self.photos) for name in ('TMPDIR', 'TEMP', 'TMP')})
-        result = self.invoke('--plan-only')
+        self.env.update(
+            {name: str(self.photos) for name in ("TMPDIR", "TEMP", "TMP")}
+        )
+        result = self.invoke("--plan-only")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('Effective plan', result.stdout)
-        self.assertEqual([path.name for path in self.photos.iterdir()], ['photo.jpg'])
+        self.assertIn("Effective plan", result.stdout)
+        self.assertEqual(
+            [path.name for path in self.photos.iterdir()], ["photo.jpg"]
+        )
         self.assert_preview_only()
-        self.assertEqual(list(self.root.glob('colmap-preview-*')), [])
+        self.assertEqual(list(self.root.glob("colmap-preview-*")), [])
 
     def test_noninteractive_requires_yes_even_with_piped_approval(self):
-        result = self.invoke(stdin='yes\n')
+        result = self.invoke(stdin="yes\n")
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('--yes', result.stderr)
+        self.assertIn("--yes", result.stderr)
         self.assert_preview_only()
 
     def test_plan_only_displays_honest_plan_without_output(self):
-        result = self.invoke('--plan-only')
+        result = self.invoke("--plan-only")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('Effective plan', result.stdout)
-        self.assertIn('UNKNOWN', result.stdout)
-        self.assertIn('4004', result.stdout)
+        self.assertIn("Effective plan", result.stdout)
+        self.assertIn("UNKNOWN", result.stdout)
+        self.assertIn("4004", result.stdout)
         self.assertIn(str(self.workspace), result.stdout)
         self.assert_preview_only()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

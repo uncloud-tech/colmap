@@ -76,6 +76,10 @@ struct SiftExtractionOptions {
   // host budget admits known payloads, not decoder/allocator/page-cache RSS.
   // Claimed aggregate ceilings require external job containment (including
   // charged page cache). No automatic planner or CPU fallback is enabled.
+  bool auto_resource_check = false;
+  uint64_t device_budget_bytes = 0;
+  uint64_t policy_device_bytes = 0;
+  uint64_t reserve_device_bytes = 0;
   bool streaming = false;
   uint64_t streaming_gpu_bytes = 0;
   uint64_t streaming_host_bytes = 0;
