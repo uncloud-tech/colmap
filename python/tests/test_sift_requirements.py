@@ -313,3 +313,114 @@ budget.Used()!=500) return 28;
                 text=True,
             )
             subprocess.run([str(binary)], check=True, text=True, timeout=15)
+
+    def test_streamed_working_credit_retires_before_previous_writer(self):
+        source = r"""
+#include "colmap/feature/sift_streaming.h"
+#include "thirdparty/SiftGPU/SiftRequirements.h"
+#include <future>
+#include <iostream>
+#include <vector>
+using namespace std::chrono_literals;
+using Ticket = std::shared_ptr<colmap::ExtractionBudget::Ticket>;
+auto Scratch(const Ticket& image, uint64_t staging, uint64_t metadata) {
+  return colmap::ReserveSiftStreamingScratch(
+      staging, metadata,
+      [&](uint64_t bytes) { return image->Fork(bytes); },
+      [&](uint64_t bytes) { image->Grow(bytes); });
+}
+int main() {
+  // Recorded limits: reserve payload without multi-GB physical allocations.
+  colmap::ExtractionBudget budget(7398268928, 2147483648, 536870912);
+  const uint64_t stage = 4512840863, metadata = 266000;
+  auto writer = budget.Acquire(
+      colmap::ExtractionBitmapPayload(264,129,1,264,false),
+      [] {return false;});
+  auto second = budget.Acquire(
+      colmap::ExtractionBitmapPayload(256,129,1,264,false),
+      [] {return false;});
+  // Actual retained native vector owner shares the ledger but not image life.
+  Ticket retained;
+  std::vector<float> persistent;
+  {
+    siftgpu::SiftHostBudgetScope scope({},[&](uint64_t bytes) {
+      return writer->Fork(bytes);
+    });
+    siftgpu::SiftResizeHostVector(persistent,256,&retained);
+  }
+  std::vector<uint8_t> public_result(24*152);
+  writer->Grow(public_result.size());
+  const auto live_outputs = budget.Used();
+  {
+    auto credit = Scratch(writer, stage, metadata);
+    std::vector<float> conversion_row(264);
+    if(budget.Used()!=live_outputs+stage+metadata) return 20;
+  } // All streamed working owners end; writer/result/retained owners stay live.
+  try {
+    auto credit = Scratch(second, stage, metadata);
+    std::vector<float> conversion_row(256);
+    if(budget.Used()!=live_outputs+stage+metadata) return 21;
+  } catch(const std::exception& e) {
+    std::cerr << "second-image reservation: " << e.what() << '\n';
+    return 22;
+  }
+  if(budget.Used()!=live_outputs || persistent.size()!=256) return 23;
+  {
+    auto credit = Scratch(second, stage, metadata);
+    bool refused=false;
+    try { auto concurrent = Scratch(writer, stage, metadata); }
+    catch(const std::runtime_error&) {refused=true;}
+    if(!refused || budget.Used()!=live_outputs+stage+metadata) return 24;
+  }
+  try {
+    auto credit = Scratch(second, stage, metadata);
+    std::vector<float> conversion_row(256);
+    throw std::runtime_error("failure after allocating working owners");
+  } catch(const std::runtime_error&) {}
+  if(budget.Used()!=live_outputs) return 25;
+  // Temporary scratch must be drainable while extraction is still running.
+  colmap::ExtractionBudget small(2060,0,0);
+  auto image = small.Acquire(100,[] {return false;});
+  std::promise<void> waiting;
+  std::once_flag notified;
+  std::future<Ticket> reader;
+  {
+    auto credit = Scratch(image,1500,0);
+    std::vector<float> working(100);
+    reader=std::async(std::launch::async,[&] {
+      return small.Acquire(600,[] {return false;},[&] {
+        std::call_once(notified,[&] {waiting.set_value();});
+      });
+    });
+    if(waiting.get_future().wait_for(2s)!=std::future_status::ready) {
+      small.Cancel();try {reader.get();}catch(...){}return 26;
+    }
+  }
+  if(reader.wait_for(2s)!=std::future_status::ready) {
+    small.Cancel();try {reader.get();}catch(...){}return 27;
+  }
+  auto admitted=reader.get();
+  if(small.Used()!=700) return 28; // Writer is intentionally still alive.
+}
+"""
+        with tempfile.TemporaryDirectory(
+            dir=ROOT / "python/tests"
+        ) as directory:
+            cc = Path(directory) / "test.cc"
+            binary = Path(directory) / "test"
+            cc.write_text(source)
+            subprocess.run(
+                [
+                    os.environ.get("CXX", "g++"),
+                    "-std=c++17",
+                    "-pthread",
+                    *shlex.split(os.environ.get("CXXFLAGS", "")),
+                    "-I" + str(ROOT / "src"),
+                    str(cc),
+                    "-o",
+                    str(binary),
+                ],
+                check=True,
+                text=True,
+            )
+            subprocess.run([str(binary)], check=True, text=True, timeout=15)

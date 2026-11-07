@@ -93,8 +93,9 @@ class ExtractionBudget {
     Ticket& operator=(const Ticket&) = delete;
     // Independent actual-owner lifetime on the SAME phase ledger. Allocation
     // growth never waits, including when reader admission is already blocked.
-    std::shared_ptr<Ticket> Fork(uint64_t bytes) {
-      auto ticket = std::shared_ptr<Ticket>(new Ticket(state_, true));
+    // Retained by default; scoped working memory can drain independently.
+    std::shared_ptr<Ticket> Fork(uint64_t bytes, bool persistent = true) {
+      auto ticket = std::shared_ptr<Ticket>(new Ticket(state_, persistent));
       ticket->Grow(bytes);
       return ticket;
     }

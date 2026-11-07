@@ -967,7 +967,13 @@ class SiftGPUFeatureExtractor : public FeatureExtractor {
         stage.host_bytes < 128 * sizeof(float) + 16)
       throw std::runtime_error(
           "SIFT streaming needs one conversion/descriptor row");
-    options_.ReserveHostPayload(stage.host_bytes + metadata);
+    // Declared before all working owners: release only after their actual free,
+    // not after the asynchronous database writer retires the public outputs.
+    const auto scratch_credit =
+        ReserveSiftStreamingScratch(stage.host_bytes,
+                                    metadata,
+                                    options_.acquire_host_payload,
+                                    options_.reserve_host_payload);
     auto& input = streaming_input_history_.Begin(
         stage.scratch_directory, bitmap.Width(), bitmap.Height());
     {
