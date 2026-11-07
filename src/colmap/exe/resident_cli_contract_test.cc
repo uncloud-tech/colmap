@@ -507,6 +507,8 @@ TEST_F(ResidentCliContractTest, ExportRefusesExistingFileWithoutOverwrite) {
   EXPECT_EQ(std::string(content.begin(), content.end()), "precious-content");
 }
 
+// POSIX uid and directory mode-bit semantics do not apply on Windows.
+#ifndef _WIN32
 TEST_F(ResidentCliContractTest, ExportRefusesUnwritableParentFailClosed) {
   // Privilege-sensitive: a root process can create files in read-only
   // directories, making this scenario non-deterministic. Skip the PERMISSION
@@ -532,6 +534,8 @@ TEST_F(ResidentCliContractTest, ExportRefusesUnwritableParentFailClosed) {
                                std::filesystem::perms::owner_all,
                                std::filesystem::perm_options::replace);
 }
+
+#endif
 
 TEST_F(ResidentCliContractTest, SharedInputsCarryConsistentIdentities) {
   // Two problems sharing image 2 as a source: the shared image's three
