@@ -16,6 +16,13 @@ assert spec is not None and spec.loader is not None
 generator = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(generator)
 
+STEREO_STRIP_ALLOCATION_SOURCES = (
+    "src/colmap/mvs/owned_strip_storage.h",
+    "src/colmap/mvs/owned_strip_storage.cc",
+    "src/colmap/mvs/owned_strip_view.h",
+)
+
+
 FUSION_ALLOCATION_SOURCES = (
     "src/colmap/mvs/fusion.h",
     "src/colmap/mvs/fusion.cc",
@@ -284,6 +291,7 @@ class ResidentAllocationFingerprintTest(unittest.TestCase):
             sources = dict.fromkeys(
                 (
                     *generator.CLOSURE,
+                    *STEREO_STRIP_ALLOCATION_SOURCES,
                     *FUSION_ALLOCATION_SOURCES,
                     *UNDISTORTION_ALLOCATION_SOURCES,
                     *EXTRACTION_ALLOCATION_SOURCES,
@@ -320,6 +328,7 @@ class ResidentAllocationFingerprintTest(unittest.TestCase):
 
             baseline = generate()
             for name in (
+                *STEREO_STRIP_ALLOCATION_SOURCES,
                 *FUSION_ALLOCATION_SOURCES,
                 *UNDISTORTION_ALLOCATION_SOURCES,
                 *EXTRACTION_ALLOCATION_SOURCES,

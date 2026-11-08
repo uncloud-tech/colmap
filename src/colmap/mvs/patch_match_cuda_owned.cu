@@ -346,6 +346,7 @@ struct LocalRefImage {
       : ref_image_texture_(ref_image_texture) {}
 
   float* data = nullptr;
+  int column_origin = 0;
 
   __device__ inline void Read(const int row) {
     // For the first row, read the entire block into shared memory. For all
@@ -355,7 +356,7 @@ struct LocalRefImage {
     // first row and then consecutively reads in the next row.
 
     const int thread_id = threadIdx.x;
-    const int thread_block_first_id = blockDim.x * blockIdx.x;
+    const int thread_block_first_id = column_origin + blockDim.x * blockIdx.x;
 
     const int local_col_start = thread_id;
     const int global_col_start =
@@ -1084,7 +1085,7 @@ void LaunchNormalMapRotation(const GpuMatView<float> input,
 template <int kWindowSize, int kWindowStep, int kTileThreads>
 __global__ void ComputeInitialCost(
     const ReferenceCalibration calibration,
-    GpuMatView<float> cost_map,
+    StripVolumeView<float> cost_map,
     const GpuMatView<float> depth_map,
     const GpuMatView<float> normal_map,
     const cudaTextureObject_t ref_image_texture,
@@ -1094,8 +1095,9 @@ __global__ void ComputeInitialCost(
     const int* source_layers,
     const cudaTextureObject_t poses_texture,
     const float sigma_spatial,
-    const float sigma_color) {
-  const int col = blockDim.x * blockIdx.x + threadIdx.x;
+    const float sigma_color,
+    const int column_origin = 0) {
+  const int col = column_origin + blockDim.x * blockIdx.x + threadIdx.x;
 
   typedef PhotoConsistencyCostComputer<kWindowSize, kWindowStep, kTileThreads>
       PhotoConsistencyCostComputerType;
@@ -1111,6 +1113,7 @@ __global__ void ComputeInitialCost(
   __shared__ float local_ref_image_data
       [PhotoConsistencyCostComputerType::LocalRefImageType::kDataSize];
   pcc_computer.local_ref_image.data = &local_ref_image_data[0];
+  pcc_computer.local_ref_image.column_origin = column_origin;
 
   float normal[3] = {0};
   pcc_computer.normal = normal;
@@ -1205,12 +1208,12 @@ __global__ void SweepFromTopToBottom(
     const ReferenceCalibration calibration,
     GpuMatView<float> global_workspace,
     PrngBoundaryView<curandState> rand_state_map,
-    GpuMatView<float> cost_map,
+    StripVolumeView<float> cost_map,
     GpuMatView<float> depth_map,
     GpuMatView<float> normal_map,
-    GpuMatView<uint8_t> consistency_mask,
-    GpuMatView<float> sel_prob_map,
-    const GpuMatView<float> prev_sel_prob_map,
+    StripVolumeView<uint8_t> consistency_mask,
+    StripVolumeView<float> sel_prob_map,
+    const StripVolumeView<float> prev_sel_prob_map,
     const cudaTextureObject_t ref_image_texture,
     const GpuMatView<float> ref_sum_image,
     const GpuMatView<float> ref_squared_sum_image,
@@ -1223,8 +1226,9 @@ __global__ void SweepFromTopToBottom(
     ,
     const CacheTrace trace
 #endif
-) {
-  const int col = blockDim.x * blockIdx.x + threadIdx.x;
+    ,
+    const int column_origin = 0) {
+  const int col = column_origin + blockDim.x * blockIdx.x + threadIdx.x;
   using SourceCache = OwnedSourceCache<kTileThreads>;
   static_assert(!kDistinctSourceCache || SourceCache::kSupported,
                 "the distinct-source cache supports 16/32-thread tiles");
@@ -1287,6 +1291,7 @@ __global__ void SweepFromTopToBottom(
   __shared__ float local_ref_image_data
       [PhotoConsistencyCostComputerType::LocalRefImageType::kDataSize];
   pcc_computer.local_ref_image.data = &local_ref_image_data[0];
+  pcc_computer.local_ref_image.column_origin = column_origin;
 
   struct ParamState {
     float depth = 0.0f;
@@ -1720,8 +1725,31 @@ PatchMatchCuda::PatchMatchCuda(
     const PatchMatch::Problem& problem,
     const int owned_tile_threads,
     std::shared_ptr<const GeoPhotoInput> geo_photo_input)
+    : PatchMatchCuda(options,
+                     problem,
+                     owned_tile_threads,
+                     std::move(geo_photo_input),
+                     nullptr) {}
+
+PatchMatchCuda::PatchMatchCuda(const PatchMatchOptions& options,
+                               const PatchMatch::Problem& problem,
+                               int tile,
+                               const StripStreamingOptions& streaming)
+    : PatchMatchCuda(options,
+                     problem,
+                     tile,
+                     nullptr,
+                     std::make_unique<StripStreamingOptions>(streaming)) {}
+
+PatchMatchCuda::PatchMatchCuda(
+    const PatchMatchOptions& options,
+    const PatchMatch::Problem& problem,
+    int owned_tile_threads,
+    std::shared_ptr<const GeoPhotoInput> geo_photo_input,
+    std::unique_ptr<StripStreamingOptions> streaming)
     : options_(options),
       owned_tile_threads_(ValidateOwnedTileThreads(owned_tile_threads)),
+      streaming_(std::move(streaming)),
       problem_(problem),
       photo_output_camera_(problem.images->at(problem.ref_image_idx)),
       geo_photo_input_(std::move(geo_photo_input)),
@@ -1733,10 +1761,18 @@ PatchMatchCuda::PatchMatchCuda(
                               options_.window_step,
                               options_.geom_consistency,
                               true);
+  if (streaming_) {
+    ValidateStripColumns(streaming_->columns, owned_tile_threads_);
+    if (options_.owned_cuda_graphs || problem_.resident_bank ||
+        problem_.photo_grayscale.bank || geo_photo_input_)
+      throw std::invalid_argument(
+          "strip qualification requires graphs off and private source inputs");
+  }
   if (geo_photo_input_) geo_photo_input_->Validate(options_, problem_);
   SetBestCudaDevice(std::stoi(options_.gpu_index));
   stream_ = std::make_unique<OwnedCudaStream>();
   try {
+    if (streaming_) InitStripStorage();
     InitRefImage();
     InitSourceImages();
     InitTransforms();
@@ -1759,12 +1795,23 @@ PatchMatchCuda::~PatchMatchCuda() {
 }
 
 void PatchMatchCuda::Run() {
+  if (streaming_ && strip_poisoned_)
+    throw std::logic_error("failed strip solver cannot resume");
+  strip_completed_ = false;
+  qualification_ready_ = false;
   photo_output_state_.BeginRun();
   stream_->Activate();
-  DispatchOwnedTile(owned_tile_threads_, [this](auto tile) {
-    RunWithWindowSizeAndStep<11, 1, decltype(tile)::value>();
-  });
-  photo_output_state_.FinishRun();
+  try {
+    DispatchOwnedTile(owned_tile_threads_, [this](auto tile) {
+      RunWithWindowSizeAndStep<11, 1, decltype(tile)::value>();
+    });
+    strip_completed_ = true;
+    photo_output_state_.FinishRun();
+  } catch (...) {
+    strip_poisoned_ = true;
+    stream_->DrainBeforeDestruction();
+    throw;
+  }
 }
 
 PhotoOutputSnapshot::PhotoOutputSnapshot(int reference_image_idx,
@@ -1841,6 +1888,7 @@ std::shared_ptr<const PhotoOutputSnapshot> PatchMatchCuda::SnapshotPhotoOutput()
 }
 
 DepthMap PatchMatchCuda::GetDepthMap() const {
+  RequireStripOutput();
   stream_->Activate();
   return DepthMap(depth_map_->CopyToMat(stream_->Get()),
                   options_.depth_min,
@@ -1848,16 +1896,23 @@ DepthMap PatchMatchCuda::GetDepthMap() const {
 }
 
 NormalMap PatchMatchCuda::GetNormalMap() const {
+  RequireStripOutput();
   stream_->Activate();
   return NormalMap(normal_map_->CopyToMat(stream_->Get()));
 }
 
 Mat<float> PatchMatchCuda::GetSelProbMap() const {
+  if (streaming_)
+    throw std::logic_error(
+        "strip selection requires explicitly capped qualification export");
   stream_->Activate();
   return prev_sel_prob_map_->CopyToMat(stream_->Get());
 }
 
 std::vector<int> PatchMatchCuda::GetConsistentImageIdxs() const {
+  if (streaming_)
+    throw std::logic_error(
+        "strip mask requires explicitly capped qualification export");
   // No output mask exists when filtering cannot execute. Graph availability
   // otherwise does not depend on the controller's write_consistency_graph flag.
   if (!options_.filter || options_.num_iterations == 0) return {};
@@ -1890,6 +1945,254 @@ std::vector<int> PatchMatchCuda::GetConsistentImageIdxs() const {
   return consistent_image_idxs;
 }
 
+namespace {
+__global__ void InspectOwnedPrngDraws(const curandState* input,
+                                      float* output,
+                                      size_t count) {
+  const size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < count) {
+    auto state = input[i];
+    output[i] = curand_uniform(&state);
+  }
+}
+}  // namespace
+StripQualificationSnapshot PatchMatchCuda::InspectQualification(
+    size_t max_host_bytes) const {
+  if (strip_poisoned_ || !qualification_ready_)
+    throw std::logic_error(
+        "qualification requires initialized successful solver state");
+  // During a sweep observer, cost/selection are inspectable but mask is not
+  // complete yet. Never inspect the resident uninitialized mask before finish.
+  const bool mask =
+      strip_completed_ && options_.filter && options_.num_iterations > 0;
+  const size_t sources = problem_.src_image_idxs.size();
+  const uint64_t values = StripCheckedProduct(
+      StripCheckedProduct(ref_width_, ref_height_), sources);
+  const uint64_t planes = StripCheckedProduct(values, mask ? 9 : 8);
+  const uint64_t temporary = streaming_ ? 0 : StripCheckedProduct(values, 4);
+  const size_t rng_count = PrngBoundaryLayout(ref_width_, ref_height_).Count();
+  const uint64_t rng_bytes = StripCheckedProduct(rng_count, sizeof(float));
+  if (planes > max_host_bytes || temporary > max_host_bytes - planes ||
+      rng_bytes > max_host_bytes - planes - temporary)
+    throw std::invalid_argument(
+        "qualification materialization exceeds explicit host cap");
+  stream_->Activate();
+  stream_->Synchronize();
+  StripQualificationSnapshot result;
+  result.cost = Mat<float>(ref_width_, ref_height_, sources);
+  result.selection = Mat<float>(ref_width_, ref_height_, sources);
+  if (mask) result.mask = Mat<uint8_t>(ref_width_, ref_height_, sources);
+  if (streaming_) {
+    // Read bounded strips into the already allocated, explicitly capped output
+    // planes. Canonical full-width reads add only the store's bounded row.
+    strip_file_->Read(
+        StripPlane::kCost, 0, 0, ref_width_, result.cost.GetPtr());
+    strip_file_->Read(
+        StripPlane::kSelection, 0, 0, ref_width_, result.selection.GetPtr());
+    if (mask)
+      strip_file_->Read(
+          StripPlane::kMask, 0, 0, ref_width_, result.mask.GetPtr());
+  } else {
+    const auto canonicalize =
+        [&](const auto& input, auto& output, unsigned orientation) {
+          for (size_t s = 0; s < sources; ++s)
+            for (size_t r = 0; r < input.GetHeight(); ++r)
+              for (size_t c = 0; c < input.GetWidth(); ++c) {
+                const auto pixel = StripCanonicalPixel(
+                    ref_width_, ref_height_, orientation, r, c);
+                output.Set(pixel.first, pixel.second, s, input.Get(r, c, s));
+              }
+        };
+    canonicalize(cost_map_->CopyToMat(stream_->Get()),
+                 result.cost,
+                 rotation_in_half_pi_);
+    canonicalize(prev_sel_prob_map_->CopyToMat(stream_->Get()),
+                 result.selection,
+                 rotation_in_half_pi_);
+    if (mask)
+      canonicalize(
+          consistency_mask_->CopyToMat(stream_->Get()), result.mask, 3);
+  }
+  GpuMat<float> draws(rng_count, 1);
+  ScopedStreamCompletion draw_completion(stream_->Get());
+  InspectOwnedPrngDraws<<<(rng_count + 31) / 32, 32, 0, stream_->Get()>>>(
+      boundary_rand_states_->GetPtr(), draws.GetPtr(), rng_count);
+  CUDA_CHECK();
+  result.subsequent_prng_draws.resize(rng_count);
+  draws.CopyToHost(result.subsequent_prng_draws.data(),
+                   rng_count * sizeof(float),
+                   stream_->Get());
+  draw_completion.Wait();
+  return result;
+}
+
+void PatchMatchCuda::RequireStripOutput() const {
+  if (streaming_ && (!strip_completed_ || strip_poisoned_))
+    throw std::logic_error(
+        "strip output requires complete successful execution");
+}
+uint64_t PatchMatchCuda::StripBytesRead() const {
+  return strip_file_ ? strip_file_->BytesRead() : 0;
+}
+uint64_t PatchMatchCuda::StripBytesWritten() const {
+  return strip_file_ ? strip_file_->BytesWritten() : 0;
+}
+void PatchMatchCuda::InitStripStorage() {
+  const auto& ref = problem_.images->at(problem_.ref_image_idx);
+  const size_t w = ref.GetWidth(), h = ref.GetHeight();
+  const size_t sources = problem_.src_image_idxs.size();
+  const bool mask = options_.filter && options_.num_iterations > 0;
+  const auto layout =
+      BuildStripStagingLayout(w, h, sources, streaming_->columns, mask);
+  const size_t extent = layout.height, columns = layout.columns;
+  const uint64_t values = layout.values;
+  if (layout.host_bytes > streaming_->host_staging_bytes ||
+      layout.device_bytes > streaming_->device_staging_bytes)
+    throw std::invalid_argument("strip staging budget below minimum");
+  strip_file_ = std::make_unique<StripFileStore>(streaming_->directory,
+                                                 w,
+                                                 h,
+                                                 sources,
+                                                 mask,
+                                                 streaming_->disk_bytes,
+                                                 streaming_->cancelled);
+  strip_host_.resize(values);
+  strip_cost_ = std::make_unique<GpuMat<float>>(columns, extent, sources);
+  strip_previous_ = std::make_unique<GpuMat<float>>(columns, extent, sources);
+  strip_current_ = std::make_unique<GpuMat<float>>(columns, extent, sources);
+  if (mask)
+    strip_mask_ = std::make_unique<GpuMat<uint8_t>>(columns, extent, sources);
+  uint64_t pitched = 0;
+  const auto account = [&](uint64_t pitch) {
+    const uint64_t bytes =
+        StripCheckedProduct(StripCheckedProduct(pitch, extent), sources);
+    if (bytes > streaming_->device_staging_bytes - pitched)
+      throw std::invalid_argument(
+          "strip returned pitch exceeds staging budget");
+    pitched += bytes;
+  };
+  for (const auto* mat :
+       {strip_cost_.get(), strip_previous_.get(), strip_current_.get()})
+    account(mat->GetPitch());
+  if (strip_mask_) account(strip_mask_->GetPitch());
+  LOG(INFO) << "OWNED_STRIP_STAGING host_bytes=" << layout.host_bytes
+            << " device_pitched_bytes=" << pitched
+            << " disk_bytes=" << strip_file_->Bytes();
+  // Previous probabilities start at 0.5, exactly as the resident path.
+  std::fill(strip_host_.begin(), strip_host_.end(), 0.5f);
+  for (size_t first = 0; first < w; first += streaming_->columns)
+    strip_file_->Write(StripPlane::kSelection,
+                       0,
+                       first,
+                       std::min(streaming_->columns, w - first),
+                       strip_host_.data());
+}
+StripVolumeView<float> PatchMatchCuda::ActiveCostView() const {
+  if (!streaming_) return cost_map_->View();
+  return {strip_cost_->View(),
+          strip_first_,
+          ref_image_->image->GetWidth(),
+          ref_image_->image->GetHeight()};
+}
+StripVolumeView<float> PatchMatchCuda::ActiveSelectionView() const {
+  if (!streaming_) return SelectionView();
+  return {strip_current_->View(),
+          strip_first_,
+          ref_image_->image->GetWidth(),
+          ref_image_->image->GetHeight()};
+}
+StripVolumeView<float> PatchMatchCuda::ActivePreviousView() const {
+  if (!streaming_) return prev_sel_prob_map_->View();
+  return {strip_previous_->View(),
+          strip_first_,
+          ref_image_->image->GetWidth(),
+          ref_image_->image->GetHeight()};
+}
+StripVolumeView<uint8_t> PatchMatchCuda::ActiveMaskView() const {
+  if (!streaming_)
+    return consistency_mask_ ? consistency_mask_->View()
+                             : GpuMatView<uint8_t>{};
+  return {strip_mask_ ? strip_mask_->View() : GpuMatView<uint8_t>{},
+          strip_first_,
+          ref_image_->image->GetWidth(),
+          ref_image_->image->GetHeight()};
+}
+void PatchMatchCuda::TransferStrip(StripPlane plane,
+                                   GpuMat<float>& device,
+                                   bool write) {
+  const size_t height = ref_image_->image->GetHeight();
+  const size_t sources = problem_.src_image_idxs.size();
+  if (!write)
+    strip_file_->Read(plane,
+                      rotation_in_half_pi_,
+                      strip_first_,
+                      strip_columns_,
+                      strip_host_.data());
+  for (size_t s = 0; s < sources; ++s) {
+    float* host = strip_host_.data() + s * height * strip_columns_;
+    void* gpu = reinterpret_cast<char*>(device.GetPtr()) +
+                s * device.GetHeight() * device.GetPitch();
+    CUDA_SAFE_CALL(cudaMemcpy2DAsync(
+        write ? static_cast<void*>(host) : gpu,
+        write ? strip_columns_ * sizeof(float) : device.GetPitch(),
+        write ? gpu : static_cast<void*>(host),
+        write ? device.GetPitch() : strip_columns_ * sizeof(float),
+        strip_columns_ * sizeof(float),
+        height,
+        write ? cudaMemcpyDeviceToHost : cudaMemcpyHostToDevice,
+        stream_->Get()));
+  }
+  // Host storage is reused immediately by the next file transfer.
+  stream_->Synchronize();
+  if (write)
+    strip_file_->Write(plane,
+                       rotation_in_half_pi_,
+                       strip_first_,
+                       strip_columns_,
+                       strip_host_.data());
+}
+void PatchMatchCuda::LoadStrip(size_t first, size_t columns, bool initial) {
+  strip_file_->CheckCancelled();
+  strip_first_ = first;
+  strip_columns_ = columns;
+  sweep_grid_size_ =
+      dim3((columns + owned_tile_threads_ - 1) / owned_tile_threads_, 1, 1);
+  if (!initial) {
+    TransferStrip(StripPlane::kCost, *strip_cost_, false);
+    TransferStrip(StripPlane::kSelection, *strip_previous_, false);
+  }
+}
+void PatchMatchCuda::CommitStrip(bool initial, bool mask) {
+  // A failed launch/copy never commits a successful strip or publishes output.
+  CUDA_CHECK();
+  stream_->Synchronize();
+  strip_file_->CheckCancelled();
+  TransferStrip(StripPlane::kCost, *strip_cost_, true);
+  if (!initial) TransferStrip(StripPlane::kSelection, *strip_current_, true);
+  if (mask) {
+    const size_t height = ref_image_->image->GetHeight();
+    auto* host = reinterpret_cast<uint8_t*>(strip_host_.data());
+    for (size_t s = 0; s < problem_.src_image_idxs.size(); ++s) {
+      CUDA_SAFE_CALL(cudaMemcpy2DAsync(
+          host + s * height * strip_columns_,
+          strip_columns_,
+          reinterpret_cast<char*>(strip_mask_->GetPtr()) +
+              s * strip_mask_->GetHeight() * strip_mask_->GetPitch(),
+          strip_mask_->GetPitch(),
+          strip_columns_,
+          height,
+          cudaMemcpyDeviceToHost,
+          stream_->Get()));
+    }
+    stream_->Synchronize();
+    strip_file_->Write(StripPlane::kMask,
+                       rotation_in_half_pi_,
+                       strip_first_,
+                       strip_columns_,
+                       host);
+  }
+}
+
 template <int kWindowSize, int kWindowStep, int kTileThreads>
 void PatchMatchCuda::RunWithWindowSizeAndStep() {
   const bool chained = options_.owned_cuda_graphs;
@@ -1900,21 +2203,31 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
   OwnedCudaTimer init_timer(stream_->Get());
 
   ComputeCudaConfig();
-  ComputeInitialCost<kWindowSize, kWindowStep, kTileThreads>
-      <<<sweep_grid_size_, sweep_block_size_, 0, stream_->Get()>>>(
-          CurrentCalibration(),
-          cost_map_->View(),
-          depth_map_->View(),
-          normal_map_->View(),
-          ref_image_texture_->GetObj(),
-          ref_image_->sum_image->View(),
-          ref_image_->squared_sum_image->View(),
-          SourceImagesTexture(),
-          SourceLayers(),
-          poses_texture_[0]->GetObj(),
-          options_.sigma_spatial,
-          options_.sigma_color);
+  const size_t initial_width = ref_image_->image->GetWidth();
+  const size_t initial_step = streaming_ ? streaming_->columns : initial_width;
+  for (size_t first = 0; first < initial_width; first += initial_step) {
+    if (streaming_)
+      LoadStrip(first, std::min(initial_step, initial_width - first), true);
+    ComputeInitialCost<kWindowSize, kWindowStep, kTileThreads>
+        <<<sweep_grid_size_, sweep_block_size_, 0, stream_->Get()>>>(
+            CurrentCalibration(),
+            ActiveCostView(),
+            depth_map_->View(),
+            normal_map_->View(),
+            ref_image_texture_->GetObj(),
+            ref_image_->sum_image->View(),
+            ref_image_->squared_sum_image->View(),
+            SourceImagesTexture(),
+            SourceLayers(),
+            poses_texture_[0]->GetObj(),
+            options_.sigma_spatial,
+            options_.sigma_color,
+            static_cast<int>(first));
+    if (streaming_) CommitStrip(true, false);
+  }
   if (!chained) stream_->Synchronize();
+
+  qualification_ready_ = true;
 
   if (!chained) init_timer.Print("Initialization");
 
@@ -1960,59 +2273,59 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
 
       const bool last_sweep = iter == options_.num_iterations - 1 && sweep == 3;
 
-#define CALL_SWEEP_IMPL(cache, lookahead)                                    \
-  auto launch_sweep = [&](auto... args) {                                    \
-    if (options_.owned_cuda_graphs) {                                        \
-      const int index = sweep + (last_sweep && options_.filter ? 4 : 0);     \
-      if (!sweep_graphs[index])                                              \
-        sweep_graphs[index] = std::make_unique<GraphBuilder>();              \
-      sweep_graphs[index]->LaunchOrSubmit(                                   \
-          SweepFromTopToBottom<kWindowSize,                                  \
-                               kWindowStep,                                  \
-                               kTileThreads,                                 \
-                               kGeomConsistencyTerm,                         \
-                               kFilterPhotoConsistency,                      \
-                               kFilterGeomConsistency,                       \
-                               cache,                                        \
-                               lookahead>,                                   \
-          sweep_grid_size_,                                                  \
-          sweep_block_size_,                                                 \
-          stream_->Get(),                                                    \
-          false, /* direct final-filter node, no conditional rebuild */      \
-          graph_coordinator_.get(),                                          \
-          graph_owner_,                                                      \
-          args...);                                                          \
-    } else {                                                                 \
-      SweepFromTopToBottom<kWindowSize,                                      \
-                           kWindowStep,                                      \
-                           kTileThreads,                                     \
-                           kGeomConsistencyTerm,                             \
-                           kFilterPhotoConsistency,                          \
-                           kFilterGeomConsistency,                           \
-                           cache,                                            \
-                           lookahead>                                        \
-          <<<sweep_grid_size_, sweep_block_size_, 0, stream_->Get()>>>(      \
-              args...);                                                      \
-    }                                                                        \
-  };                                                                         \
-  launch_sweep(                                                              \
-      CurrentCalibration(),                                                  \
-      global_workspace_->View(),                                             \
-      SweepPrngView(),                                                       \
-      cost_map_->View(),                                                     \
-      depth_map_->View(),                                                    \
-      normal_map_->View(),                                                   \
-      consistency_mask_ ? consistency_mask_->View() : GpuMatView<uint8_t>{}, \
-      SelectionView(),                                                       \
-      prev_sel_prob_map_->View(),                                            \
-      ref_image_texture_->GetObj(),                                          \
-      ref_image_->sum_image->View(),                                         \
-      ref_image_->squared_sum_image->View(),                                 \
-      SourceImagesTexture(),                                                 \
-      SourceLayers(),                                                        \
-      SourceDepthTexture(),                                                  \
-      poses_texture_[rotation_in_half_pi_]->GetObj(),                        \
-      sweep_options);
+#define CALL_SWEEP_IMPL(cache, lookahead)                                \
+  auto launch_sweep = [&](auto... args) {                                \
+    if (options_.owned_cuda_graphs) {                                    \
+      const int index = sweep + (last_sweep && options_.filter ? 4 : 0); \
+      if (!sweep_graphs[index])                                          \
+        sweep_graphs[index] = std::make_unique<GraphBuilder>();          \
+      sweep_graphs[index]->LaunchOrSubmit(                               \
+          SweepFromTopToBottom<kWindowSize,                              \
+                               kWindowStep,                              \
+                               kTileThreads,                             \
+                               kGeomConsistencyTerm,                     \
+                               kFilterPhotoConsistency,                  \
+                               kFilterGeomConsistency,                   \
+                               cache,                                    \
+                               lookahead>,                               \
+          sweep_grid_size_,                                              \
+          sweep_block_size_,                                             \
+          stream_->Get(),                                                \
+          false, /* direct final-filter node, no conditional rebuild */  \
+          graph_coordinator_.get(),                                      \
+          graph_owner_,                                                  \
+          args...);                                                      \
+    } else {                                                             \
+      SweepFromTopToBottom<kWindowSize,                                  \
+                           kWindowStep,                                  \
+                           kTileThreads,                                 \
+                           kGeomConsistencyTerm,                         \
+                           kFilterPhotoConsistency,                      \
+                           kFilterGeomConsistency,                       \
+                           cache,                                        \
+                           lookahead>                                    \
+          <<<sweep_grid_size_, sweep_block_size_, 0, stream_->Get()>>>(  \
+              args...);                                                  \
+    }                                                                    \
+  };                                                                     \
+  launch_sweep(CurrentCalibration(),                                     \
+               global_workspace_->View(),                                \
+               SweepPrngView(),                                          \
+               ActiveCostView(),                                         \
+               depth_map_->View(),                                       \
+               normal_map_->View(),                                      \
+               ActiveMaskView(),                                         \
+               ActiveSelectionView(),                                    \
+               ActivePreviousView(),                                     \
+               ref_image_texture_->GetObj(),                             \
+               ref_image_->sum_image->View(),                            \
+               ref_image_->squared_sum_image->View(),                    \
+               SourceImagesTexture(),                                    \
+               SourceLayers(),                                           \
+               SourceDepthTexture(),                                     \
+               poses_texture_[rotation_in_half_pi_]->GetObj(),           \
+               sweep_options,                                            \
+               static_cast<int>(strip_first_));
 
 // Shared production dispatch: 16/32-thread tiles, at most 15 samples (not
 // sources). Lookahead is only active in the cache lane. Integral constants
@@ -2026,43 +2339,54 @@ void PatchMatchCuda::RunWithWindowSizeAndStep() {
         CALL_SWEEP_IMPL(decltype(cache)::value, decltype(lookahead)::value) \
       });
 
-      if (last_sweep) {
-        if (options_.filter) {
-          consistency_mask_->FillWithScalar(0, stream_->Get(), !chained);
-        }
-        if (options_.geom_consistency) {
-          const bool kGeomConsistencyTerm = true;
+      const size_t width = ref_image_->image->GetWidth();
+      const size_t step = streaming_ ? streaming_->columns : width;
+      for (size_t first = 0; first < width; first += step) {
+        if (streaming_) LoadStrip(first, std::min(step, width - first), false);
+
+        if (last_sweep) {
           if (options_.filter) {
-            const bool kFilterPhotoConsistency = true;
-            const bool kFilterGeomConsistency = true;
-            CALL_SWEEP_FUNC
+            if (streaming_)
+              strip_mask_->FillWithScalar(0, stream_->Get(), true);
+            else
+              consistency_mask_->FillWithScalar(0, stream_->Get(), !chained);
+          }
+          if (options_.geom_consistency) {
+            const bool kGeomConsistencyTerm = true;
+            if (options_.filter) {
+              const bool kFilterPhotoConsistency = true;
+              const bool kFilterGeomConsistency = true;
+              CALL_SWEEP_FUNC
+            } else {
+              const bool kFilterPhotoConsistency = false;
+              const bool kFilterGeomConsistency = false;
+              CALL_SWEEP_FUNC
+            }
           } else {
-            const bool kFilterPhotoConsistency = false;
-            const bool kFilterGeomConsistency = false;
-            CALL_SWEEP_FUNC
+            const bool kGeomConsistencyTerm = false;
+            if (options_.filter) {
+              const bool kFilterPhotoConsistency = true;
+              const bool kFilterGeomConsistency = false;
+              CALL_SWEEP_FUNC
+            } else {
+              const bool kFilterPhotoConsistency = false;
+              const bool kFilterGeomConsistency = false;
+              CALL_SWEEP_FUNC
+            }
           }
         } else {
-          const bool kGeomConsistencyTerm = false;
-          if (options_.filter) {
-            const bool kFilterPhotoConsistency = true;
-            const bool kFilterGeomConsistency = false;
+          const bool kFilterPhotoConsistency = false;
+          const bool kFilterGeomConsistency = false;
+          if (options_.geom_consistency) {
+            const bool kGeomConsistencyTerm = true;
             CALL_SWEEP_FUNC
           } else {
-            const bool kFilterPhotoConsistency = false;
-            const bool kFilterGeomConsistency = false;
+            const bool kGeomConsistencyTerm = false;
             CALL_SWEEP_FUNC
           }
         }
-      } else {
-        const bool kFilterPhotoConsistency = false;
-        const bool kFilterGeomConsistency = false;
-        if (options_.geom_consistency) {
-          const bool kGeomConsistencyTerm = true;
-          CALL_SWEEP_FUNC
-        } else {
-          const bool kGeomConsistencyTerm = false;
-          CALL_SWEEP_FUNC
-        }
+
+        if (streaming_) CommitStrip(false, last_sweep && options_.filter);
       }
 
 #undef CALL_SWEEP_FUNC
@@ -2137,6 +2461,25 @@ void PatchMatchCuda::InitRefImage() {
       ref_height_,
       problem_.src_image_idxs.size(),
       options_.filter && options_.num_iterations > 0);
+
+  if (streaming_) {
+    auto& slots = rotation_layout_.slot_layouts;
+    slots.erase(
+        std::remove_if(slots.begin(),
+                       slots.end(),
+                       [&](const auto& slot) {
+                         const bool scaled =
+                             slot.role == RotationRole::kCost ||
+                             slot.role == RotationRole::kSelectionCurrent ||
+                             slot.role == RotationRole::kSelectionPrevious ||
+                             slot.role == RotationRole::kMask;
+                         if (scaled)
+                           rotation_layout_.logical_bytes -=
+                               slot.requested_span_bytes;
+                         return scaled;
+                       }),
+        slots.end());
+  }
 
   // Upload to device and filter.
   ref_image_.Set(0, std::make_unique<GpuMatRefImage>(ref_width_, ref_height_));
@@ -2533,20 +2876,23 @@ void PatchMatchCuda::InitWorkspaceMemory() {
   normal_map_.Set(0,
                   std::make_unique<GpuMat<float>>(ref_width_, ref_height_, 3));
 
-  // The backward pass writes every pixel/source before the forward pass reads
-  // it, regardless of filtering. Only previous probabilities survive a sweep
-  // and are exported; the current plane can reuse one packed allocation.
-  sel_prob_map_ = std::make_unique<OwnedSelectionScratch<CudaSelectionStorage>>(
-      ref_width_, ref_height_, problem_.src_image_idxs.size());
-  prev_sel_prob_map_.Set(
-      0,
-      std::make_unique<GpuMat<float>>(
-          ref_width_, ref_height_, problem_.src_image_idxs.size()));
-  prev_sel_prob_map_->FillWithScalar(0.5f, stream_->Get());
+  if (!streaming_) {
+    // The backward pass writes every pixel/source before the forward pass reads
+    // it, regardless of filtering. Only previous probabilities survive a sweep
+    // and are exported; the current plane can reuse one packed allocation.
+    sel_prob_map_ =
+        std::make_unique<OwnedSelectionScratch<CudaSelectionStorage>>(
+            ref_width_, ref_height_, problem_.src_image_idxs.size());
+    prev_sel_prob_map_.Set(
+        0,
+        std::make_unique<GpuMat<float>>(
+            ref_width_, ref_height_, problem_.src_image_idxs.size()));
+    prev_sel_prob_map_->FillWithScalar(0.5f, stream_->Get());
 
-  cost_map_.Set(0,
-                std::make_unique<GpuMat<float>>(
-                    ref_width_, ref_height_, problem_.src_image_idxs.size()));
+    cost_map_.Set(0,
+                  std::make_unique<GpuMat<float>>(
+                      ref_width_, ref_height_, problem_.src_image_idxs.size()));
+  }
 
   const int ref_max_dim = std::max(ref_width_, ref_height_);
   if (options_.owned_async_pool) {
@@ -2615,15 +2961,18 @@ void PatchMatchCuda::InitRotationStorage() {
   normal_map_.Set(1,
                   std::make_unique<GpuMat<float>>(ref_height_, ref_width_, 3));
   ref_image_.Set(1, std::make_unique<GpuMatRefImage>(ref_height_, ref_width_));
-  prev_sel_prob_map_.Set(
-      1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_, sources));
-  cost_map_.Set(
-      1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_, sources));
-  // No device consumer follows the last filtered sweep. Keep its orientation-3
-  // output directly; the host getter reconstructs canonical coordinates.
-  if (options_.filter && options_.num_iterations > 0) {
-    consistency_mask_ =
-        std::make_unique<GpuMat<uint8_t>>(ref_height_, ref_width_, sources);
+  if (!streaming_) {
+    prev_sel_prob_map_.Set(
+        1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_, sources));
+    cost_map_.Set(
+        1, std::make_unique<GpuMat<float>>(ref_height_, ref_width_, sources));
+    // No device consumer follows the last filtered sweep. Keep its
+    // orientation-3 output directly; the host getter reconstructs canonical
+    // coordinates.
+    if (options_.filter && options_.num_iterations > 0) {
+      consistency_mask_ =
+          std::make_unique<GpuMat<uint8_t>>(ref_height_, ref_width_, sources);
+    }
   }
 }
 
@@ -2715,15 +3064,18 @@ void PatchMatchCuda::Rotate() {
   ref_image_.Flip();
   BindRefImageTexture();
 
-  // Rotate scratch slices into a distinct persistent owner. Stream ordering
-  // protects packed storage before the next sweep (thread mode also waits).
-  // Previous probabilities have not flipped yet and identify the source shape.
-  prev_sel_prob_map_.Alternate()->RotateFrom(
-      SelectionView(), stream_->Get(), wait);
-  prev_sel_prob_map_.Flip();
+  if (!streaming_) {
+    // Rotate scratch slices into a distinct persistent owner. Stream ordering
+    // protects packed storage before the next sweep (thread mode also waits).
+    // Previous probabilities have not flipped yet and identify the source
+    // shape.
+    prev_sel_prob_map_.Alternate()->RotateFrom(
+        SelectionView(), stream_->Get(), wait);
+    prev_sel_prob_map_.Flip();
 
-  cost_map_->Rotate(cost_map_.Alternate(), stream_->Get(), wait);
-  cost_map_.Flip();
+    cost_map_->Rotate(cost_map_.Alternate(), stream_->Get(), wait);
+    cost_map_.Flip();
+  }
 
   // The next launch snapshots the new orientation; no module write.
   ComputeCudaConfig();

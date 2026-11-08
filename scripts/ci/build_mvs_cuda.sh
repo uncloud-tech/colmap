@@ -15,6 +15,7 @@ cmake -S . -B build-mvs-ci -GNinja \
 # Explicit CUDA library and .cu test targets make a CPU fallback a hard error.
 targets=(
   colmap_main colmap_mvs_cuda
+  colmap_mvs_owned_strip_streaming_test
   colmap_mvs_gpu_mat_test colmap_mvs_owned_prng_test
   colmap_mvs_owned_input_bank_cuda_test
   colmap_mvs_owned_distinct_source_cache_trace_test
