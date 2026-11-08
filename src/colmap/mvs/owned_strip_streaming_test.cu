@@ -1,16 +1,23 @@
 // SPDX-License-Identifier: BSD-3-Clause
+#include "colmap/mvs/multi_gpu_fixed_cohort.h"
+#include "colmap/mvs/owned_fixed_cohort_validation.h"
 #include "colmap/mvs/patch_match_cuda_owned.h"
 #if defined(COLMAP_STRIP_CUDA_ALLOCATIONS)
 #include "colmap/mvs/owned_strip_allocation_test_util.h"
 #endif
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
+#include <stdexcept>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -201,6 +208,210 @@ void ExpectQueuedFailure(const PatchMatchOptions& options,
   CUDA_SAFE_CALL(cudaEventDestroy(capture.fault_event));
 }
 #endif
+
+#if defined(__linux__) && defined(COLMAP_STRIP_CUDA_ALLOCATIONS)
+// Scratch is already unlinked while live; directory emptiness alone cannot
+// detect a leaked reservation. Observe the actual process-owned descriptors.
+size_t OpenStripFiles() {
+  size_t count = 0;
+  for (const auto& entry :
+       std::filesystem::directory_iterator("/proc/self/fd")) {
+    std::error_code error;
+    const auto target = std::filesystem::read_symlink(entry.path(), error);
+    if (!error && target.string().find("colmap-stereo-") != std::string::npos)
+      ++count;
+  }
+  return count;
+}
+
+void QualifyHostLifecycle(bool constructor_failure) {
+  int devices = 0;
+  if (cudaGetDeviceCount(&devices) != cudaSuccess || devices < 1)
+    GTEST_SKIP() << "requires one actual CUDA device";
+  CUDA_SAFE_CALL(cudaSetDevice(0));
+  const auto observed = ObserveFixedCohortCapacities(0);
+  // Same admitted shapes as the native HOST mixed-constructor witness, not a
+  // new numerical campaign. Duplicate source ordinals remain intentional.
+  const std::vector<FixedCohortImageShape> shapes{{640, 480}, {64, 48}};
+  std::vector<Image> images;
+  const float K[9] = {64, 0, 32, 0, 64, 24, 0, 0, 1};
+  const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  for (size_t i = 0; i < shapes.size(); ++i) {
+    const auto shape = shapes[i];
+    const float T[3] = {-0.25f * i, 0, 0};
+    images.emplace_back("host-lifecycle-" + std::to_string(i),
+                        shape.width,
+                        shape.height,
+                        K,
+                        R,
+                        T);
+    Bitmap bitmap(shape.width, shape.height, false);
+    for (size_t y = 0; y < shape.height; ++y)
+      for (size_t x = 0; x < shape.width; ++x)
+        ASSERT_TRUE(bitmap.SetPixel(
+            x, y, BitmapColor<uint8_t>((x * 37 + y * 101 + i * 4) & 255)));
+    images.back().SetBitmap(std::move(bitmap));
+  }
+  std::vector<FixedCohortReference> refs(2);
+  std::vector<FixedCohortJobShape> jobs;
+  for (int i = 0; i < 2; ++i) {
+    auto& ref = refs[i];
+    ref.reference_image_idx = i;
+    ref.photo_sources = i ? std::vector<int>{0} : std::vector<int>(11, 1);
+    ref.geo_sources = ref.photo_sources;
+    auto& options = ref.photo_options;
+    options.gpu_index = "0";
+    options.geom_consistency = false;
+    options.filter = false;
+    options.depth_min = 1;
+    options.depth_max = 5;
+    options.sigma_spatial = 5;
+    options.num_iterations = 1;
+    options.num_samples = 2;
+    options.random_seed = 0;
+    options.num_threads = 1;
+    options.owned_cuda_graphs = false;
+    options.owned_async_pool = false;
+    ref.geo_options = options;
+    ref.geo_options.geom_consistency = true;
+    jobs.push_back({i, ref.photo_sources, ref.geo_sources});
+  }
+  FixedCohortBudget declarations;
+  declarations.max_active_owners = 1;
+  declarations.process = {1ull << 20, 1ull << 20};
+  declarations.unknown = {16ull << 20, 16ull << 20};
+  declarations.unknown_provenance = "native HOST lifecycle fixture estimate";
+  declarations.headroom_reserve = {1ull << 20, 1ull << 20};
+  const auto budget =
+      BuildFixedCohortLogicalInventory(shapes, jobs, declarations);
+  PhasePlanDevice device;
+  device.ordinal = 0;
+  device.uuid = observed.device_uuid;
+  device.capacity_bytes = 64ull << 20;
+  const auto directory = std::filesystem::current_path();
+  const auto plan = PlanSingleDeviceHostFixedCohort(
+      shapes,
+      refs,
+      declarations,
+      device,
+      2ull << 30,
+      std::filesystem::space(directory).available,
+      directory,
+      "auto");
+  ASSERT_TRUE(plan.single_device_host);
+  const auto& record = plan.single_device_host->admission.records[0][0];
+  ASSERT_EQ(record.mode, StereoVolumeMode::kStripFile);
+  ASSERT_EQ(plan.single_device_host->admission.records[0][1].mode,
+            StereoVolumeMode::kResidentPrivate);
+
+  const size_t scratch_before = OpenStripFiles();
+  size_t scratch_at_fault = 0, begins = 0, outputs = 0, geo_begins = 0;
+  std::atomic<bool> cancelled{false};
+  strip_test::Capture capture;
+  CUDA_SAFE_CALL(
+      cudaEventCreateWithFlags(&capture.fault_event, cudaEventDisableTiming));
+  capture.on_submission = [&] { scratch_at_fault = OpenStripFiles(); };
+  if (constructor_failure) {
+    // Fail the third staging API request: two real allocations + the real
+    // reserved scratch already exist, before a solver can enter Run().
+    capture.fail_pitched_call = 3;
+  } else {
+    // Only Run's first strip readback matches. Constructor uploads cannot
+    // trigger cancellation, nor can final full-width result readback.
+    capture.copy_kind = cudaMemcpyDeviceToHost;
+    capture.copy_width = record.columns * sizeof(float);
+    capture.copy_height = shapes[0].height;
+    capture.cancel_after_submission = &cancelled;
+  }
+  std::optional<FixedCohortResult> completed;
+  EXPECT_THROW(completed = RunMultiGpuFixedCohortPhotoGeo(
+                   images,
+                   refs,
+                   budget,
+                   plan,
+                   NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
+                   32,
+                   &cancelled,
+                   [&](bool geo, int, size_t job, const char* event) {
+                     const std::string name(event);
+                     if (name == "begin") {
+                       ++begins;
+                       if (geo) ++geo_begins;
+                       // This callback executes on the native factory's owner
+                       // thread, not the caller/device/monitor thread. Single
+                       // owner only; TLS dies on joined owner exit, before
+                       // capture leaves this scope.
+                       if (!geo && job == 0) strip_test::active = &capture;
+                     }
+                     if (name == "output") ++outputs;
+                   }),
+               std::runtime_error);
+  EXPECT_FALSE(completed.has_value());
+  EXPECT_EQ(begins, 1);  // No backend retry or next owner on failure.
+  EXPECT_EQ(outputs, 0);
+  EXPECT_EQ(geo_begins, 0);  // Failed PHOTO must never pass the HOST barrier.
+  EXPECT_GT(scratch_at_fault, scratch_before);
+  EXPECT_EQ(OpenStripFiles(), scratch_before);
+  EXPECT_FALSE(capture.allocations.empty());
+  EXPECT_TRUE(capture.AllReleased());
+  EXPECT_FALSE(capture.release_before_fault_drain);
+  if (constructor_failure) {
+    EXPECT_EQ(capture.pitched_calls, 3);
+    EXPECT_EQ(capture.allocations.size(), 2);
+    EXPECT_GT(capture.allocation_fault, 0);
+    EXPECT_GT(capture.last_synchronize, capture.allocation_fault);
+    EXPECT_FALSE(capture.fault_submitted);
+  } else {
+    EXPECT_TRUE(cancelled.load());
+    EXPECT_TRUE(capture.fault_submitted);  // Real copy + event, not pre-cancel.
+    EXPECT_TRUE(capture.fault_drained);
+    EXPECT_EQ(cudaEventQuery(capture.fault_event), cudaSuccess);
+  }
+  CUDA_SAFE_CALL(cudaEventDestroy(capture.fault_event));
+
+  // Same factory/plan/pixels after drain, with a fresh token: a sticky cancel,
+  // dangling borrowed exchange, retained owner or partial completion fails.
+  std::atomic<bool> healthy_cancel{false};
+  size_t healthy_outputs = 0, joins = 0;
+  const auto healthy = RunMultiGpuFixedCohortPhotoGeo(
+      images,
+      refs,
+      budget,
+      plan,
+      NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
+      32,
+      &healthy_cancel,
+      [&](bool, int, size_t, const char* event) {
+        if (std::string(event) == "output") ++healthy_outputs;
+        if (std::string(event) == "joined") ++joins;
+      });
+  EXPECT_EQ(healthy_outputs, 4);
+  EXPECT_EQ(joins, 2);
+  ASSERT_EQ(healthy.geo.size(), refs.size());
+  for (size_t i = 0; i < refs.size(); ++i) {
+    EXPECT_EQ(healthy.geo[i].depth.GetWidth(), shapes[i].width);
+    EXPECT_EQ(healthy.geo[i].depth.GetHeight(), shapes[i].height);
+    EXPECT_FALSE(healthy.geo[i].normal.GetData().empty());
+  }
+  EXPECT_EQ(OpenStripFiles(), scratch_before);
+}
+#endif
+
+TEST(SingleDeviceHostLifecycle, AdmittedConstructorAllocationFailureDrains) {
+#if defined(__linux__) && defined(COLMAP_STRIP_CUDA_ALLOCATIONS)
+  QualifyHostLifecycle(true);
+#else
+  GTEST_SKIP() << "requires Linux static CUDA allocation interception";
+#endif
+}
+
+TEST(SingleDeviceHostLifecycle, QueuedStripCancellationDrainsBeforeRelease) {
+#if defined(__linux__) && defined(COLMAP_STRIP_CUDA_ALLOCATIONS)
+  QualifyHostLifecycle(false);
+#else
+  GTEST_SKIP() << "requires Linux static CUDA allocation interception";
+#endif
+}
 
 void Compare(const PatchMatchOptions& options,
              const PatchMatch::Problem& problem,
