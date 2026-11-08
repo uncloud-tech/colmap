@@ -27,6 +27,9 @@ CLOSURE = (
     "src/colmap/mvs/owned_prng_boundary.h",
     "src/colmap/mvs/owned_prng.h",
     "src/colmap/mvs/patch_match_cuda_owned.cu",
+    "src/colmap/mvs/owned_strip_storage.h",
+    "src/colmap/mvs/owned_strip_storage.cc",
+    "src/colmap/mvs/owned_strip_view.h",
     "src/colmap/mvs/owned_pair_coordinator.h",
     "src/colmap/mvs/owned_pair_validation.h",
     # Opt-in graph/pool allocation and the common host preparation boundary.

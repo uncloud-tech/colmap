@@ -45,6 +45,7 @@ COLMAP_ADD_LIBRARY(
     NAME colmap_mvs
     SRCS
         owned_prng_seed.h
+        owned_strip_storage.h owned_strip_storage.cc
         advancing_front_meshing.h advancing_front_meshing.cc
         consistency_graph.h consistency_graph.cc
         delaunay_meshing.h delaunay_meshing.cc
@@ -288,6 +289,7 @@ if(CUDA_ENABLED)
             patch_match.h patch_match.cc
             patch_match_cuda.h patch_match_cuda.cu
             patch_match_cuda_owned.h patch_match_cuda_owned.cu
+            owned_strip_view.h
             owned_prng.h owned_prng_seed.h owned_prng_boundary.h
             patch_match_calibration.h
             owned_input_bank.cu
@@ -542,12 +544,37 @@ if(CUDA_ENABLED)
         LINK_LIBS colmap_mvs_cuda
     )
     COLMAP_ADD_TEST(
+        NAME owned_strip_streaming_test
+        SRCS owned_strip_streaming_test.cu owned_strip_allocation_test_util.h
+             owned_strip_test_main.cc owned_strip_test_identity.h
+        LINK_LIBS colmap_mvs_cuda
+    )
+    if(TESTS_ENABLED)
+        add_dependencies(colmap_mvs_owned_strip_streaming_test resident_allocation_fingerprint)
+    endif()
+    if(TESTS_ENABLED AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT BUILD_SHARED_LIBS)
+        target_compile_definitions(colmap_mvs_owned_strip_streaming_test PRIVATE
+            COLMAP_STRIP_CUDA_ALLOCATIONS)
+        # Test-local interception of actual application CUDA requests, including
+        # constructor/initialization transients and stream-ordered retirement.
+        foreach(api cudaMalloc cudaMallocPitch cudaMalloc3DArray cudaMallocAsync
+                cudaMallocFromPoolAsync cudaFree cudaFreeArray cudaFreeAsync
+                cudaStreamSynchronize cudaMemcpy2DAsync
+                cudaMallocAsync_ptsz cudaMallocFromPoolAsync_ptsz cudaFreeAsync_ptsz
+                cudaStreamSynchronize_ptsz cudaMemcpy2DAsync_ptsz)
+            target_link_options(colmap_mvs_owned_strip_streaming_test PRIVATE
+                "LINKER:--wrap=${api}")
+        endforeach()
+    endif()
+    COLMAP_ADD_TEST(
         NAME owned_normal_rotation_test
         SRCS owned_normal_rotation_test.cu
         LINK_LIBS colmap_mvs_cuda
     )
     if(TESTS_ENABLED)
         get_target_property(_owned_cache_test_archs colmap_mvs_cuda CUDA_ARCHITECTURES)
+        set_target_properties(colmap_mvs_owned_strip_streaming_test
+            PROPERTIES CUDA_ARCHITECTURES "${_owned_cache_test_archs}")
         set_target_properties(colmap_mvs_owned_normal_rotation_test
             PROPERTIES CUDA_ARCHITECTURES "${_owned_cache_test_archs}")
         set_target_properties(colmap_mvs_owned_distinct_source_cache_trace_test
@@ -619,6 +646,28 @@ endif()
 # Dependency-free optimized-dispatch contract executables also run without a
 # configured COLMAP tree using the commands in doc/optimized_dispatch.md.
 if(TESTS_ENABLED)
+    add_executable(colmap_mvs_owned_strip_test_identity_test owned_strip_test_identity_test.cc)
+    target_include_directories(colmap_mvs_owned_strip_test_identity_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    if(MSVC)
+        target_compile_options(colmap_mvs_owned_strip_test_identity_test PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(colmap_mvs_owned_strip_test_identity_test PRIVATE -UNDEBUG)
+    endif()
+    add_test(NAME "mvs/owned_strip_test_identity_test" COMMAND colmap_mvs_owned_strip_test_identity_test)
+    add_executable(colmap_mvs_owned_strip_storage_test
+        owned_strip_storage_test.cc owned_strip_storage.cc)
+    target_include_directories(colmap_mvs_owned_strip_storage_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_compile_definitions(colmap_mvs_owned_strip_storage_test PRIVATE STRIP_STORAGE_WRAP_IO)
+        target_link_options(colmap_mvs_owned_strip_storage_test PRIVATE "-Wl,--wrap=pread,--wrap=pwrite")
+    endif()
+    if(MSVC)
+        target_compile_options(colmap_mvs_owned_strip_storage_test PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(colmap_mvs_owned_strip_storage_test PRIVATE -UNDEBUG)
+    endif()
+    add_test(NAME "mvs/owned_strip_storage_test" COMMAND colmap_mvs_owned_strip_storage_test)
+    set_tests_properties("mvs/owned_strip_storage_test" PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME "mvs/photo_phase_fingerprint_test"
         COMMAND ${Python3_EXECUTABLE} -I
             "${PROJECT_SOURCE_DIR}/scripts/resident/test_photo_phase_fingerprint.py")

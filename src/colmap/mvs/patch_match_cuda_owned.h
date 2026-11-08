@@ -19,6 +19,8 @@
 #include "colmap/mvs/owned_prng_boundary.h"
 #include "colmap/mvs/owned_rotation_storage.h"
 #include "colmap/mvs/owned_selection_scratch.h"
+#include "colmap/mvs/owned_strip_storage.h"
+#include "colmap/mvs/owned_strip_view.h"
 #include "colmap/mvs/owned_tile.h"
 #include "colmap/mvs/patch_match.h"
 #include "colmap/mvs/patch_match_calibration.h"
@@ -48,6 +50,12 @@ class CudaSelectionStorage {
   float* ptr_ = nullptr;
 };
 
+struct StripQualificationSnapshot {
+  Mat<float> cost, selection;
+  Mat<uint8_t> mask;
+  std::vector<float> subsequent_prng_draws;
+};
+
 class PatchMatchCuda {
  public:
   PatchMatchCuda(const PatchMatchOptions& options,
@@ -58,6 +66,16 @@ class PatchMatchCuda {
                  const PatchMatch::Problem& problem,
                  int owned_tile_threads,
                  std::shared_ptr<const GeoPhotoInput> geo_photo_input);
+
+  // Explicit native qualification seam; no frontend/runner dispatch.
+  PatchMatchCuda(const PatchMatchOptions& options,
+                 const PatchMatch::Problem& problem,
+                 int owned_tile_threads,
+                 const StripStreamingOptions& streaming);
+  // Full host materialization is qualification-only and explicitly capped.
+  StripQualificationSnapshot InspectQualification(size_t max_host_bytes) const;
+  uint64_t StripBytesRead() const;
+  uint64_t StripBytesWritten() const;
 
   ~PatchMatchCuda();
 
@@ -85,6 +103,21 @@ class PatchMatchCuda {
   std::vector<int> GetConsistentImageIdxs() const;
 
  private:
+  PatchMatchCuda(const PatchMatchOptions& options,
+                 const PatchMatch::Problem& problem,
+                 int owned_tile_threads,
+                 std::shared_ptr<const GeoPhotoInput> geo_photo_input,
+                 std::unique_ptr<StripStreamingOptions> streaming);
+  void InitStripStorage();
+  void LoadStrip(size_t first, size_t columns, bool initial);
+  void CommitStrip(bool initial, bool mask);
+  void TransferStrip(StripPlane plane, GpuMat<float>& device, bool write);
+  void RequireStripOutput() const;
+  StripVolumeView<float> ActiveCostView() const;
+  StripVolumeView<float> ActiveSelectionView() const;
+  StripVolumeView<float> ActivePreviousView() const;
+  StripVolumeView<uint8_t> ActiveMaskView() const;
+
   template <int kWindowSize, int kWindowStep, int kTileThreads>
   void RunWithWindowSizeAndStep();
 
@@ -110,6 +143,12 @@ class PatchMatchCuda {
   PhotoOutputState photo_output_state_;
   const PatchMatchOptions options_;
   const int owned_tile_threads_;
+  const std::unique_ptr<StripStreamingOptions> streaming_;
+  bool qualification_ready_ = false;
+  bool strip_completed_ = false;
+  bool strip_poisoned_ = false;
+  size_t strip_first_ = 0, strip_columns_ = 0;
+
   // Strong PHOTO binding dies after stream/resources. Constructor failure and
   // destruction explicitly drain the owner stream before either can unwind;
   // the shared_ptr alone is not a GPU completion fence.
@@ -123,6 +162,11 @@ class PatchMatchCuda {
   std::unique_ptr<OwnedCudaStream> stream_;
   // Destroyed after GpuMats and before the owner stream.
   std::unique_ptr<AsyncPool> workspace_pool_;
+
+  std::unique_ptr<StripFileStore> strip_file_;
+  std::unique_ptr<GpuMat<float>> strip_cost_, strip_previous_, strip_current_;
+  std::unique_ptr<GpuMat<uint8_t>> strip_mask_;
+  std::vector<float> strip_host_;
 
   // Dimensions for sweeping from top to bottom, i.e. one thread per column.
   dim3 sweep_block_size_;
