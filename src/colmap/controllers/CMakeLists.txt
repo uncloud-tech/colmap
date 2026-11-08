@@ -15,6 +15,7 @@ COLMAP_ADD_LIBRARY(
         feature_matching.h feature_matching.cc
         feature_matching_utils.h feature_matching_utils.cc
         matcher_cache.h matcher_cache.cc
+        matching_cache_budget.h
         pairing.h pairing.cc
         global_pipeline.h global_pipeline.cc
         image_reader.h image_reader.cc
@@ -51,6 +52,21 @@ if(CUDA_ENABLED OR HIP_ENABLED)
     if(MVS_ENABLED)
         target_link_libraries(colmap_controllers PRIVATE colmap_mvs_cuda)
     endif()
+endif()
+
+# Dependency-free cache inventory/selection contract; also runnable before SDK builds.
+if(TESTS_ENABLED)
+    add_executable(colmap_controllers_matching_cache_budget_test
+        matching_cache_budget_test.cc)
+    target_include_directories(colmap_controllers_matching_cache_budget_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/src")
+    if(MSVC)
+        target_compile_options(colmap_controllers_matching_cache_budget_test PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(colmap_controllers_matching_cache_budget_test PRIVATE -UNDEBUG)
+    endif()
+    add_test(NAME "controllers/matching_cache_budget_test"
+        COMMAND colmap_controllers_matching_cache_budget_test)
 endif()
 
 COLMAP_ADD_TEST(

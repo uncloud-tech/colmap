@@ -8,46 +8,8 @@ namespace colmap {
 
 FeatureMatcherCache::FeatureMatcherCache(
     const size_t cache_size, const std::shared_ptr<Database>& database)
-    : cache_size_(cache_size),
-      database_(THROW_CHECK_NOTNULL(database)),
-      descriptor_index_cache_(cache_size_, [this](const image_t image_id) {
-        auto descriptors = GetDescriptors(image_id);
-        auto index = FeatureDescriptorIndex::Create();
-        index->Build(descriptors->ToFloat());
-        return index;
-      }) {
-  keypoints_cache_ =
-      std::make_unique<ThreadSafeLRUCache<image_t, FeatureKeypoints>>(
-          cache_size_, [this](const image_t image_id) {
-            std::lock_guard<std::mutex> lock(database_mutex_);
-            // Keep metadata revalidation and the consumed BLOB in one SQLite
-            // snapshot; the process-local mutex alone cannot exclude writers
-            // using another database connection.
-            std::unique_ptr<DatabaseTransaction> snapshot;
-            if (matching_shape_validator_) {
-              snapshot = std::make_unique<DatabaseTransaction>(database_.get());
-              matching_shape_validator_(*database_, image_id);
-            }
-            return std::make_shared<FeatureKeypoints>(
-                database_->ReadKeypoints(image_id));
-          });
-
-  descriptors_cache_ =
-      std::make_unique<ThreadSafeLRUCache<image_t, FeatureDescriptors>>(
-          cache_size_, [this](const image_t image_id) {
-            std::lock_guard<std::mutex> lock(database_mutex_);
-            // Keep metadata revalidation and the consumed BLOB in one SQLite
-            // snapshot; the process-local mutex alone cannot exclude writers
-            // using another database connection.
-            std::unique_ptr<DatabaseTransaction> snapshot;
-            if (matching_shape_validator_) {
-              snapshot = std::make_unique<DatabaseTransaction>(database_.get());
-              matching_shape_validator_(*database_, image_id);
-            }
-            return std::make_shared<FeatureDescriptors>(
-                database_->ReadDescriptors(image_id));
-          });
-
+    : cache_size_(cache_size), database_(THROW_CHECK_NOTNULL(database)) {
+  InitializePayloadCaches(cache_size_);
   keypoints_exists_cache_ = std::make_unique<ThreadSafeLRUCache<image_t, bool>>(
       cache_size_, [this](const image_t image_id) {
         std::lock_guard<std::mutex> lock(database_mutex_);
@@ -61,6 +23,69 @@ FeatureMatcherCache::FeatureMatcherCache(
             return std::make_shared<bool>(
                 database_->ExistsDescriptors(image_id));
           });
+}
+
+void FeatureMatcherCache::InitializePayloadCaches(size_t entries) {
+  descriptor_index_cache_ =
+      std::make_unique<ThreadSafeLRUCache<image_t, FeatureDescriptorIndex>>(
+          entries, [this](const image_t image_id) {
+            if (matching_shape_validator_)
+              LOG(INFO) << "Feature matching cache load: kind=index image_id="
+                        << image_id;
+            auto descriptors = GetDescriptors(image_id);
+            auto index = FeatureDescriptorIndex::Create();
+            index->Build(descriptors->ToFloat());
+            return index;
+          });
+  keypoints_cache_ =
+      std::make_unique<ThreadSafeLRUCache<image_t, FeatureKeypoints>>(
+          entries, [this](const image_t image_id) {
+            std::lock_guard<std::mutex> lock(database_mutex_);
+            // Keep metadata revalidation and the consumed BLOB in one SQLite
+            // snapshot; the process-local mutex alone cannot exclude writers
+            // using another database connection.
+            std::unique_ptr<DatabaseTransaction> snapshot;
+            if (matching_shape_validator_) {
+              snapshot = std::make_unique<DatabaseTransaction>(database_.get());
+              matching_shape_validator_(*database_, image_id);
+            }
+            if (matching_shape_validator_)
+              LOG(INFO)
+                  << "Feature matching cache load: kind=keypoints image_id="
+                  << image_id;
+            return std::make_shared<FeatureKeypoints>(
+                database_->ReadKeypoints(image_id));
+          });
+
+  descriptors_cache_ =
+      std::make_unique<ThreadSafeLRUCache<image_t, FeatureDescriptors>>(
+          entries, [this](const image_t image_id) {
+            std::lock_guard<std::mutex> lock(database_mutex_);
+            // Keep metadata revalidation and the consumed BLOB in one SQLite
+            // snapshot; the process-local mutex alone cannot exclude writers
+            // using another database connection.
+            std::unique_ptr<DatabaseTransaction> snapshot;
+            if (matching_shape_validator_) {
+              snapshot = std::make_unique<DatabaseTransaction>(database_.get());
+              matching_shape_validator_(*database_, image_id);
+            }
+            if (matching_shape_validator_)
+              LOG(INFO)
+                  << "Feature matching cache load: kind=descriptors image_id="
+                  << image_id;
+            return std::make_shared<FeatureDescriptors>(
+                database_->ReadDescriptors(image_id));
+          });
+}
+
+void FeatureMatcherCache::SetPayloadCacheCapacity(size_t entries) {
+  THROW_CHECK_GT(entries, 0);
+  // Setup-only: no worker may hold the index-cache pointer yet. Never drop
+  // live owners or reset feature history after matching has started.
+  THROW_CHECK_EQ(keypoints_cache_->NumElems(), 0);
+  THROW_CHECK_EQ(descriptors_cache_->NumElems(), 0);
+  THROW_CHECK_EQ(descriptor_index_cache_->NumElems(), 0);
+  InitializePayloadCaches(entries);
 }
 
 void FeatureMatcherCache::AccessDatabase(
@@ -154,7 +179,7 @@ std::vector<image_t> FeatureMatcherCache::GetImageIds() {
 
 ThreadSafeLRUCache<image_t, FeatureDescriptorIndex>&
 FeatureMatcherCache::GetFeatureDescriptorIndexCache() {
-  return descriptor_index_cache_;
+  return *descriptor_index_cache_;
 }
 
 bool FeatureMatcherCache::ExistsKeypoints(const image_t image_id) {

@@ -528,21 +528,6 @@ void FeatureMatcherController::InitializeBudget() {
               "matching DB match shape changed after admission; workers must "
               "drain");
       });
-  const auto persistent = resources_->inventory.HostPersistent(
-      matching_options_, matchers_.size(), verifiers_.size());
-  resources_->persistent_host = resources_->host->TryAcquire(persistent);
-  LOG(INFO) << "Feature matching frozen logical host capacity: capacity_bytes="
-            << host_capacity
-            << " host_budget_bytes=" << matching_options_.host_budget_bytes
-            << " policy_host_bytes=" << matching_options_.policy_host_bytes
-            << " reserve_host_bytes=" << matching_options_.reserve_host_bytes
-            << " whole_db_cache_payload_bytes="
-            << resources_->inventory.cache_payload
-            << " index_payload_bytes=" << resources_->inventory.index_payload
-            << " persistent_known_bytes=" << persistent
-            << "; whole-DB reservation may over-refuse; "
-               "FAISS/RANSAC/SQLite/allocator workspace UNKNOWN; physical fit "
-               "UNKNOWN";
   if (matching_options_.use_gpu) {
 #if defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
     if (!matching_options_.device_budget_bytes)
@@ -591,6 +576,42 @@ void FeatureMatcherController::InitializeBudget() {
     throw std::invalid_argument(
         "device matching budget specified for CPU backend");
   }
+  const auto& inventory = resources_->inventory;
+  const auto requested_entries = cache_->PayloadCacheCapacity();
+  const auto pinned = inventory.HostPinned(
+      matching_options_, matchers_.size(), verifiers_.size());
+  const auto largest_pair = inventory.LargestPairPayload(matching_options_);
+  const auto entries =
+      inventory.caches.Select(requested_entries,
+                              pinned,
+                              largest_pair,
+                              resources_->host->Capacity(),
+                              matching_options_.policy_host_bytes,
+                              matching_options_.reserve_host_bytes);
+  const auto persistent = inventory.HostPersistent(
+      matching_options_, matchers_.size(), verifiers_.size(), entries);
+  resources_->persistent_host = resources_->host->TryAcquire(persistent);
+  cache_->SetPayloadCacheCapacity(entries);
+  LOG(INFO) << "Feature matching frozen logical host capacity: capacity_bytes="
+            << resources_->host->Capacity()
+            << " host_budget_bytes=" << matching_options_.host_budget_bytes
+            << " policy_host_bytes=" << matching_options_.policy_host_bytes
+            << " reserve_host_bytes=" << matching_options_.reserve_host_bytes
+            << " whole_db_cache_payload_bytes=" << inventory.cache_payload
+            << " index_payload_bytes=" << inventory.index_payload
+            << " persistent_known_bytes=" << persistent
+            << " cache_entries=" << entries
+            << " requested_cache_entries=" << requested_entries
+            << " retained_cache_known_bytes="
+            << inventory.caches.Retained(entries)
+            << " worker_pinned_known_bytes=" << pinned
+            << " largest_pair_known_bytes=" << largest_pair << " cache_reason="
+            << (entries == requested_entries
+                    ? "requested-cache-admitted"
+                    : "budget-selected-eviction-reload")
+            << "; independent keypoint/descriptor/index LRUs; "
+               "FAISS/RANSAC/SQLite/allocator workspace UNKNOWN; physical fit "
+               "UNKNOWN";
   LOG(INFO) << "Feature matching effective logical host capacity after backend "
                "observation: capacity_bytes="
             << resources_->host->Capacity();

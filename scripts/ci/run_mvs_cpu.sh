@@ -38,6 +38,11 @@ for name in "${contracts[@]}"; do
     -pthread -Isrc -I"$work/include" "src/colmap/mvs/$name.cc" -o "$work/$name"
   timeout 30s "$work/$name"
 done
+echo "CPU contract: matching_cache_budget_test"
+"${CXX:-c++}" -std=c++17 -O2 -UNDEBUG -Wall -Wextra -Werror -pedantic \
+  -Isrc src/colmap/controllers/matching_cache_budget_test.cc \
+  -o "$work/matching_cache_budget_test"
+timeout 30s "$work/matching_cache_budget_test"
 for test in test_blackwell_build_selection test_photo_phase_fingerprint test_generated_header_install test_windows_checkout; do
   echo "Resident regression: $test (install plumbing is not a full SDK build)"
   python3 -I "scripts/resident/$test.py"

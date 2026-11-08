@@ -83,6 +83,7 @@ MATCHING_ALLOCATION_SOURCES = (
     "src/colmap/scene/database.cc",
     "src/colmap/scene/database_sqlite.cc",
     "src/colmap/controllers/matching_resource.h",
+    "src/colmap/controllers/matching_cache_budget.h",
     "src/colmap/controllers/feature_matching.h",
     "src/colmap/controllers/feature_matching.cc",
     "src/colmap/controllers/feature_matching_utils.h",
