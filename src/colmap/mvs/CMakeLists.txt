@@ -559,7 +559,9 @@ if(CUDA_ENABLED)
         # constructor/initialization transients and stream-ordered retirement.
         foreach(api cudaMalloc cudaMallocPitch cudaMalloc3DArray cudaMallocAsync
                 cudaMallocFromPoolAsync cudaFree cudaFreeArray cudaFreeAsync
-                cudaStreamSynchronize cudaMemcpy2DAsync)
+                cudaStreamSynchronize cudaMemcpy2DAsync
+                cudaMallocAsync_ptsz cudaMallocFromPoolAsync_ptsz cudaFreeAsync_ptsz
+                cudaStreamSynchronize_ptsz cudaMemcpy2DAsync_ptsz)
             target_link_options(colmap_mvs_owned_strip_streaming_test PRIVATE
                 "LINKER:--wrap=${api}")
         endforeach()

@@ -243,4 +243,91 @@ cudaError_t CUDARTAPI __wrap_cudaFreeAsync(void* pointer, cudaStream_t stream) {
   return result;
 }
 #endif
+
+// CUDA's per-thread-default-stream ABI uses distinct application relocations.
+// Forward each to its matching real entry point, preserving stream semantics;
+// forwarding these wrappers through legacy APIs would change the tested work.
+cudaError_t CUDARTAPI __real_cudaStreamSynchronize_ptsz(cudaStream_t);
+cudaError_t CUDARTAPI __real_cudaMemcpy2DAsync_ptsz(void*,
+                                                    size_t,
+                                                    const void*,
+                                                    size_t,
+                                                    size_t,
+                                                    size_t,
+                                                    cudaMemcpyKind,
+                                                    cudaStream_t);
+cudaError_t CUDARTAPI cudaEventRecord_ptsz(cudaEvent_t, cudaStream_t);
+cudaError_t CUDARTAPI __wrap_cudaStreamSynchronize_ptsz(cudaStream_t stream) {
+  using namespace colmap::mvs::owned::strip_test;
+  Pause pause;
+  const auto result = __real_cudaStreamSynchronize_ptsz(stream);
+  if (result == cudaSuccess && pause.capture)
+    pause.capture->Synchronized(stream);
+  return result;
+}
+cudaError_t CUDARTAPI __wrap_cudaMemcpy2DAsync_ptsz(void* dst,
+                                                    size_t dst_pitch,
+                                                    const void* src,
+                                                    size_t src_pitch,
+                                                    size_t width,
+                                                    size_t height,
+                                                    cudaMemcpyKind kind,
+                                                    cudaStream_t stream) {
+  using namespace colmap::mvs::owned::strip_test;
+  Pause pause;
+  const auto result = __real_cudaMemcpy2DAsync_ptsz(
+      dst, dst_pitch, src, src_pitch, width, height, kind, stream);
+  if (result == cudaSuccess && pause.capture &&
+      pause.capture->fail_copy_after_submission &&
+      !pause.capture->fault_submitted) {
+    // Record a real event behind real queued work, then make the caller throw.
+    const auto recorded =
+        cudaEventRecord_ptsz(pause.capture->fault_event, stream);
+    if (recorded != cudaSuccess) return recorded;
+    pause.capture->fault_submitted = true;
+    pause.capture->fault_stream = stream;
+    return cudaErrorInvalidValue;
+  }
+  return result;
+}
+#if CUDART_VERSION >= 11020
+cudaError_t CUDARTAPI __real_cudaMallocAsync_ptsz(void**, size_t, cudaStream_t);
+cudaError_t CUDARTAPI __real_cudaMallocFromPoolAsync_ptsz(void**,
+                                                          size_t,
+                                                          cudaMemPool_t,
+                                                          cudaStream_t);
+cudaError_t CUDARTAPI __real_cudaFreeAsync_ptsz(void*, cudaStream_t);
+cudaError_t CUDARTAPI __wrap_cudaMallocAsync_ptsz(void** pointer,
+                                                  size_t bytes,
+                                                  cudaStream_t stream) {
+  using namespace colmap::mvs::owned::strip_test;
+  Pause pause;
+  const auto result = __real_cudaMallocAsync_ptsz(pointer, bytes, stream);
+  if (result == cudaSuccess && pause.capture)
+    pause.capture->Add(Kind::kLinear, *pointer, bytes, 1, 1, bytes);
+  return result;
+}
+cudaError_t CUDARTAPI __wrap_cudaMallocFromPoolAsync_ptsz(void** pointer,
+                                                          size_t bytes,
+                                                          cudaMemPool_t pool,
+                                                          cudaStream_t stream) {
+  using namespace colmap::mvs::owned::strip_test;
+  Pause pause;
+  const auto result =
+      __real_cudaMallocFromPoolAsync_ptsz(pointer, bytes, pool, stream);
+  if (result == cudaSuccess && pause.capture)
+    pause.capture->Add(Kind::kLinear, *pointer, bytes, 1, 1, bytes);
+  return result;
+}
+cudaError_t CUDARTAPI __wrap_cudaFreeAsync_ptsz(void* pointer,
+                                                cudaStream_t stream) {
+  using namespace colmap::mvs::owned::strip_test;
+  Pause pause;
+  if (pause.capture) pause.capture->BeforeRelease();
+  const auto result = __real_cudaFreeAsync_ptsz(pointer, stream);
+  if (result == cudaSuccess && pause.capture)
+    pause.capture->Release(pointer, true, stream);
+  return result;
+}
+#endif
 }  // extern "C"
