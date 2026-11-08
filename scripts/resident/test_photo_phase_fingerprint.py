@@ -237,11 +237,14 @@ int main() {
                 hashlib.sha256(encoded).hexdigest(), output.read_text()
             )
             self.assertEqual(len(generator.CLOSURE), 57)
-            self.assertTrue({
-                "src/colmap/mvs/owned_strip_storage.h",
-                "src/colmap/mvs/owned_strip_storage.cc",
-                "src/colmap/mvs/owned_strip_view.h",
-            } <= set(generator.CLOSURE))
+            self.assertTrue(
+                {
+                    "src/colmap/mvs/owned_strip_storage.h",
+                    "src/colmap/mvs/owned_strip_storage.cc",
+                    "src/colmap/mvs/owned_strip_view.h",
+                }
+                <= set(generator.CLOSURE)
+            )
             self.assertIn(
                 f'kPhotoPhaseV1SourceCommit[] = "{lineage}"', output.read_text()
             )
