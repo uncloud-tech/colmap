@@ -46,6 +46,8 @@ inline Json OptionsJson(const mvs::PatchMatchOptions& options) {
   DENSE_OPTION(sigma_spatial);
   DENSE_OPTION(sigma_color);
   DENSE_OPTION(num_samples);
+  DENSE_OPTION(owned_cuda_graphs);
+  DENSE_OPTION(owned_async_pool);
   DENSE_OPTION(owned_distinct_source_cache);
   DENSE_OPTION(owned_tex_lookahead);
   DENSE_OPTION(ncc_sigma);

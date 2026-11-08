@@ -50,7 +50,7 @@ from .model import _add, _mul, current_owned_shape_minimum, exact_int
 # Compile-availability refresh: explicit non-CUDA refusals, no GPU fallback.
 # Math, allocations, allowances/reserves and containment remain unchanged.
 _FIXED_COHORT_FINGERPRINT = (
-    "bf42689cb42be3a099ed79b4df431533517de64740d32e5292838b9dcde8097d"
+    "9cce8da1ace5dc9c2ade150be596450b02d6d6a3043f8a28d69a302a437e3a00"
 )
 _PROFILE = "fresh-fixed-cohort/current-owned-shape-lower-bound-v1/unqualified"
 _ROOT = Path(__file__).resolve().parents[2]

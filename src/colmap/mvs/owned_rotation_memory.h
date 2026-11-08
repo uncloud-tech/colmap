@@ -5,6 +5,32 @@
 
 namespace colmap::mvs::owned {
 
+// The native planner and solver must omit the same file-backed owners. Keep
+// this role filter shared; source-scaled byte subtraction is phase-dependent.
+inline OwnedRotationLayout BuildOwnedExecutionRotationLayout(
+    size_t width, size_t height, size_t sources, bool retain_mask, bool strip) {
+  auto layout =
+      BuildOwnedBoundaryRotationLayout(width, height, sources, retain_mask);
+  if (strip) {
+    auto& slots = layout.slot_layouts;
+    slots.erase(
+        std::remove_if(slots.begin(),
+                       slots.end(),
+                       [&](const auto& slot) {
+                         const bool file_backed =
+                             slot.role == RotationRole::kCost ||
+                             slot.role == RotationRole::kSelectionCurrent ||
+                             slot.role == RotationRole::kSelectionPrevious ||
+                             slot.role == RotationRole::kMask;
+                         if (file_backed)
+                           layout.logical_bytes -= slot.requested_span_bytes;
+                         return file_backed;
+                       }),
+        slots.end());
+  }
+  return layout;
+}
+
 struct OwnedRotationMemoryPhases {
   size_t initialization;
   size_t steady;

@@ -44,6 +44,12 @@ echo "CPU contract: owned_strip_storage_test"
   src/colmap/mvs/owned_strip_storage.cc -DSTRIP_STORAGE_WRAP_IO \
   -Wl,--wrap=pread,--wrap=pwrite -o "$work/owned_strip_storage_test"
 timeout 30s "$work/owned_strip_storage_test"
+echo "CPU contract: owned_stereo_admission_test"
+"${CXX:-c++}" -std=c++17 -O2 -UNDEBUG -Wall -Wextra -Werror -pedantic \
+  -Isrc src/colmap/mvs/owned_stereo_admission_test.cc \
+  src/colmap/mvs/owned_stereo_admission.cc \
+  src/colmap/mvs/owned_strip_storage.cc -o "$work/owned_stereo_admission_test"
+timeout 30s "$work/owned_stereo_admission_test"
 echo "CPU contract: matching_cache_budget_test"
 "${CXX:-c++}" -std=c++17 -O2 -UNDEBUG -Wall -Wextra -Werror -pedantic \
   -Isrc src/colmap/controllers/matching_cache_budget_test.cc \

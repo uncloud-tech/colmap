@@ -12,6 +12,7 @@
 #include "colmap/mvs/owned_input_bank.h"
 #include "colmap/mvs/owned_prng.h"
 #include "colmap/mvs/owned_prng_seed.h"
+#include "colmap/mvs/owned_rotation_memory.h"
 #include "colmap/mvs/owned_source_cache.h"
 #include "colmap/mvs/owned_texture_row_batch.h"
 #include "colmap/mvs/patch_match_cuda_owned.h"
@@ -2456,30 +2457,12 @@ void PatchMatchCuda::InitRefImage() {
   ref_width_ = ref_image.GetWidth();
   ref_height_ = ref_image.GetHeight();
 
-  rotation_layout_ = BuildOwnedBoundaryRotationLayout(
+  rotation_layout_ = BuildOwnedExecutionRotationLayout(
       ref_width_,
       ref_height_,
       problem_.src_image_idxs.size(),
-      options_.filter && options_.num_iterations > 0);
-
-  if (streaming_) {
-    auto& slots = rotation_layout_.slot_layouts;
-    slots.erase(
-        std::remove_if(slots.begin(),
-                       slots.end(),
-                       [&](const auto& slot) {
-                         const bool scaled =
-                             slot.role == RotationRole::kCost ||
-                             slot.role == RotationRole::kSelectionCurrent ||
-                             slot.role == RotationRole::kSelectionPrevious ||
-                             slot.role == RotationRole::kMask;
-                         if (scaled)
-                           rotation_layout_.logical_bytes -=
-                               slot.requested_span_bytes;
-                         return scaled;
-                       }),
-        slots.end());
-  }
+      options_.filter && options_.num_iterations > 0,
+      static_cast<bool>(streaming_));
 
   // Upload to device and filter.
   ref_image_.Set(0, std::make_unique<GpuMatRefImage>(ref_width_, ref_height_));
