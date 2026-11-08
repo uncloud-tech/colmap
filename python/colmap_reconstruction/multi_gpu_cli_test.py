@@ -464,15 +464,19 @@ class MultiGpuBindingTest(unittest.TestCase):
         import struct
         import sys
         import tempfile
+        from itertools import product
         from pathlib import Path
         from unittest.mock import patch
 
         from colmap_reconstruction.cli import Reconstruction, parse_args
 
-        for failure in ("none", "seed", "late_map"):
+        for scenario, failure in product(
+            ("multi", "resident_snapshot", "single_device_host_exchange"),
+            ("none", "seed", "policy", "mode", "capacity", "late_map"),
+        ):
             changed_seed = failure == "seed"
             with (
-                self.subTest(failure=failure),
+                self.subTest(scenario=scenario, failure=failure),
                 tempfile.TemporaryDirectory() as directory,
             ):
                 devices, graph, plan = self.fixture()
@@ -481,6 +485,54 @@ class MultiGpuBindingTest(unittest.TestCase):
                     graph["phases"][phase]["jobs"][0]["sources"] = [1, 1]
                 plan["scientific_inputs"][0]["photo_sources"] = [1, 1]
                 plan["scientific_inputs"][0]["geo_sources"] = [1, 1]
+                if scenario != "multi":
+                    devices = [devices[0], devices[0]]
+                    plan["execution_kind"] = scenario
+                    plan["allocation_fingerprint"] = "fixture"
+                    for phase in plan["phases"]:
+                        phase["groups"] = [
+                            dict(
+                                ordinal=0,
+                                uuid="a" * 32,
+                                capacity_bytes="100000",
+                                cohorts=[dict(jobs=[0, 1], active_owners=1)],
+                            )
+                        ]
+                    key = (
+                        "snapshot"
+                        if scenario == "resident_snapshot"
+                        else "single_device_host"
+                    )
+                    plan[key] = dict(
+                        effective_photo_source_storage="private",
+                        phases=[
+                            dict(
+                                phase=p,
+                                records=[
+                                    dict(
+                                        reference=j["reference"],
+                                        sources=j["sources"],
+                                        volume_mode="strip_file"
+                                        if scenario
+                                        == "single_device_host_exchange"
+                                        and i == 0
+                                        else "resident_private",
+                                        columns="32"
+                                        if scenario
+                                        == "single_device_host_exchange"
+                                        and i == 0
+                                        else "0",
+                                        owned_cuda_graphs=False,
+                                        owned_async_pool=False,
+                                    )
+                                    for i, j in enumerate(
+                                        graph["phases"][p]["jobs"]
+                                    )
+                                ],
+                            )
+                            for p in ("photo", "geo")
+                        ],
+                    )
                 root = Path(directory)
                 args = parse_args(
                     ["--photos", str(root), "--workspace", str(root), "--yes"]
@@ -501,7 +553,8 @@ class MultiGpuBindingTest(unittest.TestCase):
                 reconstruction.graph = graph
                 graph["phases"]["geo"]["requested_options"] = {"gpu_index": "0"}
                 reconstruction.stereo_devices = [
-                    dict(d, available_device_bytes="100000") for d in devices
+                    dict(d, available_device_bytes="100000")
+                    for d in (devices if scenario == "multi" else devices[:1])
                 ]
                 reconstruction.input_files = {}
                 reconstruction.identity = {"allocation_fingerprint": "fixture"}
@@ -523,6 +576,7 @@ class MultiGpuBindingTest(unittest.TestCase):
                     devices=devices,
                     changed_seed=changed_seed,
                     failure=failure,
+                    scenario=scenario,
                     reconstruction=reconstruction,
                     root=root,
                 ):
@@ -544,14 +598,31 @@ class MultiGpuBindingTest(unittest.TestCase):
                             )
                             if changed_seed and i == 1 and phase == "geo":
                                 options["random_seed"] += 1
+                            if (
+                                failure == "policy"
+                                and i == 1
+                                and phase == "geo"
+                            ):
+                                options["owned_async_pool"] = True
                             executed[phase].append(dict(entry, options=options))
+                    receipt_plan = copy.deepcopy(plan)
+                    if failure == "mode":
+                        receipt_plan["execution_kind"] = "changed"
+                    if failure == "capacity":
+                        receipt_plan["phases"][0]["groups"][0][
+                            "capacity_bytes"
+                        ] = "1"
                     (reconstruction.assets / "cohort.json").write_text(
                         json.dumps(
                             dict(
                                 status="completed",
                                 effective_backend="experimental_fixed_cohort",
                                 allocation_fingerprint="fixture",
-                                multi_gpu_plan=plan,
+                                multi_gpu_plan=receipt_plan,
+                                execution_kind=scenario,
+                                effective_storage="private",
+                                host_capacity_bytes="100000",
+                                device_capacity_bytes="100000",
                                 phases=executed,
                             )
                         )
@@ -589,7 +660,7 @@ class MultiGpuBindingTest(unittest.TestCase):
                     patch.object(
                         reconstruction,
                         "resources",
-                        return_value={"host": 100000},
+                        return_value={"host": 100000, "device": 100000},
                     ),
                     patch.object(reconstruction, "native", side_effect=native),
                     contextlib.redirect_stdout(io.StringIO()),
@@ -598,8 +669,10 @@ class MultiGpuBindingTest(unittest.TestCase):
                         with self.assertRaisesRegex(
                             ValueError,
                             "effective geo plan changed"
-                            if changed_seed
-                            else "nonfinite",
+                            if failure in ("seed", "policy")
+                            else "nonfinite"
+                            if failure == "late_map"
+                            else "placement differs",
                         ):
                             reconstruction.dense_stage()
                     else:

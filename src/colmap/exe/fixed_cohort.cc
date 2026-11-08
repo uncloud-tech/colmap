@@ -743,7 +743,9 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
         for (size_t job = 0; job < references.size(); ++job) {
           const auto& ref = references[job];
           auto executed_options = geo ? ref.geo_options : ref.photo_options;
-          if (multi_gpu_plan) {
+          // Snapshot execution consumes these original bound options. Only
+          // HOST workers perform an explicit per-job placement rewrite.
+          if (multi_gpu_plan && !multi_gpu_plan->snapshot_budget) {
             for (const auto& group : multi_gpu_plan->phases[geo].groups)
               for (const auto& cohort : group.cohorts)
                 if (std::find(cohort.jobs.begin(), cohort.jobs.end(), job) !=

@@ -130,6 +130,32 @@ class SingleDeviceCommandTest(unittest.TestCase):
             )
             self.assertFalse(self.output.exists())
 
+    def test_approved_device_matches_options_before_pixels(self):
+        args = self.automatic_args(self.root / "wrong-device.json")
+        args[args.index("--stereo_devices") + 1] = (
+            "1:" + "a" * 32 + ":" + str(1 << 30)
+        )
+        refused = self.invoke(args)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn(
+            "approved ordinal differs from effective options",
+            refused.stdout + refused.stderr,
+        )
+        self.assertFalse(self.output.exists())
+        self.assertFalse((self.root / "wrong-device.json").exists())
+        # A matching nonzero ordinal is valid CPU metadata; not GPU proof.
+        args[args.index("--PatchMatchStereo.gpu_index") + 1] = "1"
+        args[args.index("--report_path") + 1] = str(
+            self.root / "matching-device.json"
+        )
+        matched = self.invoke(args)
+        self.assertEqual(matched.returncode, 0, matched.stdout + matched.stderr)
+        plan = json.loads((self.root / "matching-device.json").read_bytes())
+        self.assertEqual(plan["phases"][0]["groups"][0]["ordinal"], 1)
+        for ref in plan["scientific_inputs"]:
+            self.assertEqual(ref["photo_options"]["gpu_index"], "1")
+            self.assertEqual(ref["geo_options"]["gpu_index"], "1")
+
     def test_single_device_no_fit_is_native_metadata_refusal_before_decode(
         self,
     ):
