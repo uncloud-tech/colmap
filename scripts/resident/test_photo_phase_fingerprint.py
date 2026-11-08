@@ -143,6 +143,8 @@ int main() {
             "src/colmap/mvs/owned_photo_output_state.h",
             "src/colmap/mvs/owned_geo_photo_input.h",
             "src/colmap/mvs/owned_geo_photo_input.cu",
+            "src/colmap/mvs/owned_stereo_admission.h",
+            "src/colmap/mvs/owned_stereo_admission.cc",
             "src/colmap/exe/fixed_cohort.h",
             "src/colmap/exe/fixed_cohort.cc",
             "src/colmap/mvs/owned_fixed_cohort_budget.h",
@@ -236,7 +238,7 @@ int main() {
             self.assertIn(
                 hashlib.sha256(encoded).hexdigest(), output.read_text()
             )
-            self.assertEqual(len(generator.CLOSURE), 57)
+            self.assertEqual(len(generator.CLOSURE), 59)
             self.assertTrue(
                 {
                     "src/colmap/mvs/owned_strip_storage.h",
