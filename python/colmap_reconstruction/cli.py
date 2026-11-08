@@ -1475,6 +1475,7 @@ resize/fallback."""
         self.check_inputs(self.input_files)
         # Publish only complete native outputs into the fresh undistorted tree.
         # Native final_geo_only retains PHOTO until the final GEO drain.
+        pending_outputs = []
         for job in self.graph["phases"]["geo"]["jobs"]:
             name = self.images[job["reference"]]["name"]
             for kind in ("depth_maps", "normal_maps"):
@@ -1489,9 +1490,11 @@ resize/fallback."""
                     check=self.process.remaining,
                 )
                 target = self.dense / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                # link is an atomic no-clobber publication, not an overwrite.
-                os.link(source, target)
+                if target.exists() or target.is_symlink():
+                    raise ValueError(
+                        "native dense output publication would clobber"
+                    )
+                pending_outputs.append((source, target))
         fusion = self.dense / "stereo/fusion.cfg"
         names = [
             self.images[j["reference"]]["name"]
@@ -1508,6 +1511,11 @@ resize/fallback."""
             raise ValueError(
                 "fusion eligibility differs from complete GEO producers"
             )
+        # Validate the entire complete result and fusion eligibility before
+        # publishing the first map. Links remain atomic/no-clobber per path.
+        for source, target in pending_outputs:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.link(source, target)
 
 
 def bind_single_device_plan(plan, graph, devices, fingerprint, capacity):

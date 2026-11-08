@@ -204,6 +204,7 @@ MultiGpuFixedCohortPlan PlanSingleDeviceHostFixedCohort(
   request.images = images;
   request.capacity = {host_capacity, device.capacity_bytes};
   request.disk_capacity = disk_capacity;
+  request.output_policy = declarations.output_policy;
   request.process = declarations.process;
   request.unknown = declarations.unknown;
   request.reserve = declarations.headroom_reserve;
@@ -312,6 +313,9 @@ MultiGpuFixedCohortPlan PlanSingleDeviceStereoFixedCohort(
   request.unknown = declarations.unknown;
   request.reserve = declarations.headroom_reserve;
   for (const auto& ref : refs) {
+    Require(ref.photo_options.gpu_index == std::to_string(device.ordinal) &&
+                ref.geo_options.gpu_index == std::to_string(device.ordinal),
+            "single-device approved ordinal differs from effective options");
     StereoAdmissionReference job;
     job.reference = ref.reference_image_idx;
     job.sources = {ref.photo_sources, ref.geo_sources};
@@ -336,7 +340,7 @@ MultiGpuFixedCohortPlan PlanSingleDeviceStereoFixedCohort(
     const auto headers =
         CheckedMultiply(2,
                         std::to_string(shape.width).size() +
-                            std::to_string(shape.height).size() + 5);
+                            std::to_string(shape.height).size() + 4);
     output_disk = CheckedAdd(
         output_disk,
         CheckedAdd(
@@ -420,6 +424,7 @@ MultiGpuFixedCohortPlan PlanSingleDeviceStereoFixedCohort(
   metadata.tile_threads = tile_threads;
   metadata.requested_active_owners_ceiling = ceiling;
   metadata.admission.records = std::move(selected.records);
+  metadata.admission.active_owners = selected.budget.max_active_owners;
   metadata.admission.output_disk_bytes = output_disk;
   metadata.admission.required_disk_bytes = output_disk;
   metadata.admission.peak_raw = {result.host_peak_raw, peaks.peak.device};

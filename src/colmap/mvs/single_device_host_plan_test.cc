@@ -12,6 +12,8 @@ int main() {
   std::vector<FixedCohortReference> refs(3);
   for (int i = 0; i < 3; ++i) {
     refs[i].reference_image_idx = i;
+    refs[i].photo_options.gpu_index = "0";
+    refs[i].geo_options.gpu_index = "0";
     refs[i].photo_sources =
         i == 0 ? std::vector<int>{2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2}
                : std::vector<int>{0};
@@ -83,6 +85,23 @@ int main() {
                                                            "auto",
                                                            1);
   assert(preferred.snapshot_budget && preferred.snapshot_inventory);
+  auto wrong_device = roomy;
+  wrong_device.ordinal = 1;
+  bool identity_refused = false;
+  try {
+    PlanSingleDeviceStereoFixedCohort(shapes,
+                                      refs,
+                                      declarations,
+                                      wrong_device,
+                                      2000000000,
+                                      2000000000,
+                                      "/scratch",
+                                      "auto",
+                                      1);
+  } catch (const std::invalid_argument&) {
+    identity_refused = true;
+  }
+  assert(identity_refused);
   assert(!preferred.single_device_host);
   const auto fallback = PlanSingleDeviceStereoFixedCohort(shapes,
                                                           refs,

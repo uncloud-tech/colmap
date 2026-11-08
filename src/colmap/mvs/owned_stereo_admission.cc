@@ -180,7 +180,10 @@ StereoAdmissionPlan PlanSingleDeviceStereoAdmission(
         "single-device stereo requires one owner, work and pitch policy");
   ValidateStripColumns(request.strip_columns, request.block_width);
   StereoAdmissionPlan plan;
-  uint64_t pixels = 0, maps = 0;
+  uint64_t pixels = 0, maps = 0, output_headers = 0;
+  if (request.output_policy != FixedCohortOutputPolicy::kPhotoAndGeo &&
+      request.output_policy != FixedCohortOutputPolicy::kFinalGeoOnly)
+    throw std::invalid_argument("invalid stereo output policy");
   for (const auto& image : request.images) {
     detail::CheckDimension(image.width);
     detail::CheckDimension(image.height);
@@ -193,6 +196,11 @@ StereoAdmissionPlan PlanSingleDeviceStereoAdmission(
       throw std::invalid_argument("duplicate stereo PHOTO producer");
     maps = CheckedAdd(
         maps, CheckedMultiply(16, CheckedMultiply(shape.width, shape.height)));
+    output_headers = CheckedAdd(
+        output_headers,
+        CheckedMultiply(2,
+                        std::to_string(shape.width).size() +
+                            std::to_string(shape.height).size() + 4));
   }
   for (const auto& reference : request.references) {
     for (size_t phase = 0; phase < 2; ++phase) {
@@ -212,7 +220,9 @@ StereoAdmissionPlan PlanSingleDeviceStereoAdmission(
     }
   }
   const auto fixed = Add(request.process, request.unknown);
-  plan.output_disk_bytes = CheckedMultiply(2, maps);
+  plan.output_disk_bytes = CheckedMultiply(
+      request.output_policy == FixedCohortOutputPolicy::kPhotoAndGeo ? 2 : 1,
+      CheckedAdd(maps, output_headers));
   plan.common_host_raw =
       CheckedAdd(CheckedMultiply(2, pixels), CheckedMultiply(2, maps));
   plan.loader_host_raw = CheckedAdd(

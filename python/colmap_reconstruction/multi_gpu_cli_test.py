@@ -469,9 +469,10 @@ class MultiGpuBindingTest(unittest.TestCase):
 
         from colmap_reconstruction.cli import Reconstruction, parse_args
 
-        for changed_seed in (False, True):
+        for failure in ("none", "seed", "late_map"):
+            changed_seed = failure == "seed"
             with (
-                self.subTest(changed_seed=changed_seed),
+                self.subTest(failure=failure),
                 tempfile.TemporaryDirectory() as directory,
             ):
                 devices, graph, plan = self.fixture()
@@ -521,6 +522,7 @@ class MultiGpuBindingTest(unittest.TestCase):
                     graph=graph,
                     devices=devices,
                     changed_seed=changed_seed,
+                    failure=failure,
                     reconstruction=reconstruction,
                     root=root,
                 ):
@@ -570,7 +572,16 @@ class MultiGpuBindingTest(unittest.TestCase):
                                 f"2&1&{channels}&".encode()
                                 + struct.pack(
                                     "<" + "f" * (2 * channels),
-                                    *([1.0] * (2 * channels)),
+                                    *(
+                                        [
+                                            float("nan")
+                                            if failure == "late_map"
+                                            and image["name"] == "b.jpg"
+                                            and channels == 3
+                                            else 1.0
+                                        ]
+                                        * (2 * channels)
+                                    ),
                                 )
                             )
 
@@ -583,9 +594,12 @@ class MultiGpuBindingTest(unittest.TestCase):
                     patch.object(reconstruction, "native", side_effect=native),
                     contextlib.redirect_stdout(io.StringIO()),
                 ):
-                    if changed_seed:
+                    if failure != "none":
                         with self.assertRaisesRegex(
-                            ValueError, "effective geo plan changed"
+                            ValueError,
+                            "effective geo plan changed"
+                            if changed_seed
+                            else "nonfinite",
                         ):
                             reconstruction.dense_stage()
                     else:
@@ -598,8 +612,8 @@ class MultiGpuBindingTest(unittest.TestCase):
                             / kind
                             / (image["name"] + ".geometric.bin")
                         )
-                        self.assertEqual(target.exists(), not changed_seed)
-                        if not changed_seed:
+                        self.assertEqual(target.exists(), failure == "none")
+                        if failure == "none":
                             source = root / "cohort/stereo" / kind / target.name
                             self.assertEqual(
                                 target.read_bytes(), source.read_bytes()

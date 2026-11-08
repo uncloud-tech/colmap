@@ -378,7 +378,7 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
             {name, sources, geo_sources.at(name), photo_options, geo_options});
       }
     }
-    if (auto_storage) {
+    if (auto_storage || automatic_stereo_storage) {
       Require(max_load_image_size == -1 || max_load_image_size > 0,
               "fixed-cohort invalid load image size");
       owned::ValidateOwnedTileThreads(tile_threads);
@@ -419,8 +419,8 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
     if (auto_storage || !stereo_devices.empty())
       owned::ValidateFixedCohortShape(model.images, references, budget);
     if (!stereo_devices.empty()) {
-      Require(observe_capacities && auto_active_owners && host_cap &&
-                  max_load_image_size == -1,
+      Require((observe_capacities || automatic_stereo_storage) &&
+                  auto_active_owners && host_cap && max_load_image_size == -1,
               "multi-GPU requires explicit host cap, observed capacities, "
               "automatic owners and full resolution");
       Require(!report_path.empty(), "multi-GPU requires report_path");
@@ -484,10 +484,6 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
       }
       owned::ValidateMultiGpuFixedCohortPlan(
           model.images, references, budget, *multi_gpu_plan);
-      {
-        mvs::NativeRunDeadlineGuard observation_guard(deadline);
-        owned::CheckMultiGpuFixedCohortAvailable(*multi_gpu_plan);
-      }
       check_deadline();
       multi_gpu_placement =
           dense_plan::MultiGpuPlanJson(*multi_gpu_plan,
@@ -499,6 +495,12 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
                    "allocations): "
                 << placement;
       if (prepare_only) {
+        // Manual one-device preparation is metadata-only like the original
+        // CPU prepare interface. Execution ALWAYS verifies UUID/FREE/disk.
+        if (observe_capacities) {
+          mvs::NativeRunDeadlineGuard observation_guard(deadline);
+          owned::CheckMultiGpuFixedCohortAvailable(*multi_gpu_plan);
+        }
         dense_plan::WriteNewAtomic(report_path, placement);
         return EXIT_SUCCESS;
       }
@@ -510,6 +512,10 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
                                  std::istreambuf_iterator<char>());
       Require(approved_bytes == placement,
               "multi-GPU placement/scientific inputs changed since approval");
+      {
+        mvs::NativeRunDeadlineGuard observation_guard(deadline);
+        owned::CheckMultiGpuFixedCohortAvailable(*multi_gpu_plan);
+      }
     } else {
       Require(approved_multi_gpu_plan.empty(),
               "approved multi-GPU plan requires stereo_devices");

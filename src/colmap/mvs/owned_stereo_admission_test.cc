@@ -115,8 +115,8 @@ int main() {
   invalid.references[0].sources[0] = {0};
   Refuses<std::invalid_argument>(
       [&] { PlanSingleDeviceStereoAdmission(invalid); });
-  assert(mixed.output_disk_bytes == 29491264);
-  assert(mixed.required_disk_bytes == 59904064);
+  assert(mixed.output_disk_bytes == 29491384);
+  assert(mixed.required_disk_bytes == 59904184);
   assert(mixed.common_host_raw == 31334468);
   assert(mixed.loader_host_raw == 1847204);
   assert(strip.padded_source_pixels == 3391531);

@@ -64,6 +64,7 @@ struct StereoAdmissionRequest {
   ByteCharge capacity, process, unknown, reserve;
   uint64_t loader_scratch_host = 0;
   uint64_t disk_capacity = 0;
+  FixedCohortOutputPolicy output_policy = FixedCohortOutputPolicy::kPhotoAndGeo;
   size_t active_owners = 1;
   size_t strip_columns = 32;
   size_t block_width = 32;

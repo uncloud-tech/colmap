@@ -83,6 +83,7 @@ inline Json SingleDeviceHostJson(
        {"unknown_host_raw", Json(std::to_string(execution.unknown.host))},
        {"unknown_device_raw", Json(std::to_string(execution.unknown.device))},
        {"unknown_provenance", Json(execution.unknown_provenance)},
+       {"active_owners", Json(std::to_string(plan.active_owners))},
        {"output_disk_bytes", Json(std::to_string(plan.output_disk_bytes))},
        {"scratch_disk_bytes", Json(std::to_string(plan.scratch_disk_bytes))},
        {"required_disk_bytes", Json(std::to_string(plan.required_disk_bytes))},
