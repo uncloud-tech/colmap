@@ -96,7 +96,8 @@ void ExpectAllocations(const strip_test::Capture& capture,
   const size_t capacity = std::min(columns, extent);
   add(Kind::kPitched, capacity * 4, extent * sources, 1, 3);
   if (filter) add(Kind::kPitched, capacity, extent * sources, 1, 1);
-  for (const auto shape : {std::pair<size_t, size_t>{w, h}, {h, w}}) {
+  for (const auto shape :
+       {std::pair<size_t, size_t>{w, h}, std::pair<size_t, size_t>{h, w}}) {
     add(Kind::kPitched, shape.first, shape.second, 1, 1);      // reference
     add(Kind::kPitched, shape.first * 4, shape.second, 1, 3);  // stats + depth
     add(Kind::kPitched, shape.first * 4, shape.second * 3, 1, 1);  // normal
