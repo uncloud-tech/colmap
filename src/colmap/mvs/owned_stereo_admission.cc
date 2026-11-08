@@ -2,6 +2,7 @@
 #include "colmap/mvs/owned_stereo_admission.h"
 
 #include <set>
+#include <tuple>
 
 namespace colmap::mvs::owned {
 namespace {
@@ -226,6 +227,96 @@ StereoAdmissionPlan PlanSingleDeviceStereoAdmission(
                                  0,
                                  "stereo output disk capacity unavailable");
   return plan;
+}
+bool SameStereoExecutionRecord(const StereoExecutionRecord& a,
+                               const StereoExecutionRecord& b) {
+  const auto fields = [](const StereoExecutionRecord& r) {
+    return std::tie(r.geometry,
+                    r.reference,
+                    r.width,
+                    r.height,
+                    r.sources,
+                    r.policy.retain_mask,
+                    r.policy.cuda_graphs,
+                    r.policy.async_pool,
+                    r.mode,
+                    r.columns,
+                    r.initialization.host,
+                    r.initialization.device,
+                    r.steady.host,
+                    r.steady.device,
+                    r.peak.host,
+                    r.peak.device,
+                    r.initialization_prng_pitch,
+                    r.staging_float_pitch,
+                    r.staging_mask_pitch,
+                    r.staging_host_bytes,
+                    r.staging_device_bytes,
+                    r.scratch_disk_bytes,
+                    r.cache_host_bytes,
+                    r.padded_source_pixels,
+                    r.reason);
+  };
+  if (fields(a) != fields(b) ||
+      a.rotation_planes.size() != b.rotation_planes.size())
+    return false;
+  for (size_t i = 0; i < a.rotation_planes.size(); ++i) {
+    const auto& x = a.rotation_planes[i];
+    const auto& y = b.rotation_planes[i];
+    if (std::tie(
+            x.role, x.parity, x.row_bytes, x.rows, x.depth, x.pitch_ceiling) !=
+        std::tie(
+            y.role, y.parity, y.row_bytes, y.rows, y.depth, y.pitch_ceiling))
+      return false;
+  }
+  return true;
+}
+bool SameStereoAdmissionPlan(const StereoAdmissionPlan& a,
+                             const StereoAdmissionPlan& b) {
+  const auto fields = [](const StereoAdmissionPlan& p) {
+    return std::tie(p.active_owners,
+                    p.peak_raw.host,
+                    p.peak_raw.device,
+                    p.admitted.host,
+                    p.admitted.device,
+                    p.common_host_raw,
+                    p.loader_host_raw,
+                    p.output_disk_bytes,
+                    p.scratch_disk_bytes,
+                    p.required_disk_bytes);
+  };
+  if (fields(a) != fields(b)) return false;
+  for (size_t phase = 0; phase < 2; ++phase) {
+    if (a.records[phase].size() != b.records[phase].size()) return false;
+    for (size_t job = 0; job < a.records[phase].size(); ++job)
+      if (!SameStereoExecutionRecord(a.records[phase][job],
+                                     b.records[phase][job]))
+        return false;
+  }
+  return true;
+}
+void ValidateStereoExecutionBinding(const StereoExecutionRecord& record,
+                                    int reference,
+                                    uint64_t width,
+                                    uint64_t height,
+                                    const std::vector<int>& sources,
+                                    bool geometry,
+                                    StereoExecutionPolicy policy) {
+  if (record.reference != reference || record.width != width ||
+      record.height != height || record.sources != sources ||
+      record.geometry != geometry ||
+      record.policy.retain_mask != policy.retain_mask ||
+      record.policy.cuda_graphs != policy.cuda_graphs ||
+      record.policy.async_pool != policy.async_pool ||
+      (record.mode != StereoVolumeMode::kResidentPrivate &&
+       record.mode != StereoVolumeMode::kStripFile))
+    throw std::invalid_argument("stereo factory execution binding changed");
+  if (record.mode == StereoVolumeMode::kStripFile && policy.cuda_graphs)
+    throw StereoAdmissionRefusal(
+        StereoAdmissionResource::kGraphConflict,
+        geometry,
+        reference,
+        "CUDA graphs conflict with bound strip-file reference");
 }
 void ValidateStereoReturnedPitches(
     const StereoExecutionRecord& record,

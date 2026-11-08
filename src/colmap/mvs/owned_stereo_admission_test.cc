@@ -56,6 +56,27 @@ int main() {
   assert(mixed.required_disk_bytes ==
          mixed.output_disk_bytes + mixed.scratch_disk_bytes);
   const auto& strip = mixed.records[0][0];
+  assert(SameStereoExecutionRecord(strip, strip));
+  ValidateStereoExecutionBinding(
+      strip, 0, 640, 480, strip.sources, false, strip.policy);
+  auto wrong_sources = strip.sources;
+  std::swap(wrong_sources[0], wrong_sources[1]);
+  Refuses<std::invalid_argument>([&] {
+    ValidateStereoExecutionBinding(
+        strip, 0, 640, 480, wrong_sources, false, strip.policy);
+  });
+  auto changed = strip;
+  changed.mode = StereoVolumeMode::kResidentPrivate;
+  assert(!SameStereoExecutionRecord(strip, changed));
+  changed = strip;
+  changed.policy.async_pool = true;
+  assert(!SameStereoExecutionRecord(strip, changed));
+  changed = strip;
+  ++changed.rotation_planes[0].pitch_ceiling;
+  assert(!SameStereoExecutionRecord(strip, changed));
+  changed = strip;
+  std::swap(changed.sources[0], changed.sources[1]);
+  assert(!SameStereoExecutionRecord(strip, changed));
   std::vector<RotationAllocationRecord> returned;
   const auto layout =
       BuildOwnedExecutionRotationLayout(640, 480, 11, true, true);

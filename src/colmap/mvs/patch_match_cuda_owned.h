@@ -50,6 +50,8 @@ class CudaSelectionStorage {
   float* ptr_ = nullptr;
 };
 
+struct StereoExecutionRecord;
+
 struct StripQualificationSnapshot {
   Mat<float> cost, selection;
   Mat<uint8_t> mask;
@@ -72,6 +74,13 @@ class PatchMatchCuda {
                  const PatchMatch::Problem& problem,
                  int owned_tile_threads,
                  const StripStreamingOptions& streaming);
+  // Bound HOST-exchange factory seam. Mode is consumed before pixel copies;
+  // it never retries another constructor following allocation/run failure.
+  PatchMatchCuda(const PatchMatchOptions& options,
+                 const PatchMatch::Problem& problem,
+                 int owned_tile_threads,
+                 const StereoExecutionRecord& admission,
+                 const StripStreamingOptions& storage);
   // Full host materialization is qualification-only and explicitly capped.
   StripQualificationSnapshot InspectQualification(size_t max_host_bytes) const;
   uint64_t StripBytesRead() const;
@@ -103,11 +112,13 @@ class PatchMatchCuda {
   std::vector<int> GetConsistentImageIdxs() const;
 
  private:
-  PatchMatchCuda(const PatchMatchOptions& options,
-                 const PatchMatch::Problem& problem,
-                 int owned_tile_threads,
-                 std::shared_ptr<const GeoPhotoInput> geo_photo_input,
-                 std::unique_ptr<StripStreamingOptions> streaming);
+  PatchMatchCuda(
+      const PatchMatchOptions& options,
+      const PatchMatch::Problem& problem,
+      int owned_tile_threads,
+      std::shared_ptr<const GeoPhotoInput> geo_photo_input,
+      std::unique_ptr<StripStreamingOptions> streaming,
+      std::shared_ptr<const StereoExecutionRecord> admission = nullptr);
   void InitStripStorage();
   void LoadStrip(size_t first, size_t columns, bool initial);
   void CommitStrip(bool initial, bool mask);
@@ -144,6 +155,8 @@ class PatchMatchCuda {
   const PatchMatchOptions options_;
   const int owned_tile_threads_;
   const std::unique_ptr<StripStreamingOptions> streaming_;
+  const std::shared_ptr<const StereoExecutionRecord> admission_;
+  uint64_t initialization_prng_pitch_ = 0;
   bool qualification_ready_ = false;
   bool strip_completed_ = false;
   bool strip_poisoned_ = false;

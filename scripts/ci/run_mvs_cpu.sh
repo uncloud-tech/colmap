@@ -50,6 +50,17 @@ echo "CPU contract: owned_stereo_admission_test"
   src/colmap/mvs/owned_stereo_admission.cc \
   src/colmap/mvs/owned_strip_storage.cc -o "$work/owned_stereo_admission_test"
 timeout 30s "$work/owned_stereo_admission_test"
+echo "CPU contract: single_device_host_plan_test"
+# Exercise the actual native adapter and JSON producer without SDK dependencies.
+# Only unrelated Image validation/driver entry sections are discarded here;
+# the CMake target links the complete native library in SDK builds.
+"${CXX:-c++}" -std=c++17 -O2 -UNDEBUG -Wall -Wextra -Werror -pedantic \
+  -ffunction-sections -fdata-sections -Isrc \
+  src/colmap/mvs/single_device_host_plan_test.cc \
+  src/colmap/mvs/multi_gpu_fixed_cohort.cc src/colmap/mvs/multi_gpu_phase_plan.cc \
+  src/colmap/mvs/owned_stereo_admission.cc src/colmap/mvs/owned_strip_storage.cc \
+  -Wl,--gc-sections -o "$work/single_device_host_plan_test"
+timeout 30s "$work/single_device_host_plan_test"
 echo "CPU contract: matching_cache_budget_test"
 "${CXX:-c++}" -std=c++17 -O2 -UNDEBUG -Wall -Wextra -Werror -pedantic \
   -Isrc src/colmap/controllers/matching_cache_budget_test.cc \

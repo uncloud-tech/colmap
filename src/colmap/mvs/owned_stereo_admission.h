@@ -83,6 +83,22 @@ struct StereoAdmissionPlan {
 StereoAdmissionPlan PlanSingleDeviceStereoAdmission(
     const StereoAdmissionRequest& request);
 
+// Exact execution binding, including mode, policies, ordered sources and all
+// raw charges/estimated pitch planes. No tolerance or backend substitution.
+bool SameStereoExecutionRecord(const StereoExecutionRecord& a,
+                               const StereoExecutionRecord& b);
+bool SameStereoAdmissionPlan(const StereoAdmissionPlan& a,
+                             const StereoAdmissionPlan& b);
+
+// Factory checks this binding before copying any reference/source pixels.
+void ValidateStereoExecutionBinding(const StereoExecutionRecord& record,
+                                    int reference,
+                                    uint64_t width,
+                                    uint64_t height,
+                                    const std::vector<int>& sources,
+                                    bool geometry,
+                                    StereoExecutionPolicy policy);
+
 // Reject an allocator pitch outside the admitted policy, even if another plane
 // happened to use less. Exact role/shape binding prevents checking the wrong
 // allocation. This is a requested-span check, NOT driver-memory certification.

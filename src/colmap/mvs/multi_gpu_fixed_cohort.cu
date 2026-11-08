@@ -11,6 +11,10 @@
 #include <limits>
 #include <memory>
 #include <stdexcept>
+#ifdef __linux__
+#include <linux/magic.h>
+#include <sys/vfs.h>
+#endif
 
 namespace colmap::mvs::owned {
 namespace {
@@ -22,7 +26,34 @@ struct CohortControls {
 }  // namespace
 
 void CheckMultiGpuFixedCohortAvailable(const MultiGpuFixedCohortPlan& plan,
-                                     uint64_t live_caller_pixels) {
+                                       uint64_t live_caller_pixels) {
+  if (plan.single_device_host) {
+    const auto& execution = *plan.single_device_host;
+    if (execution.admission.scratch_disk_bytes) {
+#ifdef __linux__
+      struct statfs filesystem{};
+      if (statfs(execution.scratch_directory.c_str(), &filesystem) ||
+          filesystem.f_type == TMPFS_MAGIC || filesystem.f_type == RAMFS_MAGIC)
+        throw StereoAdmissionRefusal(StereoAdmissionResource::kDisk,
+                                     false,
+                                     0,
+                                     "single-device HOST requires available "
+                                     "disk-backed scratch, not tmpfs/ramfs");
+#else
+      throw std::runtime_error(
+          "single-device HOST strip storage requires Linux");
+#endif
+    }
+    const auto available =
+        std::filesystem::space(execution.scratch_directory).available;
+    if (execution.admission.required_disk_bytes >
+        std::min<uint64_t>(available, execution.disk_capacity))
+      throw StereoAdmissionRefusal(StereoAdmissionResource::kDisk,
+                                   false,
+                                   0,
+                                   "single-device HOST output plus "
+                                   "simultaneous scratch disk unavailable");
+  }
   if (plan.phases[0].groups.size() != plan.phases[1].groups.size())
     throw std::invalid_argument("multi-GPU phase device sets differ");
   for (size_t d = 0; d < plan.phases[0].groups.size(); ++d) {
@@ -36,14 +67,16 @@ void CheckMultiGpuFixedCohortAvailable(const MultiGpuFixedCohortPlan& plan,
         std::min(observed.available.device, group.device.capacity_bytes))
       throw std::runtime_error("multi-GPU device FREE no longer admits plan");
   }
-  const auto host_raw = live_caller_pixels
-      ? std::max(plan.phases[0].host_peak_raw, plan.phases[1].host_peak_raw)
-      : plan.host_peak_raw;
+  const auto host_raw =
+      live_caller_pixels
+          ? std::max(plan.phases[0].host_peak_raw, plan.phases[1].host_peak_raw)
+          : plan.host_peak_raw;
   if (CheckedAdd(MarginBytes(host_raw), plan.host_reserve) > plan.host_capacity)
     throw std::runtime_error("multi-GPU host cap no longer admits exchange");
   CheckFixedCohortHeadroom({MarginBytes(host_raw), 0},
-      {ObserveFixedCohortHostAvailable(), 0}, {live_caller_pixels, 0},
-      {plan.host_reserve, 0});
+                           {ObserveFixedCohortHostAvailable(), 0},
+                           {live_caller_pixels, 0},
+                           {plan.host_reserve, 0});
 }
 
 FixedCohortResult RunMultiGpuFixedCohortPhotoGeo(
@@ -56,6 +89,9 @@ FixedCohortResult RunMultiGpuFixedCohortPhotoGeo(
     const std::atomic<bool>* cancel,
     std::function<void(bool, int, size_t, const char*)> observer) {
   ValidateOwnedTileThreads(tile_threads);
+  if (plan.single_device_host &&
+      tile_threads != plan.single_device_host->tile_threads)
+    throw std::invalid_argument("single-device HOST tile policy changed");
   ValidateMultiGpuFixedCohortPlan(images, refs, budget, plan);
   ValidateFixedCohortPixels(images, refs, budget);
   NativeRunDeadlineGuard guard(deadline);
@@ -82,6 +118,7 @@ FixedCohortResult RunMultiGpuFixedCohortPhotoGeo(
   std::vector<NormalMap> photo_normal(images.size());
   FixedCohortResult result;
   result.output_policy = budget.output_policy;
+  if (plan.single_device_host) result.phase_owner_limits = {1, 1};
   result.geo.resize(refs.size());
   for (const bool geo : {false, true}) {
     check();
@@ -91,11 +128,14 @@ FixedCohortResult RunMultiGpuFixedCohortPhotoGeo(
       for (const auto& ref : refs) {
         const auto idx = ref.reference_image_idx;
         live_host = CheckedAdd(live_host,
-            CheckedAdd(photo_depth[idx].GetNumBytes(), photo_normal[idx].GetNumBytes()));
+                               CheckedAdd(photo_depth[idx].GetNumBytes(),
+                                          photo_normal[idx].GetNumBytes()));
       }
     }
     CheckFixedCohortHeadroom({MarginBytes(phase.host_peak_raw), 0},
-        {ObserveFixedCohortHostAvailable(), 0}, {live_host, 0}, {plan.host_reserve, 0});
+                             {ObserveFixedCohortHostAvailable(), 0},
+                             {live_host, 0},
+                             {plan.host_reserve, 0});
     MultiGpuWorkers workers;
     std::vector<std::vector<CohortControls>> controls(phase.groups.size());
     // Register ALL controls before the first device thread exists. Objects stay
@@ -106,23 +146,43 @@ FixedCohortResult RunMultiGpuFixedCohortPhotoGeo(
         std::vector<ByteCharge> charges;
         for (size_t job : cohort.jobs) {
           std::vector<FixedCohortImageShape> shapes;
-          for (const auto& image : frozen) shapes.push_back({image.GetWidth(), image.GetHeight()});
+          for (const auto& image : frozen)
+            shapes.push_back({image.GetWidth(), image.GetHeight()});
           uint64_t staging = 0;
           const auto& ref = refs.at(job);
-          auto charge = FixedCohortPrivateLogicalMinimum(shapes, ref.reference_image_idx,
-              geo ? ref.geo_sources : ref.photo_sources, geo, &staging, !geo);
-          if (geo) charge.host = CheckedAdd(charge.host, staging);
+          ByteCharge charge;
+          if (plan.single_device_host) {
+            charge =
+                plan.single_device_host->admission.records[geo].at(job).peak;
+          } else {
+            charge = FixedCohortPrivateLogicalMinimum(
+                shapes,
+                ref.reference_image_idx,
+                geo ? ref.geo_sources : ref.photo_sources,
+                geo,
+                &staging,
+                !geo);
+            if (geo) charge.host = CheckedAdd(charge.host, staging);
+          }
           charges.push_back(charge);
         }
-        ByteCharge fixed{CheckedAdd(group.device.fixed_raw.host, cohort.bank_raw.host),
-                         CheckedAdd(group.device.fixed_raw.device, cohort.bank_raw.device)};
-        ByteCharge capacity{CheckedAdd(fixed.host, cohort.private_peak_raw.host),
-                            CheckedAdd(fixed.device, cohort.private_peak_raw.device)};
+        ByteCharge fixed{
+            CheckedAdd(group.device.fixed_raw.host, cohort.bank_raw.host),
+            CheckedAdd(group.device.fixed_raw.device, cohort.bank_raw.device)};
+        ByteCharge capacity{
+            CheckedAdd(fixed.host, cohort.private_peak_raw.host),
+            CheckedAdd(fixed.device, cohort.private_peak_raw.device)};
         CohortControls control;
-        control.coordinator = std::make_unique<PairCoordinator>(capacity, fixed,
-            cohort.active_owners, charges, deadline.Remaining(),
-            std::function<void(const PairEvent&)>{}, deadline);
-        control.graphs = std::make_shared<GraphLaunchControl>(cohort.jobs.size());
+        control.coordinator = std::make_unique<PairCoordinator>(
+            capacity,
+            fixed,
+            cohort.active_owners,
+            charges,
+            deadline.Remaining(),
+            std::function<void(const PairEvent&)>{},
+            deadline);
+        control.graphs =
+            std::make_shared<GraphLaunchControl>(cohort.jobs.size());
         auto* coordinator = control.coordinator.get();
         const auto graphs = control.graphs;
         workers.Register([coordinator, graphs](std::exception_ptr error) {
@@ -132,106 +192,147 @@ FixedCohortResult RunMultiGpuFixedCohortPhotoGeo(
         controls[d].push_back(std::move(control));
       }
     }
-    workers.Run(phase.groups.size(), [&](size_t d) {
-      const auto& group = phase.groups[d];
-      const int device = group.device.ordinal;
-      for (size_t c = 0; c < group.cohorts.size(); ++c) {
-        workers.Check();
-        check();
-        CUDA_SAFE_CALL(cudaSetDevice(device));
-        const auto& cohort = group.cohorts[c];
-        const auto observed = ObserveFixedCohortCapacities(device);
-        if (observed.device_uuid != group.device.uuid ||
-            CheckedAdd(MarginBytes(group.peak_raw.device), group.device.reserve_bytes) >
-                std::min(observed.available.device, group.device.capacity_bytes))
-          throw std::runtime_error("multi-GPU cohort device admission changed");
-        auto& control = controls[d][c];
-        auto& coordinator = *control.coordinator;
-        std::shared_ptr<const ResidentGrayscaleBank> bank;
-        if (!geo) {
-          std::vector<std::vector<int>> sources;
-          for (size_t job : cohort.jobs) sources.push_back(refs.at(job).photo_sources);
-          HostGrayscaleBank host(frozen, sources, workers.CancellationToken());
-          const auto bytes = CheckedMultiply(CheckedMultiply(host.Width(), host.Height()), host.Layers().size());
-          if (bytes > cohort.bank_raw.host || bytes > cohort.bank_raw.device)
-            throw std::runtime_error("multi-GPU PHOTO bank exceeds admitted union");
-          workers.Check();
-          check();
-          bank = std::make_shared<ResidentGrayscaleBank>(host, device);
-          if (observer) observer(false, device, cohort.jobs.front(), "bank_ready");
-        }
-        const auto run = [&](size_t owner) {
-          try {
+    workers.Run(
+        phase.groups.size(),
+        [&](size_t d) {
+          const auto& group = phase.groups[d];
+          const int device = group.device.ordinal;
+          for (size_t c = 0; c < group.cohorts.size(); ++c) {
             workers.Check();
             check();
             CUDA_SAFE_CALL(cudaSetDevice(device));
-            coordinator.BeginPreparation(owner);
-            const size_t job = cohort.jobs.at(owner);
-            const auto& ref = refs.at(job);
-            if (observer) observer(geo, device, job, "begin");
-            auto options = geo ? ref.geo_options : ref.photo_options;
-            // Placement is the only changed option. The report binds this
-            // exact job->device separately; numerical options remain original.
-            options.gpu_index = std::to_string(device);
-            PatchMatch::Problem problem;
-            problem.images = &frozen;
-            problem.ref_image_idx = ref.reference_image_idx;
-            problem.src_image_idxs = geo ? ref.geo_sources : ref.photo_sources;
-            if (geo) {
-              problem.depth_maps = &photo_depth;
-              problem.normal_maps = &photo_normal;
-            } else {
-              problem.photo_grayscale = bank->BindJob(owner);
+            const auto& cohort = group.cohorts[c];
+            const auto observed = ObserveFixedCohortCapacities(device);
+            if (observed.device_uuid != group.device.uuid ||
+                CheckedAdd(MarginBytes(group.peak_raw.device),
+                           group.device.reserve_bytes) >
+                    std::min(observed.available.device,
+                             group.device.capacity_bytes))
+              throw std::runtime_error(
+                  "multi-GPU cohort device admission changed");
+            auto& control = controls[d][c];
+            auto& coordinator = *control.coordinator;
+            std::shared_ptr<const ResidentGrayscaleBank> bank;
+            if (!geo && !plan.single_device_host) {
+              std::vector<std::vector<int>> sources;
+              for (size_t job : cohort.jobs)
+                sources.push_back(refs.at(job).photo_sources);
+              HostGrayscaleBank host(
+                  frozen, sources, workers.CancellationToken());
+              const auto bytes =
+                  CheckedMultiply(CheckedMultiply(host.Width(), host.Height()),
+                                  host.Layers().size());
+              if (bytes > cohort.bank_raw.host ||
+                  bytes > cohort.bank_raw.device)
+                throw std::runtime_error(
+                    "multi-GPU PHOTO bank exceeds admitted union");
+              workers.Check();
+              check();
+              bank = std::make_shared<ResidentGrayscaleBank>(host, device);
+              if (observer)
+                observer(false, device, cohort.jobs.front(), "bank_ready");
             }
-            workers.Check();
-            check();
-            PatchMatchCuda solver(options, problem, tile_threads);
-            try {
-              if (options.owned_cuda_graphs)
-                solver.SetGraphCoordinator(control.graphs, owner);
-              solver.SetSweepObserver([&](int, int) {
+            const auto run = [&](size_t owner) {
+              try {
                 workers.Check();
                 check();
-              });
-              coordinator.ReadyAndWait(owner);
-              workers.Check();
-              check();
-              solver.Run();
-              workers.Check();
-              check();
-              coordinator.SolverDone(owner);
-              coordinator.BeginOutput(owner);
-              if (geo) {
-                result.geo[job].depth = solver.GetDepthMap();
-                result.geo[job].normal = solver.GetNormalMap();
-              } else {
-                photo_depth[ref.reference_image_idx] = solver.GetDepthMap();
-                photo_normal[ref.reference_image_idx] = solver.GetNormalMap();
+                CUDA_SAFE_CALL(cudaSetDevice(device));
+                coordinator.BeginPreparation(owner);
+                const size_t job = cohort.jobs.at(owner);
+                const auto& ref = refs.at(job);
+                if (observer) observer(geo, device, job, "begin");
+                auto options = geo ? ref.geo_options : ref.photo_options;
+                // Placement is the only changed option. The report binds this
+                // exact job->device separately; numerical options remain
+                // original.
+                options.gpu_index = std::to_string(device);
+                PatchMatch::Problem problem;
+                problem.images = &frozen;
+                problem.ref_image_idx = ref.reference_image_idx;
+                problem.src_image_idxs =
+                    geo ? ref.geo_sources : ref.photo_sources;
+                if (geo) {
+                  problem.depth_maps = &photo_depth;
+                  problem.normal_maps = &photo_normal;
+                } else if (bank) {
+                  problem.photo_grayscale = bank->BindJob(owner);
+                }
+                workers.Check();
+                check();
+                std::unique_ptr<PatchMatchCuda> solver;
+                if (plan.single_device_host) {
+                  const auto& execution = *plan.single_device_host;
+                  const auto& record = execution.admission.records[geo].at(job);
+                  StripStreamingOptions storage;
+                  storage.directory = execution.scratch_directory;
+                  storage.columns = record.columns;
+                  storage.host_staging_bytes = record.staging_host_bytes;
+                  storage.device_staging_bytes = record.staging_device_bytes;
+                  storage.disk_bytes = record.scratch_disk_bytes;
+                  storage.cancelled = workers.CancellationToken();
+                  // Constructor consumes the exact regenerated record before
+                  // any private pixel copy. No catch/retry or borrowed PHOTO
+                  // input.
+                  solver = std::make_unique<PatchMatchCuda>(
+                      options, problem, tile_threads, record, storage);
+                } else {
+                  solver = std::make_unique<PatchMatchCuda>(
+                      options, problem, tile_threads);
+                }
+                try {
+                  if (options.owned_cuda_graphs)
+                    solver->SetGraphCoordinator(control.graphs, owner);
+                  solver->SetSweepObserver([&](int, int) {
+                    workers.Check();
+                    check();
+                  });
+                  coordinator.ReadyAndWait(owner);
+                  workers.Check();
+                  check();
+                  solver->Run();
+                  workers.Check();
+                  check();
+                  coordinator.SolverDone(owner);
+                  coordinator.BeginOutput(owner);
+                  if (geo) {
+                    result.geo[job].depth = solver->GetDepthMap();
+                    result.geo[job].normal = solver->GetNormalMap();
+                  } else {
+                    photo_depth[ref.reference_image_idx] =
+                        solver->GetDepthMap();
+                    photo_normal[ref.reference_image_idx] =
+                        solver->GetNormalMap();
+                  }
+                  check();
+                  coordinator.EndOutput(owner);
+                  if (observer) observer(geo, device, job, "output");
+                } catch (...) {
+                  // Publish before solver destruction/drain when an error
+                  // crosses the solver API or observer boundary.
+                  workers.Cancel(std::current_exception());
+                  throw;
+                }
+              } catch (...) {
+                // Includes failures in setup or solver construction.
+                workers.Cancel(std::current_exception());
+                throw;
               }
-              check();
-              coordinator.EndOutput(owner);
-              if (observer) observer(geo, device, job, "output");
-            } catch (...) {
-              // Publish before solver destruction/drain when an error crosses
-              // the solver API or observer boundary.
-              workers.Cancel(std::current_exception());
-              throw;
-            }
-          } catch (...) {
-            // Includes failures in setup or solver construction.
-            workers.Cancel(std::current_exception());
-            throw;
+            };
+            RunRollingOwners(
+                coordinator,
+                run,
+                [](size_t, const char*) {},
+                workers.OwnerThreadFactory());
+            workers.Check();
+            // Solver owners joined. Publish retirement only after the bank's
+            // actual destruction, never on cancellation's partial drain path.
+            bank.reset();
+            if (observer)
+              observer(geo, device, cohort.jobs.front(), "cohort_drained");
           }
-        };
-        RunRollingOwners(coordinator, run, [](size_t, const char*) {},
-                         workers.OwnerThreadFactory());
-        workers.Check();
-        // Solver owners joined. Publish retirement only after the bank's
-        // actual destruction, never on cancellation's partial drain path.
-        bank.reset();
-        if (observer) observer(geo, device, cohort.jobs.front(), "cohort_drained");
-      }
-    }, MultiGpuWorkers::ThreadFactory{}, check);
+        },
+        MultiGpuWorkers::ThreadFactory{},
+        check);
     check();
     if (observer) observer(geo, -1, kNoJob, "joined");
     if (!geo) {
@@ -251,8 +352,10 @@ FixedCohortResult RunMultiGpuFixedCohortPhotoGeo(
   if (budget.output_policy == FixedCohortOutputPolicy::kPhotoAndGeo) {
     result.photo.resize(refs.size());
     for (size_t i = 0; i < refs.size(); ++i) {
-      result.photo[i].depth = std::move(photo_depth[refs[i].reference_image_idx]);
-      result.photo[i].normal = std::move(photo_normal[refs[i].reference_image_idx]);
+      result.photo[i].depth =
+          std::move(photo_depth[refs[i].reference_image_idx]);
+      result.photo[i].normal =
+          std::move(photo_normal[refs[i].reference_image_idx]);
     }
   }
   return result;  // All device owners drained; no snapshot or partial success.
