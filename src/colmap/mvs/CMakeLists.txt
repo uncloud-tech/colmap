@@ -545,9 +545,21 @@ if(CUDA_ENABLED)
     )
     COLMAP_ADD_TEST(
         NAME owned_strip_streaming_test
-        SRCS owned_strip_streaming_test.cu
+        SRCS owned_strip_streaming_test.cu owned_strip_allocation_test_util.h
         LINK_LIBS colmap_mvs_cuda
     )
+    if(TESTS_ENABLED AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT BUILD_SHARED_LIBS)
+        target_compile_definitions(colmap_mvs_owned_strip_streaming_test PRIVATE
+            COLMAP_STRIP_CUDA_ALLOCATIONS)
+        # Test-local interception of actual application CUDA requests, including
+        # constructor/initialization transients and stream-ordered retirement.
+        foreach(api cudaMalloc cudaMallocPitch cudaMalloc3DArray cudaMallocAsync
+                cudaMallocFromPoolAsync cudaFree cudaFreeArray cudaFreeAsync
+                cudaStreamSynchronize cudaMemcpy2DAsync)
+            target_link_options(colmap_mvs_owned_strip_streaming_test PRIVATE
+                "LINKER:--wrap=${api}")
+        endforeach()
+    endif()
     COLMAP_ADD_TEST(
         NAME owned_normal_rotation_test
         SRCS owned_normal_rotation_test.cu
