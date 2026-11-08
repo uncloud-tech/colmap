@@ -15,7 +15,7 @@ VERSION = "experimental-stereo-v1"
 # whole-pipeline streaming/physical-fit or universal numerical qualification.
 # Conservative allowances/reserves remain unchanged: no staging savings credit.
 ALLOCATION_FINGERPRINT = (
-    "9cce8da1ace5dc9c2ade150be596450b02d6d6a3043f8a28d69a302a437e3a00"
+    "fd87a8da75c6f737433f79cabd02e938cb8ab744012b6b91d54d8726e4e56160"
 )
 DEFAULTS = {
     "loader_scratch_host_bytes": 512 * 1024**2,

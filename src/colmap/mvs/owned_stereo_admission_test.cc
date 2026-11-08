@@ -134,6 +134,19 @@ int main() {
     assert(error.resource == StereoAdmissionResource::kGraphConflict);
     assert(error.geometry && error.reference == 0);
   }
+  std::rotate(policy.references.begin(),
+              policy.references.begin() + 1,
+              policy.references.end());
+  try {
+    PlanSingleDeviceStereoAdmission(policy);
+    assert(false);
+  } catch (const StereoAdmissionRefusal& error) {
+    assert(error.resource == StereoAdmissionResource::kGraphConflict);
+    assert(error.geometry && error.reference == 0);
+  }
+  std::rotate(policy.references.begin(),
+              policy.references.end() - 1,
+              policy.references.end());
   policy.capacity.device = 2000000000;
   assert(
       PlanSingleDeviceStereoAdmission(policy).records[1][0].policy.cuda_graphs);
@@ -199,6 +212,18 @@ int main() {
   invalid.estimated_pitch_alignment = std::numeric_limits<uint64_t>::max();
   Refuses<std::overflow_error>(
       [&] { PlanSingleDeviceStereoAdmission(invalid); });
+  auto wrong_shape = returned;
+  wrong_shape[0].width *= 2;
+  wrong_shape[0].element_bytes /= 2;
+  Refuses<std::invalid_argument>([&] {
+    ValidateStereoReturnedPitches(strip,
+                                  wrong_shape,
+                                  strip.initialization_prng_pitch,
+                                  {strip.staging_float_pitch,
+                                   strip.staging_float_pitch,
+                                   strip.staging_float_pitch,
+                                   strip.staging_mask_pitch});
+  });
   invalid = request;
   invalid.images[0].width = 0;
   Refuses<std::invalid_argument>(

@@ -191,14 +191,14 @@ StereoAdmissionPlan PlanSingleDeviceStereoAdmission(
                   ? StereoAdmissionResource::kHost
                   : StereoAdmissionResource::kDevice,
               phase,
-              job,
+              record.reference,
               "single-device stereo minimum HOST-exchange envelope does not "
               "fit");
         if (record.policy.cuda_graphs)
           throw StereoAdmissionRefusal(
               StereoAdmissionResource::kGraphConflict,
               phase,
-              job,
+              record.reference,
               "CUDA graphs conflict with selected strip-file reference");
       }
       plan.scratch_disk_bytes =
@@ -244,6 +244,10 @@ void ValidateStereoReturnedPitches(
     const auto span = CheckedMultiply(
         CheckedMultiply(actual.pitch_bytes, actual.height), actual.depth);
     if (actual.role != expected.role || actual.parity != expected.parity ||
+        actual.element_bytes != detail::ElementBytes(expected.role) ||
+        actual.requested_span_bytes !=
+            CheckedMultiply(CheckedMultiply(expected.row_bytes, expected.rows),
+                            expected.depth) ||
         CheckedMultiply(actual.width, actual.element_bytes) !=
             expected.row_bytes ||
         actual.height != expected.rows || actual.depth != expected.depth ||
