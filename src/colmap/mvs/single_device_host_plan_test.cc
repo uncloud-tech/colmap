@@ -71,5 +71,28 @@ int main() {
   auto changed = *plan.single_device_host;
   changed.admission.records[0][0].policy.async_pool = true;
   assert(colmap::dense_plan::SingleDeviceHostJson(changed).Dump() != json);
+  auto roomy = device;
+  roomy.capacity_bytes = 2000000000;
+  const auto preferred = PlanSingleDeviceStereoFixedCohort(shapes,
+                                                           refs,
+                                                           declarations,
+                                                           roomy,
+                                                           2000000000,
+                                                           2000000000,
+                                                           "/scratch",
+                                                           "auto",
+                                                           1);
+  assert(preferred.snapshot_budget && preferred.snapshot_inventory);
+  assert(!preferred.single_device_host);
+  const auto fallback = PlanSingleDeviceStereoFixedCohort(shapes,
+                                                          refs,
+                                                          declarations,
+                                                          device,
+                                                          2000000000,
+                                                          2000000000,
+                                                          "/scratch",
+                                                          "auto",
+                                                          1);
+  assert(fallback.single_device_host && !fallback.snapshot_budget);
   std::cout << "single-device HOST native adapter passed\n";
 }

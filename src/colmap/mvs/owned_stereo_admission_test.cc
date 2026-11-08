@@ -45,6 +45,13 @@ int main() {
   assert(plan.records[0][0].scratch_disk_bytes == 0);
   assert(plan.records[0][0].initialization.device > 0);
   assert(plan.records[0][0].peak.host == 10766223);
+  const auto snapshot =
+      BuildSnapshotStereoInventory(request, FixedCohortBudget{});
+  assert(snapshot.records[0][0].mode == StereoVolumeMode::kResidentPrivate);
+  assert(snapshot.budget.snapshots.device == 14745632);
+  assert(snapshot.records[1][0].staging_device_bytes == 16253952);
+  assert(snapshot.budget.geo_staging_device[0] ==
+         snapshot.records[1][0].staging_device_bytes);
   request.capacity.device = 60000000;
   const auto mixed = PlanSingleDeviceStereoAdmission(request);
   assert(mixed.records[0][0].mode == StereoVolumeMode::kStripFile);

@@ -16,6 +16,38 @@ void Require(bool valid, const char* message) {
 bool Same(PhasePlanCharge a, PhasePlanCharge b) {
   return a.host == b.host && a.device == b.device;
 }
+bool SameBudget(const FixedCohortBudget& a, const FixedCohortBudget& b) {
+  const auto same = [](ByteCharge x, ByteCharge y) {
+    return x.host == y.host && x.device == y.device;
+  };
+  if (a.output_policy != b.output_policy ||
+      a.photo_source_storage != b.photo_source_storage ||
+      a.unknown_provenance != b.unknown_provenance ||
+      a.max_active_owners != b.max_active_owners ||
+      a.phase_active_owners != b.phase_active_owners ||
+      a.geo_staging_device != b.geo_staging_device ||
+      a.already_live_process_provenance != b.already_live_process_provenance ||
+      a.photo_private.size() != b.photo_private.size() ||
+      a.geo_private.size() != b.geo_private.size())
+    return false;
+  for (const auto& pair :
+       {std::make_pair(a.photo_shared, b.photo_shared),
+        std::make_pair(a.caller_inputs, b.caller_inputs),
+        std::make_pair(a.frozen_inputs, b.frozen_inputs),
+        std::make_pair(a.host_outputs, b.host_outputs),
+        std::make_pair(a.snapshots, b.snapshots),
+        std::make_pair(a.process, b.process),
+        std::make_pair(a.unknown, b.unknown),
+        std::make_pair(a.headroom_reserve, b.headroom_reserve),
+        std::make_pair(a.already_live_process[0], b.already_live_process[0]),
+        std::make_pair(a.already_live_process[1], b.already_live_process[1])})
+    if (!same(pair.first, pair.second)) return false;
+  for (size_t i = 0; i < a.photo_private.size(); ++i)
+    if (!same(a.photo_private[i], b.photo_private[i])) return false;
+  for (size_t i = 0; i < a.geo_private.size(); ++i)
+    if (!same(a.geo_private[i], b.geo_private[i])) return false;
+  return true;
+}
 void CheckSame(const PhasePlan& a, const PhasePlan& b) {
   Require(a.geometry == b.geometry && a.host_peak_raw == b.host_peak_raw &&
               a.groups.size() == b.groups.size(),
@@ -247,6 +279,186 @@ MultiGpuFixedCohortPlan PlanSingleDeviceHostFixedCohort(
   return result;
 }
 
+MultiGpuFixedCohortPlan PlanSingleDeviceStereoFixedCohort(
+    const std::vector<FixedCohortImageShape>& images,
+    const std::vector<FixedCohortReference>& refs,
+    const FixedCohortBudget& declarations,
+    PhasePlanDevice device,
+    uint64_t host_capacity,
+    uint64_t disk_capacity,
+    const std::filesystem::path& scratch_directory,
+    const std::string& requested_storage,
+    size_t ceiling,
+    uint64_t loader_scratch_host_raw,
+    int tile_threads) {
+  ValidateOwnedTileThreads(tile_threads);
+  ValidateFixedCohortLiveProcess(declarations);
+  Require(!refs.empty() && ceiling && device.ordinal >= 0 &&
+              !device.uuid.empty() && device.capacity_bytes &&
+              scratch_directory.is_absolute(),
+          "single-device stereo requires approved device, work and scratch "
+          "directory");
+  Require(requested_storage == "auto" || requested_storage == "private" ||
+              requested_storage == "shared",
+          "invalid requested PHOTO source storage");
+  Require((declarations.unknown.host || declarations.unknown.device) &&
+              !declarations.unknown_provenance.empty(),
+          "explicit unknown allowance/provenance required");
+  StereoAdmissionRequest request;
+  request.images = images;
+  request.capacity = {host_capacity, device.capacity_bytes};
+  request.loader_scratch_host = loader_scratch_host_raw;
+  request.process = declarations.process;
+  request.unknown = declarations.unknown;
+  request.reserve = declarations.headroom_reserve;
+  for (const auto& ref : refs) {
+    StereoAdmissionReference job;
+    job.reference = ref.reference_image_idx;
+    job.sources = {ref.photo_sources, ref.geo_sources};
+    for (size_t phase = 0; phase < 2; ++phase) {
+      const auto& options = phase ? ref.geo_options : ref.photo_options;
+      job.policy[phase] = {options.filter && options.num_iterations > 0,
+                           options.owned_cuda_graphs,
+                           options.owned_async_pool};
+    }
+    request.references.push_back(std::move(job));
+  }
+  std::array<SnapshotStereoInventory, 2> candidates;
+  std::array<bool, 2> fits{};
+  uint64_t pixels = 0, output_disk = 0;
+  for (const auto& image : images) {
+    detail::CheckDimension(image.width);
+    detail::CheckDimension(image.height);
+    pixels = CheckedAdd(pixels, CheckedMultiply(image.width, image.height));
+  }
+  for (const auto& ref : refs) {
+    const auto shape = images.at(ref.reference_image_idx);
+    const auto headers =
+        CheckedMultiply(2,
+                        std::to_string(shape.width).size() +
+                            std::to_string(shape.height).size() + 5);
+    output_disk = CheckedAdd(
+        output_disk,
+        CheckedAdd(
+            headers,
+            CheckedMultiply(16, CheckedMultiply(shape.width, shape.height))));
+  }
+  if (declarations.output_policy == FixedCohortOutputPolicy::kPhotoAndGeo)
+    output_disk = CheckedMultiply(output_disk, 2);
+  const auto loader = CheckedAdd(
+      CheckedAdd(CheckedMultiply(2, pixels), loader_scratch_host_raw),
+      CheckedAdd(declarations.process.host, declarations.unknown.host));
+  // Build/validate BOTH source policies before interpreting any capacity issue.
+  for (size_t mode = 0; mode < 2; ++mode) {
+    auto d = declarations;
+    d.photo_source_storage = mode ? FixedCohortPhotoSourceStorage::kShared
+                                  : FixedCohortPhotoSourceStorage::kPrivate;
+    candidates[mode] = BuildSnapshotStereoInventory(request, d);
+    auto validation = candidates[mode].budget;
+    validation.phase_active_owners = {};
+    validation.max_active_owners = std::min(ceiling, refs.size());
+    AdmitFixedCohortBudget(validation, {UINT64_MAX, UINT64_MAX});
+  }
+  for (size_t mode = 0; mode < 2; ++mode) {
+    if ((requested_storage == "private" && mode) ||
+        (requested_storage == "shared" && !mode))
+      continue;
+    auto& budget = candidates[mode].budget;
+    try {
+      const auto owners =
+          SelectFixedCohortPhaseActiveOwners(budget, request.capacity, ceiling);
+      budget.phase_active_owners = {owners[0].count, owners[1].count};
+      budget.max_active_owners = std::max(owners[0].count, owners[1].count);
+      fits[mode] =
+          CheckedAdd(MarginBytes(loader), declarations.headroom_reserve.host) <=
+          host_capacity;
+    } catch (const FixedCohortCapacityRefusal&) {
+      // Pure forecast no-fit only. Invalid inputs/overflow never choose HOST.
+    }
+  }
+  if (!fits[0] && !fits[1]) {
+    auto fallback = PlanSingleDeviceHostFixedCohort(images,
+                                                    refs,
+                                                    declarations,
+                                                    device,
+                                                    host_capacity,
+                                                    disk_capacity,
+                                                    scratch_directory,
+                                                    requested_storage,
+                                                    loader_scratch_host_raw,
+                                                    tile_threads);
+    fallback.single_device_host->requested_active_owners_ceiling = ceiling;
+    return fallback;
+  }
+  size_t mode = fits[0] ? 0 : 1;
+  if (fits[0] && fits[1] &&
+      PreferSharedFixedCohortCounts(candidates[0].budget.phase_active_owners,
+                                    candidates[1].budget.phase_active_owners))
+    mode = 1;
+  auto selected = std::move(candidates[mode]);
+  const auto peaks = FixedCohortPeaks(selected.budget);
+  if (output_disk > disk_capacity)
+    throw StereoAdmissionRefusal(StereoAdmissionResource::kDisk,
+                                 false,
+                                 0,
+                                 "snapshot output disk unavailable");
+  MultiGpuFixedCohortPlan result;
+  result.host_capacity = host_capacity;
+  result.host_reserve = declarations.headroom_reserve.host;
+  result.loader_host_raw = loader;
+  result.loader_scratch_host_raw = loader_scratch_host_raw;
+  result.host_peak_raw = std::max(loader, peaks.peak.host);
+  result.active_owners_ceiling = ceiling;
+  SingleDeviceHostExecution metadata;
+  metadata.shapes = images;
+  metadata.scratch_directory = scratch_directory;
+  metadata.requested_photo_source_storage = requested_storage;
+  metadata.disk_capacity = disk_capacity;
+  metadata.process = declarations.process;
+  metadata.unknown = declarations.unknown;
+  metadata.unknown_provenance = declarations.unknown_provenance;
+  metadata.tile_threads = tile_threads;
+  metadata.requested_active_owners_ceiling = ceiling;
+  metadata.admission.records = std::move(selected.records);
+  metadata.admission.output_disk_bytes = output_disk;
+  metadata.admission.required_disk_bytes = output_disk;
+  metadata.admission.peak_raw = {result.host_peak_raw, peaks.peak.device};
+  metadata.admission.loader_host_raw = loader;
+  metadata.admission.common_host_raw =
+      CheckedAdd(CheckedAdd(selected.budget.caller_inputs.host,
+                            selected.budget.frozen_inputs.host),
+                 selected.budget.host_outputs.host);
+  metadata.admission.admitted = {
+      CheckedAdd(MarginBytes(result.host_peak_raw), result.host_reserve),
+      CheckedAdd(MarginBytes(peaks.peak.device),
+                 declarations.headroom_reserve.device)};
+  device.reserve_bytes = declarations.headroom_reserve.device;
+  for (size_t phase = 0; phase < 2; ++phase) {
+    auto& p = result.phases[phase];
+    p.geometry = phase;
+    p.host_peak_raw = phase ? peaks.geo.host : peaks.photo.host;
+    PhasePlanGroup group;
+    group.device = device;
+    group.peak_raw = {p.host_peak_raw,
+                      phase ? peaks.geo.device : peaks.photo.device};
+    PhasePlanCohort cohort;
+    cohort.active_owners = selected.budget.phase_active_owners[phase];
+    for (size_t job = 0; job < refs.size(); ++job) cohort.jobs.push_back(job);
+    if (!phase)
+      cohort.bank_raw = {selected.budget.photo_shared.host,
+                         selected.budget.photo_shared.device};
+    const auto private_peak = FixedCohortActivePeak(
+        phase ? selected.budget.geo_private : selected.budget.photo_private,
+        cohort.active_owners);
+    cohort.private_peak_raw = {private_peak.host, private_peak.device};
+    group.cohorts.push_back(std::move(cohort));
+    p.groups.push_back(std::move(group));
+  }
+  result.snapshot_inventory = std::move(metadata);
+  result.snapshot_budget = std::move(selected.budget);
+  return result;
+}
+
 #if !defined(COLMAP_CUDA_ENABLED) || defined(COLMAP_HIP_ENABLED)
 void CheckMultiGpuFixedCohortAvailable(const MultiGpuFixedCohortPlan&,
                                        uint64_t) {
@@ -271,7 +483,48 @@ void ValidateMultiGpuFixedCohortPlan(
   for (const auto& group : plan.phases[0].groups)
     devices.push_back(group.device);
   MultiGpuFixedCohortPlan regenerated;
-  if (plan.single_device_host) {
+  if (plan.snapshot_budget) {
+    Require(plan.snapshot_inventory.has_value() && !plan.single_device_host &&
+                devices.size() == 1,
+            "snapshot plan execution kind changed");
+    const auto& metadata = *plan.snapshot_inventory;
+    Require(metadata.shapes.size() == shapes.size(),
+            "snapshot image table changed");
+    for (size_t i = 0; i < shapes.size(); ++i)
+      Require(metadata.shapes[i].width == shapes[i].width &&
+                  metadata.shapes[i].height == shapes[i].height,
+              "snapshot image dimensions changed");
+    Require(metadata.process.host == budget.process.host &&
+                metadata.process.device == budget.process.device &&
+                metadata.unknown.host == budget.unknown.host &&
+                metadata.unknown.device == budget.unknown.device &&
+                metadata.unknown_provenance == budget.unknown_provenance,
+            "snapshot allowance policy changed");
+    auto declarations = budget;
+    declarations.phase_active_owners = {};
+    declarations.max_active_owners = 1;
+    regenerated = PlanSingleDeviceStereoFixedCohort(
+        shapes,
+        refs,
+        declarations,
+        devices[0],
+        plan.host_capacity,
+        metadata.disk_capacity,
+        metadata.scratch_directory,
+        metadata.requested_photo_source_storage,
+        plan.active_owners_ceiling,
+        plan.loader_scratch_host_raw,
+        metadata.tile_threads);
+    Require(
+        regenerated.snapshot_budget.has_value() &&
+            SameStereoAdmissionPlan(metadata.admission,
+                                    regenerated.snapshot_inventory->admission),
+        "snapshot complete execution plan changed");
+    const auto& expected = *regenerated.snapshot_budget;
+    Require(SameBudget(budget, expected) &&
+                SameBudget(*plan.snapshot_budget, expected),
+            "snapshot canonical budget changed");
+  } else if (plan.single_device_host) {
     const auto& single = *plan.single_device_host;
     Require(devices.size() == 1 && plan.active_owners_ceiling == 1 &&
                 single.columns == 32 && single.shapes.size() == shapes.size(),

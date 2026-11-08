@@ -81,6 +81,13 @@ class PatchMatchCuda {
                  int owned_tile_threads,
                  const StereoExecutionRecord& admission,
                  const StripStreamingOptions& storage);
+  // Snapshot pipeline binds the same phase-specific rotation inventory while
+  // retaining its existing immutable PHOTO input/bank ownership.
+  PatchMatchCuda(const PatchMatchOptions& options,
+                 const PatchMatch::Problem& problem,
+                 int owned_tile_threads,
+                 std::shared_ptr<const GeoPhotoInput> input,
+                 const StereoExecutionRecord& admission);
   // Full host materialization is qualification-only and explicitly capped.
   StripQualificationSnapshot InspectQualification(size_t max_host_bytes) const;
   uint64_t StripBytesRead() const;
@@ -118,7 +125,8 @@ class PatchMatchCuda {
       int owned_tile_threads,
       std::shared_ptr<const GeoPhotoInput> geo_photo_input,
       std::unique_ptr<StripStreamingOptions> streaming,
-      std::shared_ptr<const StereoExecutionRecord> admission = nullptr);
+      std::shared_ptr<const StereoExecutionRecord> admission = nullptr,
+      bool host_exchange = true);
   void InitStripStorage();
   void LoadStrip(size_t first, size_t columns, bool initial);
   void CommitStrip(bool initial, bool mask);

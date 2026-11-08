@@ -15,6 +15,8 @@
 
 namespace colmap::mvs::owned {
 
+struct SnapshotStereoInventory;
+
 struct FixedCohortReference {
   int reference_image_idx = -1;
   // Already resolved native orders, never re-resolved, sorted or deduplicated.
@@ -93,7 +95,8 @@ FixedCohortResult RunFixedCohortPhotoGeo(
     int tile_threads = 32,
     const std::atomic<bool>* cancel = nullptr,
     // Diagnostic only; enables sweep synchronization, not throughput timing.
-    std::function<void(bool, size_t, int, int)> sweep_observer = {});
+    std::function<void(bool, size_t, int, int)> sweep_observer = {},
+    const SnapshotStereoInventory* admission = nullptr);
 
 // Compatibility for the original two-reference fixture. A serial invocation
 // uses one active owner even when supplied with the old default pair budget.

@@ -8,7 +8,9 @@
 namespace colmap::dense_plan {
 
 inline Json SingleDeviceHostJson(
-    const mvs::owned::SingleDeviceHostExecution& execution) {
+    const mvs::owned::SingleDeviceHostExecution& execution,
+    const std::string& source_storage = "private",
+    bool snapshot = false) {
   std::vector<Json> phases;
   for (size_t phase = 0; phase < 2; ++phase) {
     std::vector<Json> records;
@@ -71,7 +73,9 @@ inline Json SingleDeviceHostJson(
       {{"status", Json("estimate_runtime_checked_not_physical_certification")},
        {"requested_photo_source_storage",
         Json(execution.requested_photo_source_storage)},
-       {"effective_photo_source_storage", Json("private")},
+       {"effective_photo_source_storage", Json(source_storage)},
+       {"exchange",
+        Json(snapshot ? "device_snapshots" : "immutable_host_photo")},
        {"scratch_directory", Json(execution.scratch_directory.string())},
        {"disk_capacity_bytes", Json(std::to_string(execution.disk_capacity))},
        {"process_host_raw", Json(std::to_string(execution.process.host))},
@@ -87,11 +91,15 @@ inline Json SingleDeviceHostJson(
        {"admitted_device_with_reserve",
         Json(std::to_string(plan.admitted.device))},
        {"tile_threads", Json(execution.tile_threads)},
+       {"requested_active_owners_ceiling",
+        Json(std::to_string(execution.requested_active_owners_ceiling))},
        {"pitch_policy",
         Json("per-plane estimated 512-byte rounding; pool workspace 128; "
              "packed selection exact; reject larger returned pitch")},
        {"cache_policy",
-        Json("full scratch file charged; eviction advice is not a guarantee")},
+        Json(snapshot ? "no strip scratch or page-cache charge"
+                      : "full scratch file charged; eviction advice is not a "
+                        "guarantee")},
        {"phases", Json::Array(phases)}});
 }
 
@@ -101,7 +109,8 @@ inline Json SingleDeviceHostJson(
 inline Json MultiGpuPlanJson(
     const mvs::owned::MultiGpuFixedCohortPlan& plan,
     const std::vector<mvs::owned::FixedCohortReference>& references,
-    const std::vector<mvs::Image>& images) {
+    const std::vector<mvs::Image>& images,
+    const std::string& allocation_fingerprint = "") {
   std::vector<Json> bindings;
   for (const auto& image : images) {
     const auto identity = mvs::owned::CaptureFileIdentity(image.GetPath());
@@ -181,9 +190,25 @@ inline Json MultiGpuPlanJson(
   }
   return Json::Object(
       {{"schema_version", Json(1)},
+       {"allocation_fingerprint", Json(allocation_fingerprint)},
        {"execution_kind",
-        Json(plan.single_device_host ? "single_device_host_exchange"
-                                     : "multi_gpu_host_exchange")},
+        Json(plan.snapshot_budget      ? "resident_snapshot"
+             : plan.single_device_host ? "single_device_host_exchange"
+                                       : "multi_gpu_host_exchange")},
+       {"snapshot",
+        plan.snapshot_inventory
+            ? SingleDeviceHostJson(
+                  *plan.snapshot_inventory,
+                  plan.snapshot_budget->photo_source_storage ==
+                          mvs::owned::FixedCohortPhotoSourceStorage::kShared
+                      ? "shared"
+                      : "private",
+                  true)
+            : Json()},
+       {"snapshot_device_bytes",
+        plan.snapshot_budget
+            ? Json(std::to_string(plan.snapshot_budget->snapshots.device))
+            : Json()},
        {"single_device_host",
         plan.single_device_host ? SingleDeviceHostJson(*plan.single_device_host)
                                 : Json()},
@@ -197,7 +222,9 @@ inline Json MultiGpuPlanJson(
         Json(std::to_string(plan.active_owners_ceiling))},
        {"image_bindings", Json::Array(bindings)},
        {"reuse",
-        Json(plan.single_device_host
+        Json(plan.snapshot_budget
+                 ? "resident PHOTO device snapshots through final GEO drain"
+             : plan.single_device_host
                  ? "private sources only; immutable HOST PHOTO exchange; no "
                    "bank or snapshot"
                  : "PHOTO padded source union within cohort only; GEO private "

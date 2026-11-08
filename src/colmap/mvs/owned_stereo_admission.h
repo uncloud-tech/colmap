@@ -78,6 +78,15 @@ struct StereoAdmissionPlan {
   uint64_t required_disk_bytes = 0;
 };
 
+struct SnapshotStereoInventory {
+  FixedCohortBudget budget;
+  std::array<std::vector<StereoExecutionRecord>, 2> records;
+};
+// Complete source-native snapshot inventory; includes the existing conservative
+// logical floor, actual phase owners, pitched GEO packing and transform copies.
+SnapshotStereoInventory BuildSnapshotStereoInventory(
+    const StereoAdmissionRequest& request, FixedCohortBudget declarations);
+
 // Selects resident-private before strip-file, one owner, no bank/snapshot.
 // Invalid dimensions/counts/overflow are errors, never alternate-mode triggers.
 StereoAdmissionPlan PlanSingleDeviceStereoAdmission(

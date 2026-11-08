@@ -27,8 +27,9 @@ struct CohortControls {
 
 void CheckMultiGpuFixedCohortAvailable(const MultiGpuFixedCohortPlan& plan,
                                        uint64_t live_caller_pixels) {
-  if (plan.single_device_host) {
-    const auto& execution = *plan.single_device_host;
+  if (plan.single_device_host || plan.snapshot_inventory) {
+    const auto& execution = plan.single_device_host ? *plan.single_device_host
+                                                    : *plan.snapshot_inventory;
     if (execution.admission.scratch_disk_bytes) {
 #ifdef __linux__
       struct statfs filesystem{};
@@ -89,6 +90,9 @@ FixedCohortResult RunMultiGpuFixedCohortPhotoGeo(
     const std::atomic<bool>* cancel,
     std::function<void(bool, int, size_t, const char*)> observer) {
   ValidateOwnedTileThreads(tile_threads);
+  if (plan.snapshot_budget)
+    throw std::invalid_argument(
+        "snapshot plan requires resident snapshot entry, not HOST workers");
   if (plan.single_device_host &&
       tile_threads != plan.single_device_host->tile_threads)
     throw std::invalid_argument("single-device HOST tile policy changed");

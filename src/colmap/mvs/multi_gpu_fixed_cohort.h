@@ -22,6 +22,7 @@ struct SingleDeviceHostExecution {
   ByteCharge process, unknown;
   std::string unknown_provenance;
   size_t columns = 32;
+  size_t requested_active_owners_ceiling = 1;
   int tile_threads = 32;
 };
 
@@ -34,6 +35,10 @@ struct MultiGpuFixedCohortPlan {
   uint64_t loader_host_raw = 0;
   size_t active_owners_ceiling = 1;
   std::optional<SingleDeviceHostExecution> single_device_host;
+  // Unified one-device approval metadata. Execution remains the existing
+  // resident snapshot pipeline, not the HOST worker entry, when populated.
+  std::optional<SingleDeviceHostExecution> snapshot_inventory;
+  std::optional<FixedCohortBudget> snapshot_budget;
 };
 
 // Pure metadata adapter into the CPU assignment seam. Host exchange costs are
@@ -60,6 +65,21 @@ MultiGpuFixedCohortPlan PlanSingleDeviceHostFixedCohort(
     uint64_t disk_capacity,
     const std::filesystem::path& scratch_directory,
     const std::string& requested_photo_source_storage,
+    uint64_t loader_scratch_host_raw = 0,
+    int tile_threads = 32);
+
+// Snapshot-preferred native selection; only typed metadata capacity refusal
+// selects HOST exchange. No allocations, failure-catching retry or resizing.
+MultiGpuFixedCohortPlan PlanSingleDeviceStereoFixedCohort(
+    const std::vector<FixedCohortImageShape>& images,
+    const std::vector<FixedCohortReference>& references,
+    const FixedCohortBudget& declarations,
+    PhasePlanDevice device,
+    uint64_t host_capacity,
+    uint64_t disk_capacity,
+    const std::filesystem::path& scratch_directory,
+    const std::string& requested_photo_source_storage,
+    size_t active_owners_ceiling,
     uint64_t loader_scratch_host_raw = 0,
     int tile_threads = 32);
 

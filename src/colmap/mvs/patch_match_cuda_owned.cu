@@ -1758,13 +1758,27 @@ PatchMatchCuda::PatchMatchCuda(const PatchMatchOptions& options,
                      std::make_shared<const StereoExecutionRecord>(admission)) {
 }
 
+PatchMatchCuda::PatchMatchCuda(const PatchMatchOptions& options,
+                               const PatchMatch::Problem& problem,
+                               int tile,
+                               std::shared_ptr<const GeoPhotoInput> input,
+                               const StereoExecutionRecord& admission)
+    : PatchMatchCuda(options,
+                     problem,
+                     tile,
+                     std::move(input),
+                     nullptr,
+                     std::make_shared<const StereoExecutionRecord>(admission),
+                     false) {}
+
 PatchMatchCuda::PatchMatchCuda(
     const PatchMatchOptions& options,
     const PatchMatch::Problem& problem,
     int owned_tile_threads,
     std::shared_ptr<const GeoPhotoInput> geo_photo_input,
     std::unique_ptr<StripStreamingOptions> streaming,
-    std::shared_ptr<const StereoExecutionRecord> admission)
+    std::shared_ptr<const StereoExecutionRecord> admission,
+    bool host_exchange)
     : options_(options),
       owned_tile_threads_(ValidateOwnedTileThreads(owned_tile_threads)),
       streaming_(std::move(streaming)),
@@ -1792,10 +1806,13 @@ PatchMatchCuda::PatchMatchCuda(
         {options_.filter && options_.num_iterations > 0,
          options_.owned_cuda_graphs,
          options_.owned_async_pool});
-    if (problem_.resident_bank || problem_.photo_grayscale.bank ||
-        geo_photo_input_)
+    if (host_exchange && (problem_.resident_bank ||
+                          problem_.photo_grayscale.bank || geo_photo_input_))
       throw std::invalid_argument(
           "admitted HOST factory forbids borrowed banks and snapshots");
+    if (!host_exchange &&
+        admission_->mode != StereoVolumeMode::kResidentPrivate)
+      throw std::invalid_argument("snapshot factory cannot consume strip mode");
     if (streaming_ &&
         (streaming_->columns != admission_->columns ||
          streaming_->host_staging_bytes != admission_->staging_host_bytes ||

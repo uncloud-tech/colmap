@@ -120,6 +120,58 @@ StereoExecutionRecord Inventory(const StereoAdmissionRequest& request,
 }
 }  // namespace
 
+SnapshotStereoInventory BuildSnapshotStereoInventory(
+    const StereoAdmissionRequest& request, FixedCohortBudget declarations) {
+  std::vector<FixedCohortJobShape> jobs;
+  for (const auto& ref : request.references)
+    jobs.push_back({ref.reference, ref.sources[0], ref.sources[1]});
+  SnapshotStereoInventory result;
+  result.budget =
+      BuildFixedCohortLogicalInventory(request.images, jobs, declarations);
+  for (size_t phase = 0; phase < 2; ++phase) {
+    for (size_t job = 0; job < request.references.size(); ++job) {
+      auto record = Inventory(request, request.references[job], phase);
+      uint64_t staging = 0;
+      if (phase) {
+        uint64_t width = 0, height = 0;
+        for (int source : record.sources) {
+          width = std::max(width, request.images.at(source).width);
+          height = std::max(height, request.images.at(source).height);
+        }
+        // GeoPhotoInput packs PHOTO device depths, not host float depths.
+        // Its pitched temporary and retained layered texture are distinct.
+        staging = CheckedMultiply(
+            CheckedMultiply(Pitch(CheckedMultiply(width, 4),
+                                  request.estimated_pitch_alignment),
+                            height),
+            record.sources.size());
+        record.staging_device_bytes = staging;
+        const auto host_depth_pack =
+            CheckedMultiply(4, record.padded_source_pixels);
+        record.initialization.host -= host_depth_pack;
+        record.steady.host -= host_depth_pack;
+        record.initialization.device =
+            CheckedAdd(record.initialization.device, staging);
+        record.steady.device = CheckedAdd(record.steady.device, staging);
+      } else if (declarations.photo_source_storage ==
+                 FixedCohortPhotoSourceStorage::kShared) {
+        record.initialization.device -= record.padded_source_pixels;
+        record.steady.device -= record.padded_source_pixels;
+      }
+      record.peak = Max(record.initialization, record.steady);
+      record.reason =
+          "complete resident snapshot owner estimate; legacy logical floor "
+          "retained";
+      auto& charge = phase ? result.budget.geo_private[job]
+                           : result.budget.photo_private[job];
+      charge = Max(charge, record.peak);
+      if (phase) result.budget.geo_staging_device[job] = staging;
+      result.records[phase].push_back(std::move(record));
+    }
+  }
+  return result;
+}
+
 StereoAdmissionPlan PlanSingleDeviceStereoAdmission(
     const StereoAdmissionRequest& request) {
   if (request.active_owners != 1 || request.references.empty() ||
