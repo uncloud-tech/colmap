@@ -328,28 +328,36 @@ void QualifyHostLifecycle(bool constructor_failure) {
     capture.cancel_after_submission = &cancelled;
   }
   std::optional<FixedCohortResult> completed;
-  EXPECT_THROW(completed = RunMultiGpuFixedCohortPhotoGeo(
-                   images,
-                   refs,
-                   budget,
-                   plan,
-                   NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
-                   32,
-                   &cancelled,
-                   [&](bool geo, int, size_t job, const char* event) {
-                     const std::string name(event);
-                     if (name == "begin") {
-                       ++begins;
-                       if (geo) ++geo_begins;
-                       // This callback executes on the native factory's owner
-                       // thread, not the caller/device/monitor thread. Single
-                       // owner only; TLS dies on joined owner exit, before
-                       // capture leaves this scope.
-                       if (!geo && job == 0) strip_test::active = &capture;
-                     }
-                     if (name == "output") ++outputs;
-                   }),
-               std::runtime_error);
+  const auto failed_run = [&] {
+    completed = RunMultiGpuFixedCohortPhotoGeo(
+        images,
+        refs,
+        budget,
+        plan,
+        NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
+        32,
+        &cancelled,
+        [&](bool geo, int, size_t job, const char* event) {
+          const std::string name(event);
+          if (name == "begin") {
+            ++begins;
+            if (geo) ++geo_begins;
+            // This callback executes on the native factory's owner
+            // thread, not the caller/device/monitor thread. Single
+            // owner only; TLS dies on joined owner exit, before
+            // capture leaves this scope.
+            if (!geo && job == 0) strip_test::active = &capture;
+          }
+          if (name == "output") ++outputs;
+        });
+  };
+  if (constructor_failure) {
+    // CUDA_SAFE_CALL's FATAL_THROW reports allocation errors as
+    // invalid_argument.
+    EXPECT_THROW(failed_run(), std::invalid_argument);
+  } else {
+    EXPECT_THROW(failed_run(), std::runtime_error);
+  }
   EXPECT_FALSE(completed.has_value());
   EXPECT_EQ(begins, 1);  // No backend retry or next owner on failure.
   EXPECT_EQ(outputs, 0);
