@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -24,7 +26,8 @@ TEST(SingleDeviceHostIntegration, MixedConstructorsBarrierDrainAndFailure) {
   }
   const auto observed = ObserveFixedCohortCapacities(0);
   std::vector<Image> images;
-  std::vector<FixedCohortImageShape> shapes{{640, 480}, {64, 48}};
+  // Rotated height 240 leaves a 16-column tail at the 32-column strip width.
+  std::vector<FixedCohortImageShape> shapes{{320, 240}, {64, 48}};
   const float K[9] = {64, 0, 32, 0, 64, 24, 0, 0, 1};
   const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
   for (size_t i = 0; i < shapes.size(); ++i) {
@@ -79,14 +82,37 @@ TEST(SingleDeviceHostIntegration, MixedConstructorsBarrierDrainAndFailure) {
   const auto disk = std::filesystem::space(directory).available;
   const auto baseline_plan = PlanSingleDeviceHostFixedCohort(
       shapes, refs, declarations, device, 2ull << 30, disk, directory, "auto");
+  const auto started = std::chrono::steady_clock::now();
+  const auto progress = [&](const char* run,
+                            bool geo,
+                            int device,
+                            size_t job,
+                            const char* event) {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started);
+    std::fprintf(stderr,
+                 "[HOST-QUAL] run=%s phase=%s device=%d job=%zu event=%s "
+                 "elapsed_ms=%lld\n",
+                 run,
+                 geo ? "GEO" : "PHOTO",
+                 device,
+                 job,
+                 event,
+                 static_cast<long long>(elapsed.count()));
+    std::fflush(stderr);
+  };
   const auto baseline = RunMultiGpuFixedCohortPhotoGeo(
       images,
       refs,
       budget,
       baseline_plan,
       NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
-      32);
-  device.capacity_bytes = 64ull << 20;
+      32,
+      nullptr,
+      [&](bool geo, int device, size_t job, const char* event) {
+        progress("baseline", geo, device, job, event);
+      });
+  device.capacity_bytes = 32ull << 20;
   const auto mixed = PlanSingleDeviceHostFixedCohort(
       shapes, refs, declarations, device, 2ull << 30, disk, directory, "auto");
   for (size_t phase = 0; phase < 2; ++phase) {
@@ -128,7 +154,8 @@ TEST(SingleDeviceHostIntegration, MixedConstructorsBarrierDrainAndFailure) {
       NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
       32,
       nullptr,
-      [&](bool geo, int, size_t job, const char* event) {
+      [&](bool geo, int device, size_t job, const char* event) {
+        progress("mixed", geo, device, job, event);
         const std::string name(event);
         if (name == "bank_ready") ++banks;
         if (!geo && name == "output") photo_done.at(job) = true;

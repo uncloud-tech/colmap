@@ -232,7 +232,7 @@ void QualifyHostLifecycle(bool constructor_failure) {
   const auto observed = ObserveFixedCohortCapacities(0);
   // Same admitted shapes as the native HOST mixed-constructor witness, not a
   // new numerical campaign. Duplicate source ordinals remain intentional.
-  const std::vector<FixedCohortImageShape> shapes{{640, 480}, {64, 48}};
+  const std::vector<FixedCohortImageShape> shapes{{320, 240}, {64, 48}};
   std::vector<Image> images;
   const float K[9] = {64, 0, 32, 0, 64, 24, 0, 0, 1};
   const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
@@ -288,7 +288,7 @@ void QualifyHostLifecycle(bool constructor_failure) {
   PhasePlanDevice device;
   device.ordinal = 0;
   device.uuid = observed.device_uuid;
-  device.capacity_bytes = 64ull << 20;
+  device.capacity_bytes = 32ull << 20;
   const auto directory = std::filesystem::current_path();
   const auto plan = PlanSingleDeviceHostFixedCohort(
       shapes,
@@ -301,9 +301,12 @@ void QualifyHostLifecycle(bool constructor_failure) {
       "auto");
   ASSERT_TRUE(plan.single_device_host);
   const auto& record = plan.single_device_host->admission.records[0][0];
-  ASSERT_EQ(record.mode, StereoVolumeMode::kStripFile);
-  ASSERT_EQ(plan.single_device_host->admission.records[0][1].mode,
-            StereoVolumeMode::kResidentPrivate);
+  for (size_t phase = 0; phase < 2; ++phase) {
+    ASSERT_EQ(plan.single_device_host->admission.records[phase][0].mode,
+              StereoVolumeMode::kStripFile);
+    ASSERT_EQ(plan.single_device_host->admission.records[phase][1].mode,
+              StereoVolumeMode::kResidentPrivate);
+  }
 
   const size_t scratch_before = OpenStripFiles();
   size_t scratch_at_fault = 0, begins = 0, outputs = 0, geo_begins = 0;
