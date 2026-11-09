@@ -39,7 +39,9 @@ enum class StripPlane { kCost, kSelection, kMask };
 // One exclusive, unlinked, physically reserved disk file. Layout is canonical
 // source-major cost(float), previous selection(float), optional mask(uint8).
 // Only the enclosing solver may interpret completion; partial commits are NOT
-// restartable. Each transfer uses one bounded canonical row buffer internally.
+// restartable or durable; transfers provide read-after-write coherence, not
+// persistence. Admission must charge the full file size to host page cache as
+// well as disk. Each transfer uses one bounded canonical row buffer internally.
 class StripFileStore {
  public:
   StripFileStore(const std::filesystem::path& directory,
