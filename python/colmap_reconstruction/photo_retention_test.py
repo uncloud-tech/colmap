@@ -41,7 +41,7 @@ class PhotoRetentionTest(unittest.TestCase):
                 reconstruction.assets.mkdir()
                 stereo = reconstruction.dense / "stereo"
                 stereo.mkdir(parents=True)
-                (stereo / "fusion.cfg").write_text("image.pgm\n")
+                (stereo / "fusion.cfg").write_text("image.pgm\nlate.pgm\n")
                 reconstruction.identity = {"allocation_fingerprint": "test"}
                 reconstruction.input_files = {}
                 reconstruction.graph = {
@@ -49,14 +49,20 @@ class PhotoRetentionTest(unittest.TestCase):
                         phase: {
                             "requested_options": {"gpu_index": "0"},
                             "jobs": [
-                                {"reference": 0, "sources": [0], "options": {}}
+                                {
+                                    "reference": reference,
+                                    "sources": [1 - reference],
+                                    "options": {},
+                                }
+                                for reference in (0, 1)
                             ],
                         }
                         for phase in ("photo", "geo")
                     }
                 }
                 reconstruction.images = {
-                    0: {"name": "image.pgm", "width": 1, "height": 1}
+                    0: {"name": "image.pgm", "width": 1, "height": 1},
+                    1: {"name": "late.pgm", "width": 1, "height": 1},
                 }
 
                 def native(
@@ -95,9 +101,15 @@ class PhotoRetentionTest(unittest.TestCase):
                         folder = root / "cohort/stereo" / kind
                         folder.mkdir(parents=True)
                         for suffix in ("photometric", "geometric"):
-                            path = folder / f"image.pgm.{suffix}.bin"
                             values = [1.0] * channels
                             header = f"1&1&{channels}&".encode()
+                            # First reference is always valid. A later PHOTO
+                            # failure must still prevent ALL GEO publication.
+                            (folder / f"image.pgm.{suffix}.bin").write_bytes(
+                                header
+                                + struct.pack("<" + "f" * channels, *values)
+                            )
+                            path = folder / f"late.pgm.{suffix}.bin"
                             if (
                                 suffix == "photometric"
                                 and kind == "normal_maps"
@@ -130,9 +142,10 @@ class PhotoRetentionTest(unittest.TestCase):
                             reconstruction.dense_stage()
                 published = reconstruction.dense / "stereo/depth_maps"
                 if defect is None:
-                    self.assertTrue(
-                        (published / "image.pgm.geometric.bin").is_file()
-                    )
+                    for name in ("image.pgm", "late.pgm"):
+                        self.assertTrue(
+                            (published / (name + ".geometric.bin")).is_file()
+                        )
                     self.assertTrue(
                         (
                             root

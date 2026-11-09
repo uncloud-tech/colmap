@@ -121,8 +121,11 @@ published under `dense/stereo/` and remain the fusion inputs. Every requested
 PHOTO map must have its expected shape/extent and finite float32 values before
 any GEO map is published. Missing or invalid retained maps refuse completion.
 
-Retaining intermediate maps adds storage and I/O; native admission evaluates the
-requested policy. It is not a physical-fit guarantee or a numerical option change.
+Retaining intermediate maps adds storage and I/O. Single-device native admission
+accounts for the requested policy's output disk and memory; this is not a
+physical-fit guarantee or a numerical option change. Multi-device execution
+currently lacks output-disk admission for retained maps: insufficient disk can
+fail late with partial outputs, so its output-space qualification remains open.
 Preserve the native plan, ordered PHOTO/GEO read sets, phase evidence and retained
 bodies for comparisons. A post-run file hash is not, by itself, a measurement of
 what was read at a particular earlier instant: immutable-exchange/source bindings
