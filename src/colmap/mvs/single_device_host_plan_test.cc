@@ -113,5 +113,66 @@ int main() {
                                                           "auto",
                                                           1);
   assert(fallback.single_device_host && !fallback.snapshot_budget);
+  for (const auto policy : {FixedCohortOutputPolicy::kFinalGeoOnly,
+                            FixedCohortOutputPolicy::kPhotoAndGeo}) {
+    declarations.output_policy = policy;
+    const std::string name = policy == FixedCohortOutputPolicy::kFinalGeoOnly
+                                 ? "final_geo_only"
+                                 : "photo_and_geo";
+    for (const auto& selected : {PlanSingleDeviceStereoFixedCohort(shapes,
+                                                                   refs,
+                                                                   declarations,
+                                                                   roomy,
+                                                                   2000000000,
+                                                                   2000000000,
+                                                                   "/scratch",
+                                                                   "auto",
+                                                                   1),
+                                 PlanSingleDeviceStereoFixedCohort(shapes,
+                                                                   refs,
+                                                                   declarations,
+                                                                   device,
+                                                                   2000000000,
+                                                                   2000000000,
+                                                                   "/scratch",
+                                                                   "auto",
+                                                                   1)}) {
+      assert(selected.output_policy == policy);
+      const auto& metadata = selected.snapshot_inventory
+                                 ? *selected.snapshot_inventory
+                                 : *selected.single_device_host;
+      assert(metadata.admission.output_policy == policy);
+      const auto bound_json =
+          colmap::dense_plan::SingleDeviceHostJson(metadata).Dump();
+      assert(bound_json.find("\"output_policy\":\"" + name + "\"") !=
+             std::string::npos);
+      assert(bound_json.find("\"peak_host_raw\":\"" +
+                             std::to_string(metadata.admission.peak_raw.host) +
+                             "\"") != std::string::npos);
+      assert(
+          bound_json.find("\"peak_device_raw\":\"" +
+                          std::to_string(metadata.admission.peak_raw.device) +
+                          "\"") != std::string::npos);
+      auto altered = metadata;
+      altered.admission.output_policy =
+          policy == FixedCohortOutputPolicy::kFinalGeoOnly
+              ? FixedCohortOutputPolicy::kPhotoAndGeo
+              : FixedCohortOutputPolicy::kFinalGeoOnly;
+      assert(!SameStereoAdmissionPlan(metadata.admission, altered.admission));
+      assert(colmap::dense_plan::SingleDeviceHostJson(altered).Dump() !=
+             bound_json);
+      altered = metadata;
+      ++altered.admission.peak_raw.device;
+      assert(!SameStereoAdmissionPlan(metadata.admission, altered.admission));
+      assert(colmap::dense_plan::SingleDeviceHostJson(altered).Dump() !=
+             bound_json);
+    }
+    auto second = roomy;
+    second.ordinal = 1;
+    second.uuid = "second-approved-device";
+    const auto multi = PlanMultiGpuFixedCohort(
+        shapes, refs, declarations, {roomy, second}, 2000000000, 1);
+    assert(multi.output_policy == policy);
+  }
   std::cout << "single-device HOST native adapter passed\n";
 }

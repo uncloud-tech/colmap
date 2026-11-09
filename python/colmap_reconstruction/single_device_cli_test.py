@@ -42,6 +42,10 @@ class SingleDeviceCommandTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         plan = json.loads(report.read_bytes())
         self.assertEqual(plan["execution_kind"], "resident_snapshot")
+        self.assertEqual(plan["output_policy"], "final_geo_only")
+        self.assertEqual(plan["snapshot"]["output_policy"], "final_geo_only")
+        self.assertRegex(plan["snapshot"]["peak_host_raw"], r"^[0-9]+$")
+        self.assertRegex(plan["snapshot"]["peak_device_raw"], r"^[0-9]+$")
         self.assertRegex(plan["allocation_fingerprint"], r"^[0-9a-f]{64}$")
         self.assertEqual(
             plan["snapshot"]["effective_photo_source_storage"], "private"
@@ -73,7 +77,16 @@ class SingleDeviceCommandTest(unittest.TestCase):
             prepared.returncode, 0, prepared.stdout + prepared.stderr
         )
         plan = json.loads(original.read_bytes())
-        for change in ("mode", "policy", "device", "capacity", "fingerprint"):
+        for change in (
+            "mode",
+            "policy",
+            "device",
+            "capacity",
+            "fingerprint",
+            "peak_host_raw",
+            "peak_device_raw",
+            "output_policy",
+        ):
             mutated = json.loads(original.read_bytes())
             if change == "mode":
                 mutated["execution_kind"] = "single_device_host_exchange"
@@ -85,6 +98,10 @@ class SingleDeviceCommandTest(unittest.TestCase):
                 mutated["phases"][0]["groups"][0]["uuid"] = "b" * 32
             elif change == "capacity":
                 mutated["host_capacity_bytes"] = "1"
+            elif change in ("peak_host_raw", "peak_device_raw"):
+                mutated["snapshot"][change] = "1"
+            elif change == "output_policy":
+                mutated["output_policy"] = "photo_and_geo"
             else:
                 mutated["allocation_fingerprint"] = "0" * 64
             approved = self.root / ("changed-" + change + ".json")
@@ -114,6 +131,20 @@ class SingleDeviceCommandTest(unittest.TestCase):
             "changed since approval", unchanged.stdout + unchanged.stderr
         )
         # Changing actual execution options, not JSON formatting, also binds.
+        changed_output = self.invoke(
+            args
+            + [
+                "--approved_multi_gpu_plan",
+                str(original),
+                "--output_policy",
+                "photo_and_geo",
+            ]
+        )
+        self.assertNotEqual(changed_output.returncode, 0)
+        self.assertIn(
+            "changed since approval",
+            changed_output.stdout + changed_output.stderr,
+        )
         for key in ("owned_async_pool", "owned_cuda_graphs"):
             changed = self.invoke(
                 args
@@ -129,6 +160,21 @@ class SingleDeviceCommandTest(unittest.TestCase):
                 "changed since approval", changed.stdout + changed.stderr
             )
             self.assertFalse(self.output.exists())
+
+    def test_both_output_policies_are_explicit_native_schema(self):
+        for policy in ("final_geo_only", "photo_and_geo"):
+            report = self.root / (policy + ".json")
+            prepared = self.invoke(
+                self.automatic_args(report) + ["--output_policy", policy]
+            )
+            self.assertEqual(
+                prepared.returncode, 0, prepared.stdout + prepared.stderr
+            )
+            plan = json.loads(report.read_bytes())
+            self.assertEqual(plan["output_policy"], policy)
+            self.assertEqual(plan["snapshot"]["output_policy"], policy)
+            self.assertTrue(plan["snapshot"]["peak_host_raw"].isdigit())
+            self.assertTrue(plan["snapshot"]["peak_device_raw"].isdigit())
 
     def test_approved_device_matches_options_before_pixels(self):
         args = self.automatic_args(self.root / "wrong-device.json")

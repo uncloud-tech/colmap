@@ -1419,6 +1419,12 @@ resize/fallback."""
             raise ValueError(
                 "native multi-GPU placement differs from approved plan"
             )
+        if (
+            planned
+            and self.report.get("output_policy")
+            != self.multi_gpu_plan["output_policy"]
+        ):
+            raise ValueError("native output policy changed after approval")
         if planned and not multi_gpu:
             metadata_key = (
                 "snapshot"
@@ -1530,6 +1536,8 @@ def bind_single_device_plan(plan, graph, devices, fingerprint, capacity):
     metadata = plan.get(key)
     if not isinstance(metadata, dict):
         raise ValueError("single-device storage plan missing")
+    if metadata.get("output_policy") != plan["output_policy"]:
+        raise ValueError("single-device output policy changed")
     storage = metadata.get("effective_photo_source_storage")
     if storage not in ("private", "shared") or (
         kind == "single_device_host_exchange" and storage != "private"
@@ -1570,8 +1578,13 @@ def bind_single_device_plan(plan, graph, devices, fingerprint, capacity):
     return assignments
 
 
-def bind_multi_gpu_plan(plan, graph, devices):
+def bind_multi_gpu_plan(plan, graph, devices, output_policy="final_geo_only"):
     """Bind exact scientific inputs plus unique approved phase placement."""
+    if (
+        output_policy not in ("final_geo_only", "photo_and_geo")
+        or plan.get("output_policy") != output_policy
+    ):
+        raise ValueError("native output policy changed")
     if plan.get("schema_version") != 1:
         raise ValueError("invalid multi-GPU plan version")
     expected = []

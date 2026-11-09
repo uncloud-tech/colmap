@@ -71,6 +71,7 @@ struct StereoAdmissionRequest {
   uint64_t estimated_pitch_alignment = 512;
 };
 struct StereoAdmissionPlan {
+  FixedCohortOutputPolicy output_policy = FixedCohortOutputPolicy::kPhotoAndGeo;
   std::array<std::vector<StereoExecutionRecord>, 2> records;
   size_t active_owners = 1;
   ByteCharge peak_raw, admitted;

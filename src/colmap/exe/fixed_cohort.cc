@@ -768,6 +768,8 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
           Json::Object(
               {{"schema_version", Json(1)},
                {"status", Json("completed")},
+               {"output_policy",
+                Json(owned::FixedCohortOutputPolicyName(result.output_policy))},
                {"requested_backend", Json("experimental_fixed_cohort")},
                {"effective_backend", Json("experimental_fixed_cohort")},
                {"allocation_fingerprint",

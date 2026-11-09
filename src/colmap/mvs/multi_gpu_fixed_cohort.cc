@@ -135,6 +135,7 @@ MultiGpuFixedCohortPlan PlanMultiGpuFixedCohort(
   }
   request.devices = std::move(devices);
   MultiGpuFixedCohortPlan result;
+  result.output_policy = declarations.output_policy;
   result.host_capacity = host_capacity;
   result.host_reserve = request.host_reserve_bytes;
   result.active_owners_ceiling = ceiling;
@@ -226,6 +227,7 @@ MultiGpuFixedCohortPlan PlanSingleDeviceHostFixedCohort(
     request.references.push_back(std::move(r));
   }
   MultiGpuFixedCohortPlan result;
+  result.output_policy = declarations.output_policy;
   result.host_capacity = host_capacity;
   result.host_reserve = declarations.headroom_reserve.host;
   result.active_owners_ceiling = 1;
@@ -407,6 +409,7 @@ MultiGpuFixedCohortPlan PlanSingleDeviceStereoFixedCohort(
                                  0,
                                  "snapshot output disk unavailable");
   MultiGpuFixedCohortPlan result;
+  result.output_policy = declarations.output_policy;
   result.host_capacity = host_capacity;
   result.host_reserve = declarations.headroom_reserve.host;
   result.loader_host_raw = loader;
@@ -423,6 +426,7 @@ MultiGpuFixedCohortPlan PlanSingleDeviceStereoFixedCohort(
   metadata.unknown_provenance = declarations.unknown_provenance;
   metadata.tile_threads = tile_threads;
   metadata.requested_active_owners_ceiling = ceiling;
+  metadata.admission.output_policy = declarations.output_policy;
   metadata.admission.records = std::move(selected.records);
   metadata.admission.active_owners = selected.budget.max_active_owners;
   metadata.admission.output_disk_bytes = output_disk;
@@ -480,6 +484,8 @@ void ValidateMultiGpuFixedCohortPlan(
   // Existing explicit-one-device scientific validation remains authoritative.
   // Its inventory is a metadata floor only here; snapshot storage is never
   // allocated by this host-map executor.
+  Require(plan.output_policy == budget.output_policy,
+          "fixed-cohort output policy changed");
   ValidateFixedCohortShape(images, refs, budget);
   std::vector<FixedCohortImageShape> shapes;
   for (const auto& image : images)

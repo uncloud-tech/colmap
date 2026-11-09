@@ -27,6 +27,7 @@ struct SingleDeviceHostExecution {
 };
 
 struct MultiGpuFixedCohortPlan {
+  FixedCohortOutputPolicy output_policy = FixedCohortOutputPolicy::kPhotoAndGeo;
   std::array<PhasePlan, 2> phases;
   uint64_t host_capacity = 0;
   uint64_t host_reserve = 0;

@@ -38,6 +38,7 @@ class MultiGpuBindingTest(unittest.TestCase):
         ]
         plan = dict(
             schema_version=1,
+            output_policy="final_geo_only",
             scientific_inputs=scientific,
             phases=[
                 dict(
@@ -68,6 +69,21 @@ class MultiGpuBindingTest(unittest.TestCase):
             {"photo": {0: "0", 1: "2"}, "geo": {0: "0", 1: "2"}},
         )
         self.assertEqual(graph, original)
+
+    def test_prepare_binds_explicit_output_policy(self):
+        from colmap_reconstruction.cli import bind_multi_gpu_plan
+
+        devices, graph, plan = self.fixture()
+        for policy in (None, "unknown", "photo_and_geo"):
+            changed = copy.deepcopy(plan)
+            changed["output_policy"] = policy
+            with (
+                self.subTest(policy=policy),
+                self.assertRaisesRegex(ValueError, "output policy"),
+            ):
+                bind_multi_gpu_plan(changed, graph, devices)
+        plan["output_policy"] = "photo_and_geo"
+        bind_multi_gpu_plan(plan, graph, devices, output_policy="photo_and_geo")
 
     def test_changed_readsets_uuid_or_duplicate_writer_refuse(self):
         from colmap_reconstruction.cli import bind_multi_gpu_plan
@@ -246,6 +262,7 @@ class MultiGpuBindingTest(unittest.TestCase):
                 else "single_device_host"
             )
             plan[key] = dict(
+                output_policy="final_geo_only",
                 effective_photo_source_storage="private",
                 phases=[
                     dict(
@@ -326,6 +343,7 @@ class MultiGpuBindingTest(unittest.TestCase):
         plan["execution_kind"] = "single_device_host_exchange"
         plan["allocation_fingerprint"] = "fp"
         plan["single_device_host"] = dict(
+            output_policy="final_geo_only",
             effective_photo_source_storage="private",
             phases=[
                 dict(
@@ -472,7 +490,15 @@ class MultiGpuBindingTest(unittest.TestCase):
 
         for scenario, failure in product(
             ("multi", "resident_snapshot", "single_device_host_exchange"),
-            ("none", "seed", "policy", "mode", "capacity", "late_map"),
+            (
+                "none",
+                "seed",
+                "policy",
+                "mode",
+                "capacity",
+                "output_policy",
+                "late_map",
+            ),
         ):
             changed_seed = failure == "seed"
             with (
@@ -504,6 +530,7 @@ class MultiGpuBindingTest(unittest.TestCase):
                         else "single_device_host"
                     )
                     plan[key] = dict(
+                        output_policy="final_geo_only",
                         effective_photo_source_storage="private",
                         phases=[
                             dict(
@@ -620,6 +647,9 @@ class MultiGpuBindingTest(unittest.TestCase):
                                 allocation_fingerprint="fixture",
                                 multi_gpu_plan=receipt_plan,
                                 execution_kind=scenario,
+                                output_policy="photo_and_geo"
+                                if failure == "output_policy"
+                                else "final_geo_only",
                                 effective_storage="private",
                                 host_capacity_bytes="100000",
                                 device_capacity_bytes="100000",
@@ -672,6 +702,8 @@ class MultiGpuBindingTest(unittest.TestCase):
                             if failure in ("seed", "policy")
                             else "nonfinite"
                             if failure == "late_map"
+                            else "output policy"
+                            if failure == "output_policy"
                             else "placement differs",
                         ):
                             reconstruction.dense_stage()

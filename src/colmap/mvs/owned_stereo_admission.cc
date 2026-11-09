@@ -180,6 +180,7 @@ StereoAdmissionPlan PlanSingleDeviceStereoAdmission(
         "single-device stereo requires one owner, work and pitch policy");
   ValidateStripColumns(request.strip_columns, request.block_width);
   StereoAdmissionPlan plan;
+  plan.output_policy = request.output_policy;
   uint64_t pixels = 0, maps = 0, output_headers = 0;
   if (request.output_policy != FixedCohortOutputPolicy::kPhotoAndGeo &&
       request.output_policy != FixedCohortOutputPolicy::kFinalGeoOnly)
@@ -336,7 +337,8 @@ bool SameStereoExecutionRecord(const StereoExecutionRecord& a,
 bool SameStereoAdmissionPlan(const StereoAdmissionPlan& a,
                              const StereoAdmissionPlan& b) {
   const auto fields = [](const StereoAdmissionPlan& p) {
-    return std::tie(p.active_owners,
+    return std::tie(p.output_policy,
+                    p.active_owners,
                     p.peak_raw.host,
                     p.peak_raw.device,
                     p.admitted.host,

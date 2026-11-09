@@ -71,6 +71,10 @@ inline Json SingleDeviceHostJson(
   const auto& plan = execution.admission;
   return Json::Object(
       {{"status", Json("estimate_runtime_checked_not_physical_certification")},
+       {"output_policy",
+        Json(mvs::owned::FixedCohortOutputPolicyName(plan.output_policy))},
+       {"peak_host_raw", Json(std::to_string(plan.peak_raw.host))},
+       {"peak_device_raw", Json(std::to_string(plan.peak_raw.device))},
        {"requested_photo_source_storage",
         Json(execution.requested_photo_source_storage)},
        {"effective_photo_source_storage", Json(source_storage)},
@@ -191,6 +195,8 @@ inline Json MultiGpuPlanJson(
   }
   return Json::Object(
       {{"schema_version", Json(1)},
+       {"output_policy",
+        Json(mvs::owned::FixedCohortOutputPolicyName(plan.output_policy))},
        {"allocation_fingerprint", Json(allocation_fingerprint)},
        {"execution_kind",
         Json(plan.snapshot_budget      ? "resident_snapshot"
