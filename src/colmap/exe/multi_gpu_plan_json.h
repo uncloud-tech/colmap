@@ -96,6 +96,7 @@ inline Json SingleDeviceHostJson(
        {"admitted_device_with_reserve",
         Json(std::to_string(plan.admitted.device))},
        {"tile_threads", Json(execution.tile_threads)},
+       {"requested_strip_columns", Json(std::to_string(execution.columns))},
        {"requested_active_owners_ceiling",
         Json(std::to_string(execution.requested_active_owners_ceiling))},
        {"pitch_policy",

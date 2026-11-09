@@ -538,7 +538,7 @@ void ValidateMultiGpuFixedCohortPlan(
   } else if (plan.single_device_host) {
     const auto& single = *plan.single_device_host;
     Require(devices.size() == 1 && plan.active_owners_ceiling == 1 &&
-                single.columns == 32 && single.shapes.size() == shapes.size(),
+                single.columns == 0 && single.shapes.size() == shapes.size(),
             "single-device HOST plan identity changed");
     for (size_t i = 0; i < shapes.size(); ++i)
       Require(shapes[i].width == single.shapes[i].width &&

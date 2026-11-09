@@ -59,6 +59,7 @@ int main() {
     }
     const auto& record = plan.single_device_host->admission.records[phase][0];
     assert(record.mode == StereoVolumeMode::kStripFile);
+    assert(record.columns > 32 && record.columns % 32 == 0);
     assert(record.sources == refs[0].photo_sources);
     assert(group.cohorts[0].private_peak_raw.device == record.peak.device);
   }
@@ -69,6 +70,7 @@ int main() {
   assert(json.find("\"requested_photo_source_storage\":\"auto\"") !=
          std::string::npos);
   assert(json.find("\"volume_mode\":\"strip_file\"") != std::string::npos);
+  assert(json.find("\"requested_strip_columns\":\"0\"") != std::string::npos);
   assert(json.find("\"cache_host_bytes\":\"30412800\"") != std::string::npos);
   auto changed = *plan.single_device_host;
   changed.admission.records[0][0].policy.async_pool = true;

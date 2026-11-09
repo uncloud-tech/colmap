@@ -120,10 +120,22 @@ TEST(SingleDeviceHostIntegration, MixedConstructorsBarrierDrainAndFailure) {
               StereoVolumeMode::kStripFile);
     ASSERT_EQ(mixed.single_device_host->admission.records[phase][1].mode,
               StereoVolumeMode::kResidentPrivate);
+    EXPECT_GT(mixed.single_device_host->admission.records[phase][0].columns,
+              32);
   }
   auto changed_plan = mixed;
   changed_plan.single_device_host->admission.records[0][0].mode =
       StereoVolumeMode::kResidentPrivate;
+  EXPECT_THROW(RunMultiGpuFixedCohortPhotoGeo(
+                   images,
+                   refs,
+                   budget,
+                   changed_plan,
+                   NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
+                   32),
+               std::invalid_argument);
+  changed_plan = mixed;
+  changed_plan.single_device_host->admission.records[0][0].columns += 32;
   EXPECT_THROW(RunMultiGpuFixedCohortPhotoGeo(
                    images,
                    refs,

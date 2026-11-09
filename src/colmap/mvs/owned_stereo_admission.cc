@@ -18,7 +18,8 @@ ByteCharge Max(ByteCharge a, ByteCharge b) {
 StereoExecutionRecord Inventory(const StereoAdmissionRequest& request,
                                 const StereoAdmissionReference& reference,
                                 bool geometry,
-                                bool strip = false) {
+                                bool strip = false,
+                                size_t columns = 0) {
   StereoExecutionRecord record;
   record.geometry = geometry;
   record.reference = reference.reference;
@@ -79,7 +80,9 @@ StereoExecutionRecord Inventory(const StereoAdmissionRequest& request,
     record.mode = StereoVolumeMode::kStripFile;
     // Keep the globally aligned stepping width even for smaller images;
     // BuildStripStagingLayout clamps the actual allocation to the extent.
-    record.columns = request.strip_columns;
+    record.columns = columns ? columns
+                             : (request.strip_columns ? request.strip_columns
+                                                      : request.block_width);
     const auto staging = BuildStripStagingLayout(shape.width,
                                                  shape.height,
                                                  sources,
@@ -178,7 +181,9 @@ StereoAdmissionPlan PlanSingleDeviceStereoAdmission(
       !request.estimated_pitch_alignment)
     throw std::invalid_argument(
         "single-device stereo requires one owner, work and pitch policy");
-  ValidateStripColumns(request.strip_columns, request.block_width);
+  ValidateStripColumns(
+      request.strip_columns ? request.strip_columns : request.block_width,
+      request.block_width);
   StereoAdmissionPlan plan;
   plan.output_policy = request.output_policy;
   uint64_t pixels = 0, maps = 0, output_headers = 0;
@@ -258,6 +263,39 @@ StereoAdmissionPlan PlanSingleDeviceStereoAdmission(
               record.reference,
               "single-device stereo minimum HOST-exchange envelope does not "
               "fit");
+        if (!request.strip_columns) {
+          // Both staging charges are nondecreasing in columns (including
+          // clamping and pitch plateaus); all other complete-envelope terms
+          // are constant. Search block counts, not pixels or repeated scans.
+          // The last partial block is useful, but staging's native int range
+          // still bounds the stepping width for near-INT_MAX dimensions.
+          const auto extent = std::max(record.width, record.height);
+          size_t low = 1;
+          size_t high = std::min<uint64_t>(
+              CheckedAdd(extent, request.block_width - 1) / request.block_width,
+              std::numeric_limits<int>::max() / request.block_width);
+          while (low < high) {
+            const size_t mid = low + (high - low + 1) / 2;
+            try {
+              auto candidate = Inventory(request,
+                                         request.references[job],
+                                         phase,
+                                         true,
+                                         mid * request.block_width);
+              if (fits(complete(candidate))) {
+                low = mid;
+                record = std::move(candidate);
+                continue;
+              }
+            } catch (const std::overflow_error&) {
+              // All input/constant terms and the minimum strip were already
+              // validated above. Only a larger search candidate can overflow
+              // here: it cannot fit any uint64 capacity. This does not change
+              // modes or turn malformed input into a fallback.
+            }
+            high = mid - 1;
+          }
+        }
         if (record.policy.cuda_graphs)
           throw StereoAdmissionRefusal(
               StereoAdmissionResource::kGraphConflict,

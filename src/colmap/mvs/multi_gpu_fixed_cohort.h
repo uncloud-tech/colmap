@@ -21,7 +21,7 @@ struct SingleDeviceHostExecution {
   uint64_t disk_capacity = 0;
   ByteCharge process, unknown;
   std::string unknown_provenance;
-  size_t columns = 32;
+  size_t columns = 0;  // Automatic native per-phase/reference strip selection.
   size_t requested_active_owners_ceiling = 1;
   int tile_threads = 32;
 };

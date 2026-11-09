@@ -594,11 +594,11 @@ TEST(OwnedStripStreaming, PhotoGeoResidentOracleAndCancellation) {
     PatchMatch::Problem problem;
     problem.images = &images;
     problem.ref_image_idx = 0;
+    // Retain the original three-source allocation-alias/mutation witness.
     problem.src_image_idxs = {3, 1, 2};
     Compare(options, problem, block, false);
     options.filter = true;
-    options.filter_min_num_consistent =
-        4;  // Genuine rejection: only 3 sources.
+    options.filter_min_num_consistent = 4;
     Compare(options, problem, block, true);
     problem.depth_maps = &depths;
     problem.normal_maps = &normals;
@@ -607,6 +607,25 @@ TEST(OwnedStripStreaming, PhotoGeoResidentOracleAndCancellation) {
     Compare(options, problem, block, false);
     options.filter_min_num_consistent = 4;
     Compare(options, problem, block, true);
+
+    problem.src_image_idxs = {3, 1, 3, 2};  // Ordered, non-sorted duplicates.
+    for (const size_t columns : {block, 2 * block, 4 * block}) {
+      SCOPED_TRACE(::testing::Message() << "columns=" << columns);
+      options.geom_consistency = false;
+      options.filter = false;
+      Compare(options, problem, columns, false);
+      options.filter = true;
+      options.filter_min_num_consistent =
+          5;  // Genuine rejection: only 4 source ordinals.
+      Compare(options, problem, columns, true);
+      problem.depth_maps = &depths;
+      problem.normal_maps = &normals;
+      options.geom_consistency = true;
+      options.filter_min_num_consistent = 1;
+      Compare(options, problem, columns, false);
+      options.filter_min_num_consistent = 5;
+      Compare(options, problem, columns, true);
+    }
   }
 #endif
 }

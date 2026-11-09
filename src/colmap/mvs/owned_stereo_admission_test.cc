@@ -52,6 +52,7 @@ int main() {
   assert(snapshot.records[1][0].staging_device_bytes == 16253952);
   assert(snapshot.budget.geo_staging_device[0] ==
          snapshot.records[1][0].staging_device_bytes);
+  request.strip_columns = 32;  // Explicit narrow qualification remains exact.
   request.capacity.device = 60000000;
   const auto mixed = PlanSingleDeviceStereoAdmission(request);
   assert(mixed.records[0][0].mode == StereoVolumeMode::kStripFile);
@@ -62,6 +63,106 @@ int main() {
   assert(mixed.records[0][0].columns == 32);
   assert(mixed.required_disk_bytes ==
          mixed.output_disk_bytes + mixed.scratch_disk_bytes);
+  // Automatic selection uses the complete envelope, not only staging bytes.
+  auto automatic = request;
+  automatic.strip_columns = 0;
+  const auto wide = PlanSingleDeviceStereoAdmission(automatic);
+  for (size_t phase = 0; phase < 2; ++phase) {
+    const auto& selected = wide.records[phase][0];
+    assert(selected.mode == StereoVolumeMode::kStripFile);
+    assert(selected.columns > 32 && selected.columns % 32 == 0);
+    assert(selected.sources == reference.sources[phase]);
+    assert(wide.admitted.host <= automatic.capacity.host);
+    assert(wide.admitted.device <= automatic.capacity.device);
+  }
+  // Exact fixed overrides remain exact even on a pitched-byte plateau.
+  auto fixed = request;
+  fixed.strip_columns = 64;
+  const auto fixed_wide = PlanSingleDeviceStereoAdmission(fixed);
+  assert(fixed_wide.records[0][0].columns == 64);
+  assert(fixed_wide.records[0][0].staging_device_bytes ==
+         mixed.records[0][0].staging_device_bytes);
+  assert(fixed_wide.records[0][0].staging_host_bytes >
+         mixed.records[0][0].staging_host_bytes);
+  // At the minimum complete host envelope only one GEO block fits, although
+  // the device's pitch plateau admits more. One byte less is typed no-fit.
+  auto narrow = automatic;
+  narrow.capacity = mixed.admitted;
+  const auto minimum = PlanSingleDeviceStereoAdmission(narrow);
+  assert(minimum.records[1][0].columns == 32);
+  --narrow.capacity.host;
+  try {
+    PlanSingleDeviceStereoAdmission(narrow);
+    assert(false);
+  } catch (const StereoAdmissionRefusal& error) {
+    assert(error.resource == StereoAdmissionResource::kHost);
+  }
+  narrow = automatic;
+  narrow.capacity.device = mixed.admitted.device - 1;
+  try {
+    PlanSingleDeviceStereoAdmission(narrow);
+    assert(false);
+  } catch (const StereoAdmissionRefusal& error) {
+    assert(error.resource == StereoAdmissionResource::kDevice);
+  }
+  // Compare the logarithmic selector against the actual fixed-width public
+  // planner for each admissible stepping width, not a copy of its formulas.
+  // A device-only constraint can leave different maxima in PHOTO and GEO.
+  for (size_t columns = 32; columns <= 640; columns += 32) {
+    auto probe = automatic;
+    probe.strip_columns = columns;
+    try {
+      const auto manual = PlanSingleDeviceStereoAdmission(probe);
+      for (size_t phase = 0; phase < 2; ++phase)
+        assert(wide.records[phase][0].columns >=
+               manual.records[phase][0].columns);
+    } catch (const StereoAdmissionRefusal& error) {
+      assert(error.resource == StereoAdmissionResource::kDevice);
+      assert(error.reference == 0);
+      assert(wide.records[error.geometry][0].columns < columns);
+    }
+  }
+  // Enough staging capacity for the complete useful width still cannot fit
+  // the old resident source-scaled volume. Odd extents retain an aligned tail.
+  auto tails = automatic;
+  tails.images = {{1001, 999}, {1001, 999}, {1001, 999}};
+  for (auto& sources : tails.references[0].sources) {
+    sources.clear();
+    for (int i = 0; i < 64; ++i) sources.push_back(i % 2 ? 1 : 2);
+  }
+  tails.capacity = {10000000000ULL, 1400000000};
+  tails.disk_capacity = 10000000000ULL;
+  const auto full_strips = PlanSingleDeviceStereoAdmission(tails);
+  for (size_t phase = 0; phase < 2; ++phase) {
+    const auto& r = full_strips.records[phase][0];
+    assert(r.mode == StereoVolumeMode::kStripFile);
+    assert(r.columns == 1024);
+    assert(r.sources == tails.references[0].sources[phase]);
+  }
+  for (const size_t block : {8, 16, 32}) {
+    auto unmasked = tails;
+    unmasked.block_width = block;
+    for (auto& policy : unmasked.references[0].policy)
+      policy.retain_mask = false;
+    const auto selected = PlanSingleDeviceStereoAdmission(unmasked);
+    for (size_t phase = 0; phase < 2; ++phase) {
+      const auto& r = selected.records[phase][0];
+      assert(r.mode == StereoVolumeMode::kStripFile);
+      assert(r.columns == (block == 32 ? 1024 : 1008));
+      assert(!r.staging_mask_pitch);
+    }
+  }
+  // Pure metadata on a huge skinny reference must remain logarithmic. Wide
+  // candidate staging can overflow even though the minimum envelope is valid.
+  auto huge = tails;
+  huge.images = {{20000000, 1000}, {20000000, 1000}, {20000000, 1000}};
+  for (auto& sources : huge.references[0].sources) sources.resize(64000, 1);
+  huge.capacity = {200000000000000000ULL, 20000000000000000ULL};
+  huge.disk_capacity = 200000000000000000ULL;
+  const auto huge_plan = PlanSingleDeviceStereoAdmission(huge);
+  assert(huge_plan.records[1][0].mode == StereoVolumeMode::kStripFile);
+  assert(huge_plan.records[1][0].columns > 32);
+  assert(huge_plan.admitted.device <= huge.capacity.device);
   const auto& strip = mixed.records[0][0];
   assert(SameStereoExecutionRecord(strip, strip));
   ValidateStereoExecutionBinding(
@@ -74,6 +175,9 @@ int main() {
   });
   auto changed = strip;
   changed.mode = StereoVolumeMode::kResidentPrivate;
+  assert(!SameStereoExecutionRecord(strip, changed));
+  changed = strip;
+  changed.columns += 32;
   assert(!SameStereoExecutionRecord(strip, changed));
   changed = strip;
   changed.policy.async_pool = true;

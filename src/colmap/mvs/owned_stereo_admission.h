@@ -66,7 +66,9 @@ struct StereoAdmissionRequest {
   uint64_t disk_capacity = 0;
   FixedCohortOutputPolicy output_policy = FixedCohortOutputPolicy::kPhotoAndGeo;
   size_t active_owners = 1;
-  size_t strip_columns = 32;
+  // Zero selects the maximum useful block-aligned width admitted by the
+  // complete native envelope. Positive values are exact fixed-width requests.
+  size_t strip_columns = 0;
   size_t block_width = 32;
   uint64_t estimated_pitch_alignment = 512;
 };
