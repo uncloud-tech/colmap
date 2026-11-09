@@ -61,6 +61,10 @@ def write(path, value):
 
 
 def graph(workspace):
+    seed = args.get("--random_seed")
+    if seed is None:
+        seed = args.get("--PatchMatchStereo.random_seed", 37)
+    seed = int(seed) + int(bool(os.environ.get("FAKE_BAD_SEED")))
     images = [
         dict(
             index=i,
@@ -84,7 +88,7 @@ def graph(workspace):
             max_image_size=-1,
             geom_consistency=geo,
             filter=geo,
-            random_seed=37,
+            random_seed=seed,
         )
         jobs = [
             dict(
@@ -96,6 +100,8 @@ def graph(workspace):
             )
             for i in range(2)
         ]
+        if phase == "geo" and os.environ.get("FAKE_BAD_JOB_SEED"):
+            jobs[0]["options"]["random_seed"] += 1
         phases[phase] = dict(requested_options=requested, jobs=jobs)
     if os.environ.get("FAKE_DENSE_RESIZE"):
         phases["geo"]["jobs"][0]["options"]["max_image_size"] = 1600

@@ -615,9 +615,12 @@ resource admission gates remain authoritative""",
                     backend="CUDA SIFT exhaustive",
                     threads=self.args.threads,
                     gpu_index=self.args.gpu_index,
+                    random_seed=self.args.random_seed,
                 ),
                 mapping=dict(
-                    backend="incremental CPU Ceres", threads=self.args.threads
+                    backend="incremental CPU Ceres",
+                    threads=self.args.threads,
+                    random_seed=self.args.random_seed,
                 ),
                 undistortion=dict(threads=self.args.threads),
                 stereo=dict(
@@ -1114,6 +1117,8 @@ resize/fallback."""
             self.native(
                 "exhaustive_matcher",
                 *common,
+                "--TwoViewGeometry.random_seed",
+                a.random_seed,
                 "--FeatureMatching.gpu_index",
                 a.gpu_index,
                 "--FeatureMatching.num_threads",
@@ -1151,6 +1156,8 @@ resize/fallback."""
                 sparse,
                 "--Mapper.num_threads",
                 a.threads,
+                "--Mapper.random_seed",
+                a.random_seed,
                 "--Mapper.ba_gpu_index",
                 a.gpu_index,
                 "--Mapper.host_budget_bytes",
@@ -1300,6 +1307,15 @@ resize/fallback."""
             raise ValueError("native plan/build revision mismatch")
         for phase in ("photo", "geo"):
             jobs = self.graph["phases"][phase]["jobs"]
+            if self.graph["phases"][phase]["requested_options"].get(
+                "random_seed"
+            ) != a.random_seed or any(
+                job["options"].get("random_seed") != a.random_seed
+                for job in jobs
+            ):
+                raise ValueError(
+                    "native dense plan changed the requested random seed"
+                )
             if self.graph["phases"][phase]["requested_options"].get(
                 "max_image_size"
             ) != -1 or any(

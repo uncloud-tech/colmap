@@ -619,10 +619,12 @@ return_value=candidates):
             "exhaustive_matcher": {
                 "--FeatureMatching.gpu_index": "2",
                 "--FeatureMatching.num_threads": "3",
+                "--TwoViewGeometry.random_seed": "42",
             },
             "mapper": {
                 "--Mapper.num_threads": "3",
                 "--Mapper.ba_gpu_index": "2",
+                "--Mapper.random_seed": "42",
             },
             "image_undistorter": {
                 "--max_image_size": "1600",

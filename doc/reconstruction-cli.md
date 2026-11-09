@@ -93,6 +93,24 @@ Controller SIGKILL cannot be handled: use an external service/cgroup for
 controller-death containment or hard memory enforcement. Native children are
 trusted not to detach from their process groups.
 
+## Random seed and repeatability
+
+`--random-seed` defaults to `0`. The same value is explicitly passed to matching's
+geometric verification (`TwoViewGeometry.random_seed`), incremental reconstruction
+(`Mapper.random_seed`), and dense planning/execution. Matching and mapping no
+longer silently use their native unseeded defaults while only stereo receives the
+requested seed. The approval plan records the matching, mapping and stereo seeds;
+a dense plan with a different requested or per-job seed refuses before execution.
+Native command defaults outside this frontend are unchanged.
+
+A nonnegative value selects a fixed seed. Explicit `--random-seed -1` retains the
+native unseeded matching/mapping behavior and legacy dense initialization; it is
+not a seeded-repeatability configuration. A fixed seed does not by itself prove
+byte-identical results across builds, devices or threading configurations. Exact
+repeatability requires comparison of actual scientific outputs from fresh runs
+with identical inputs, executable, options and hardware. Do not replace an exact
+comparison with rounded values or numerical tolerances.
+
 ## Multi-device stereo
 
 The default approval preview discloses the stereo device ordinals/UUIDs separately
