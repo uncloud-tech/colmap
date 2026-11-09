@@ -111,6 +111,24 @@ repeatability requires comparison of actual scientific outputs from fresh runs
 with identical inputs, executable, options and hardware. Do not replace an exact
 comparison with rounded values or numerical tolerances.
 
+## Retaining PHOTO maps for exact comparisons
+
+The default `--output-policy final_geo_only` is unchanged. Explicit
+`--output-policy photo_and_geo` requests the existing native retention policy and
+is recorded in approval and bound to native planning/execution. It retains
+`*.photometric.bin` depth/normal maps under `cohort/stereo/`; final GEO maps are
+published under `dense/stereo/` and remain the fusion inputs. Every requested
+PHOTO map must have its expected shape/extent and finite float32 values before
+any GEO map is published. Missing or invalid retained maps refuse completion.
+
+Retaining intermediate maps adds storage and I/O; native admission evaluates the
+requested policy. It is not a physical-fit guarantee or a numerical option change.
+Preserve the native plan, ordered PHOTO/GEO read sets, phase evidence and retained
+bodies for comparisons. A post-run file hash is not, by itself, a measurement of
+what was read at a particular earlier instant: immutable-exchange/source bindings
+and the complete PHOTO-before-GEO barrier must also be established. Compare the
+actual retained bytes, not just counts, dimensions or policy labels.
+
 ## Multi-device stereo
 
 The default approval preview discloses the stereo device ordinals/UUIDs separately

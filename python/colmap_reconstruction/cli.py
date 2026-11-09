@@ -172,6 +172,12 @@ def parse_args(argv):
         "--num-samples", type=int, choices=range(1, 16), default=15
     )
     parser.add_argument("--random-seed", type=int, default=0)
+    parser.add_argument(
+        "--output-policy",
+        choices=("final_geo_only", "photo_and_geo"),
+        default="final_geo_only",
+        help="retain final GEO maps only, or also the native PHOTO maps",
+    )
     parser.add_argument("--cache-size-gib", type=positive_float, default=1)
     parser.add_argument(
         "--max-image-size",
@@ -340,7 +346,7 @@ lower workload or free capacity (budgets cannot raise FREE)"""
             "--active_owners_ceiling",
             str(a.active_owners_ceiling),
             "--output_policy",
-            "final_geo_only",
+            a.output_policy,
             "--deadline_seconds",
             str(seconds),
             "--tile_threads",
@@ -644,6 +650,7 @@ resource admission gates remain authoritative""",
                     source_cap=self.args.source_cap,
                     num_samples=self.args.num_samples,
                     random_seed=self.args.random_seed,
+                    output_policy=self.args.output_policy,
                     cache_size_gib=self.args.cache_size_gib,
                     tile=self.args.tile,
                     lookahead=not self.args.no_lookahead,
@@ -1396,7 +1403,10 @@ resize/fallback."""
             self.multi_gpu_plan = json.loads(plan_path.read_bytes())
             if multi_gpu:
                 assignments = bind_multi_gpu_plan(
-                    self.multi_gpu_plan, self.graph, self.stereo_devices
+                    self.multi_gpu_plan,
+                    self.graph,
+                    self.stereo_devices,
+                    output_policy=self.args.output_policy,
                 )
             else:
                 approved_capacity = arguments[
@@ -1408,6 +1418,7 @@ resize/fallback."""
                     self.stereo_devices,
                     self.identity["allocation_fingerprint"],
                     approved_capacity,
+                    output_policy=self.args.output_policy,
                 )
             print(
                 (
@@ -1495,8 +1506,29 @@ resize/fallback."""
                     "native fixed-cohort effective " + phase + " plan changed"
                 )
         self.check_inputs(self.input_files)
-        # Publish only complete native outputs into the fresh undistorted tree.
-        # Native final_geo_only retains PHOTO until the final GEO drain.
+        if self.args.output_policy == "photo_and_geo":
+            if self.report.get("output_policy") != "photo_and_geo":
+                raise ValueError("native PHOTO retention policy changed")
+            # Retained PHOTO maps stay in cohort; fusion consumes GEO only.
+            # Validate every requested PHOTO body before publishing any GEO map.
+            for job in self.graph["phases"]["photo"]["jobs"]:
+                image = self.images[job["reference"]]
+                for kind, channels in (("depth_maps", 1), ("normal_maps", 3)):
+                    source = (
+                        self.workspace
+                        / "cohort/stereo"
+                        / kind
+                        / (image["name"] + ".photometric.bin")
+                    )
+                    validate_dense_map(
+                        source,
+                        image["width"],
+                        image["height"],
+                        channels,
+                        check=self.process.remaining,
+                    )
+        # Publish only complete GEO outputs into the fresh undistorted tree.
+        # Both policies keep the immutable PHOTO exchange through GEO drain.
         pending_outputs = []
         for job in self.graph["phases"]["geo"]["jobs"]:
             name = self.images[job["reference"]]["name"]
@@ -1540,14 +1572,18 @@ resize/fallback."""
             os.link(source, target)
 
 
-def bind_single_device_plan(plan, graph, devices, fingerprint, capacity):
+def bind_single_device_plan(
+    plan, graph, devices, fingerprint, capacity, output_policy="final_geo_only"
+):
     """Bind native policy/identity, never reproduce its memory inventory."""
     if len(devices) != 1 or plan.get("allocation_fingerprint") != fingerprint:
         raise ValueError("single-device native identity changed")
     kind = plan.get("execution_kind")
     if kind not in ("resident_snapshot", "single_device_host_exchange"):
         raise ValueError("invalid single-device execution kind")
-    assignments = bind_multi_gpu_plan(plan, graph, devices)
+    assignments = bind_multi_gpu_plan(
+        plan, graph, devices, output_policy=output_policy
+    )
     key = "snapshot" if kind == "resident_snapshot" else "single_device_host"
     metadata = plan.get(key)
     if not isinstance(metadata, dict):

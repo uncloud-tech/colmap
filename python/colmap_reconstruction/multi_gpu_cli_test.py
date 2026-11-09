@@ -222,6 +222,23 @@ class MultiGpuBindingTest(unittest.TestCase):
             r.dense_host_capacity = 4096
             r.dense_device_capacity = 1000
             r.dense_disk_capacity = 8192
+            self.assertEqual(args.output_policy, "final_geo_only")
+            for policy in ("final_geo_only", "photo_and_geo"):
+                selected = parse_args(
+                    [
+                        "--photos",
+                        str(root),
+                        "--workspace",
+                        str(root),
+                        "--output-policy",
+                        policy,
+                    ]
+                )
+                args.output_policy = selected.output_policy
+                candidate = r.dense_arguments()
+                self.assertEqual(
+                    candidate[candidate.index("--output_policy") + 1], policy
+                )
             argv = r.dense_arguments()
             self.assertEqual(
                 argv[argv.index("--automatic_stereo_storage") + 1], "1"
@@ -289,6 +306,24 @@ class MultiGpuBindingTest(unittest.TestCase):
                 )["geo"],
                 {0: "0", 1: "0"},
             )
+            retained = copy.deepcopy(plan)
+            retained["output_policy"] = "photo_and_geo"
+            retained[key]["output_policy"] = "photo_and_geo"
+            self.assertEqual(
+                bind_single_device_plan(
+                    retained,
+                    graph,
+                    devices,
+                    "fingerprint",
+                    "1000",
+                    output_policy="photo_and_geo",
+                )["geo"],
+                {0: "0", 1: "0"},
+            )
+            with self.assertRaises(ValueError):
+                bind_single_device_plan(
+                    retained, graph, devices, "fingerprint", "1000"
+                )
             for change in (
                 "mode",
                 "policy",

@@ -551,6 +551,8 @@ return_value=candidates):
             "42",
             "--tile",
             "32",
+            "--output-policy",
+            "photo_and_geo",
         )
         self.assertEqual(
             result.returncode, 2
@@ -583,8 +585,13 @@ return_value=candidates):
             num_samples=7,
             random_seed=42,
             tile=32,
+            output_policy="photo_and_geo",
         ).items():
             self.assertEqual(plan["options"][key], expected)
+        self.assertEqual(
+            plan["effective_dispatch"]["stereo"]["output_policy"],
+            "photo_and_geo",
+        )
         self.assertEqual(
             len([call for call in calls if call[0] == "reconstruction_info"]), 4
         )
