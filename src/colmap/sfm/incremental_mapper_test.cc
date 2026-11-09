@@ -2,6 +2,8 @@
 
 #include "colmap/sfm/incremental_mapper.h"
 
+#include "colmap/estimators/generalized_pose.h"
+#include "colmap/estimators/triangulation.h"
 #include "colmap/scene/database_cache.h"
 #include "colmap/scene/database_sqlite.h"
 #include "colmap/scene/reconstruction_matchers.h"
@@ -14,6 +16,63 @@
 
 namespace colmap {
 namespace {
+
+// Every non-seed RANSAC field must retain the estimator's defaults unless the
+// fallback explicitly overrides it. Keep these checks field-wise (not padding).
+void ExpectSameNonSeedRANSACOptions(const RANSACOptions& actual,
+                                    const RANSACOptions& expected) {
+  EXPECT_EQ(actual.max_error, expected.max_error);
+  EXPECT_EQ(actual.min_inlier_ratio, expected.min_inlier_ratio);
+  EXPECT_EQ(actual.confidence, expected.confidence);
+  EXPECT_EQ(actual.dyn_num_trials_multiplier,
+            expected.dyn_num_trials_multiplier);
+  EXPECT_EQ(actual.min_num_trials, expected.min_num_trials);
+  EXPECT_EQ(actual.max_num_trials, expected.max_num_trials);
+  EXPECT_EQ(actual.num_threads, expected.num_threads);
+}
+
+class IncrementalMapperFallbackOptionsTest
+    : public ::testing::TestWithParam<int> {};
+
+TEST_P(IncrementalMapperFallbackOptionsTest, StructureLessAbsolutePoseSeed) {
+  IncrementalMapper::Options options;
+  options.random_seed = GetParam();
+  // Non-default values ensure the existing mapper overrides remain connected.
+  options.abs_pose_max_error = 7.0;
+  options.abs_pose_min_inlier_ratio = 0.4;
+  options.num_threads = 3;
+  const auto actual = internal::BuildStructureLessAbsolutePoseOptions(options);
+  EXPECT_EQ(actual.ransac_options.random_seed, GetParam());
+
+  StructureLessAbsolutePoseEstimationOptions expected;
+  expected.ransac_options.max_error = 3.5;
+  expected.ransac_options.min_inlier_ratio = 0.4;
+  expected.ransac_options.num_threads = 3;
+  ExpectSameNonSeedRANSACOptions(actual.ransac_options,
+                                 expected.ransac_options);
+}
+
+TEST_P(IncrementalMapperFallbackOptionsTest, NewPointTriangulationSeed) {
+  IncrementalMapper::Options options;
+  options.random_seed = GetParam();
+  options.abs_pose_max_error = 7.0;
+  options.filter_min_tri_angle = 2.5;
+  // Triangulation must retain its serial default, not inherit pose threading.
+  options.num_threads = 3;
+  const auto actual = internal::BuildStructureLessTriangulationOptions(options);
+  EXPECT_EQ(actual.ransac_options.random_seed, GetParam());
+
+  EstimateTriangulationOptions expected;
+  expected.ransac_options.max_error = 7.0;
+  EXPECT_EQ(actual.min_tri_angle, 2.5);
+  EXPECT_EQ(actual.residual_type, expected.residual_type);
+  ExpectSameNonSeedRANSACOptions(actual.ransac_options,
+                                 expected.ransac_options);
+}
+
+INSTANTIATE_TEST_SUITE_P(MapperSeeds,
+                         IncrementalMapperFallbackOptionsTest,
+                         ::testing::Values(0, 37, -1));
 
 SyntheticDatasetOptions DefaultSyntheticOptions() {
   SyntheticDatasetOptions options;

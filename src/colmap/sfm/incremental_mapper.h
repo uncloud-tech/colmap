@@ -361,4 +361,18 @@ class IncrementalMapper {
   FlatHashSet<frame_t> existing_frame_ids_;
 };
 
+struct StructureLessAbsolutePoseEstimationOptions;
+struct EstimateTriangulationOptions;
+
+namespace internal {
+
+// Internal option-building seams shared by the fallback and its native tests.
+StructureLessAbsolutePoseEstimationOptions
+BuildStructureLessAbsolutePoseOptions(
+    const IncrementalMapper::Options& options);
+EstimateTriangulationOptions BuildStructureLessTriangulationOptions(
+    const IncrementalMapper::Options& options);
+
+}  // namespace internal
+
 }  // namespace colmap

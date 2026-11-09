@@ -82,9 +82,12 @@ class SeedDispatchTest(unittest.TestCase):
 
     def test_stochastic_seed_reaches_matching_mapping_and_dense_planning(self):
         for requested, expected in ((None, 0), (0, 0), (37, 37), (-1, -1)):
-            with self.subTest(seed=requested), tempfile.TemporaryDirectory(
-                dir=Path(__file__).resolve().parents[2].parent
-            ) as d:
+            with (
+                self.subTest(seed=requested),
+                tempfile.TemporaryDirectory(
+                    dir=Path(__file__).resolve().parents[2].parent
+                ) as d,
+            ):
                 root = Path(d)
                 result, calls = self.run_frontend(root, requested)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -101,14 +104,19 @@ class SeedDispatchTest(unittest.TestCase):
                     (root / "output/planning/approved-plan.json").read_text()
                 )
                 for stage in ("matching", "mapping", "stereo"):
-                    actual = approved["effective_dispatch"][stage]["random_seed"]
+                    actual = approved["effective_dispatch"][stage][
+                        "random_seed"
+                    ]
                     self.assertEqual(actual, expected)
 
     def test_native_dense_seed_mismatch_refuses_before_execution(self):
         for mismatch in ("requested", "job"):
-            with self.subTest(mismatch=mismatch), tempfile.TemporaryDirectory(
-                dir=Path(__file__).resolve().parents[2].parent
-            ) as d:
+            with (
+                self.subTest(mismatch=mismatch),
+                tempfile.TemporaryDirectory(
+                    dir=Path(__file__).resolve().parents[2].parent
+                ) as d,
+            ):
                 root = Path(d)
                 result, calls = self.run_frontend(
                     root, 37, bad_dense_seed=mismatch
