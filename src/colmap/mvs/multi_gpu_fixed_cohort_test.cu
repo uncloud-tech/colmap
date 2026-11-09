@@ -59,6 +59,7 @@ TEST(SingleDeviceHostIntegration, MixedConstructorsBarrierDrainAndFailure) {
     options.num_threads = 1;
     ref.geo_options = options;
     ref.geo_options.geom_consistency = true;
+    ref.geo_options.filter = true;
     jobs.push_back({i, ref.photo_sources, ref.geo_sources});
   }
   FixedCohortBudget declarations;
