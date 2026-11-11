@@ -1168,7 +1168,12 @@ resize/fallback."""
                 "--Mapper.ba_gpu_index",
                 a.gpu_index,
                 "--Mapper.host_budget_bytes",
-                mapping_capacity,
+                # Serialize the explicit ceiling, not sampled availability.
+                # RSS accounting above and native admission remain bounded
+                # by current availability; no-cap behavior stays dynamic.
+                a.host_budget_bytes
+                if a.host_budget_bytes is not None
+                else mapping_capacity,
                 "--Mapper.policy_host_bytes",
                 a.loader_scratch_host_bytes
                 + a.process_host_bytes
