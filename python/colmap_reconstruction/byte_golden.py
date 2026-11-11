@@ -240,7 +240,21 @@ def required_members(selected, names):
         "points.ply",
         "points.ply.vis",
         "sparse/" + selected + "/project.ini",
+        "result.json",
     }
+    required.update(
+        "planning/" + name + ".json"
+        for name in (
+            "intent",
+            "approved-plan",
+            "build",
+            "dense-plan",
+            "cohort",
+            "sparse-model",
+            "extraction-inventory",
+            "resolution-intent",
+        )
+    )
     for base in ("sparse/" + selected, "dense/sparse"):
         required.update(
             base + "/" + name + ".bin"
@@ -382,6 +396,14 @@ def wire_binding(wire, workspace):
     return "".join(lines[:-2])
 
 
+def publication_outputs(phase, name):
+    suffix = "photometric" if phase == "photo" else "geometric"
+    return {
+        key: f"dense/stereo/{kind}/{name}.{suffix}.bin"
+        for key, kind in (("depth", "depth_maps"), ("normal", "normal_maps"))
+    }
+
+
 def graph_binding(graph, all_members):
     """Bind explicit paths; all other graph metadata stays exact."""
     graph = json.loads(json.dumps(graph, allow_nan=False))
@@ -413,17 +435,13 @@ def graph_binding(graph, all_members):
             job["effective_options_wire_v1"] = wire_binding(
                 job["effective_options_wire_v1"], workspace
             )
-            suffix = "photometric" if phase == "photo" else "geometric"
-            for key, kind in (
-                ("depth", "depth_maps"),
-                ("normal", "normal_maps"),
+            job["outputs"] = {
+                key: relative(path) for key, path in job["outputs"].items()
+            }
+            if job["outputs"] != publication_outputs(
+                phase, image_names[job["reference"]]
             ):
-                dest = relative(job["outputs"][key])
-                name = image_names[job["reference"]]
-                expected = f"dense/stereo/{kind}/{name}.{suffix}.bin"
-                if dest != expected:
-                    raise ValueError("wrong planned publication destination")
-                job["outputs"][key] = dest
+                raise ValueError("wrong planned publication destination")
     for entry in graph.get("input_files", []):
         entry["path"] = relative(entry["path"])
         if all_members.get(entry["path"], {}).get("sha256") != entry["sha256"]:
@@ -707,7 +725,8 @@ def _validate_manifest(value):
         != binding["images"]
     ):
         raise ValueError("invalid graph metadata binding")
-    for phase in binding["phases"].values():
+    image_names = {image["index"]: image["name"] for image in binding["images"]}
+    for phase_name, phase in binding["phases"].items():
         jobs = phase["jobs"]
         if (
             len(jobs) != len(indices)
@@ -716,6 +735,10 @@ def _validate_manifest(value):
         ):
             raise ValueError("invalid phase membership")
         for job in jobs:
+            if job["outputs"] != publication_outputs(
+                phase_name, image_names[job["reference"]]
+            ):
+                raise ValueError("wrong planned publication destination")
             # Restore fixed path sentinels to validate the non-path wire shape.
             wire = job["effective_options_wire_v1"]
             for key, path in (

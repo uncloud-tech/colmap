@@ -372,6 +372,35 @@ class InventoryTest(unittest.TestCase):
             finally:
                 manifest.unlink()
 
+    def test_compare_rejects_bad_outputs_and_missing_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline = capture(root, fixture(root))
+            for destination in ("../escape", "dense/stereo/wrong.bin"):
+                with self.subTest(destination=destination):
+                    candidate = copy.deepcopy(baseline)
+                    candidate["binding"]["phases"]["photo"]["jobs"][0][
+                        "outputs"
+                    ]["depth"] = destination
+                    with self.assertRaises(ValueError):
+                        compare(candidate, candidate)
+            for name in (
+                "result.json",
+                "planning/intent.json",
+                "planning/approved-plan.json",
+                "planning/build.json",
+                "planning/dense-plan.json",
+                "planning/cohort.json",
+                "planning/sparse-model.json",
+                "planning/extraction-inventory.json",
+                "planning/resolution-intent.json",
+            ):
+                with self.subTest(metadata=name):
+                    candidate = copy.deepcopy(baseline)
+                    del candidate["operational"][name]
+                    with self.assertRaises(ValueError):
+                        compare(baseline, candidate)
+
     def test_automatic_device_and_policy_defaults_use_effective_options(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
