@@ -551,6 +551,8 @@ return_value=candidates):
             "42",
             "--tile",
             "32",
+            "--output-policy",
+            "photo_and_geo",
         )
         self.assertEqual(
             result.returncode, 2
@@ -583,8 +585,13 @@ return_value=candidates):
             num_samples=7,
             random_seed=42,
             tile=32,
+            output_policy="photo_and_geo",
         ).items():
             self.assertEqual(plan["options"][key], expected)
+        self.assertEqual(
+            plan["effective_dispatch"]["stereo"]["output_policy"],
+            "photo_and_geo",
+        )
         self.assertEqual(
             len([call for call in calls if call[0] == "reconstruction_info"]), 4
         )
@@ -619,10 +626,12 @@ return_value=candidates):
             "exhaustive_matcher": {
                 "--FeatureMatching.gpu_index": "2",
                 "--FeatureMatching.num_threads": "3",
+                "--TwoViewGeometry.random_seed": "42",
             },
             "mapper": {
                 "--Mapper.num_threads": "3",
                 "--Mapper.ba_gpu_index": "2",
+                "--Mapper.random_seed": "42",
             },
             "image_undistorter": {
                 "--max_image_size": "1600",

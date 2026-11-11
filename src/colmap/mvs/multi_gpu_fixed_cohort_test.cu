@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -15,6 +17,206 @@
 
 namespace colmap::mvs::owned {
 namespace {
+// New one-device HOST integration witness; distinct from PR43's unchanged
+// recurrence/allocation-mutant oracle and from two-device qualification.
+TEST(SingleDeviceHostIntegration, MixedConstructorsBarrierDrainAndFailure) {
+  int count = 0;
+  if (cudaGetDeviceCount(&count) != cudaSuccess || count < 1) {
+    GTEST_SKIP() << "requires one actual CUDA device";
+  }
+  const auto observed = ObserveFixedCohortCapacities(0);
+  std::vector<Image> images;
+  // Rotated height 240 leaves a 16-column tail at the 32-column strip width.
+  std::vector<FixedCohortImageShape> shapes{{320, 240}, {64, 48}};
+  const float K[9] = {64, 0, 32, 0, 64, 24, 0, 0, 1};
+  const float R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  for (size_t i = 0; i < shapes.size(); ++i) {
+    const float T[3] = {-0.25f * i, 0, 0};
+    const auto shape = shapes[i];
+    images.emplace_back(
+        "host-plane-" + std::to_string(i), shape.width, shape.height, K, R, T);
+    Bitmap bitmap(shape.width, shape.height, false);
+    for (size_t y = 0; y < shape.height; ++y)
+      for (size_t x = 0; x < shape.width; ++x)
+        ASSERT_TRUE(bitmap.SetPixel(
+            x, y, BitmapColor<uint8_t>((x * 37 + y * 101 + i * 4) & 255)));
+    images.back().SetBitmap(std::move(bitmap));
+  }
+  std::vector<FixedCohortReference> refs(2);
+  std::vector<FixedCohortJobShape> jobs;
+  for (int i = 0; i < 2; ++i) {
+    auto& ref = refs[i];
+    ref.reference_image_idx = i;
+    ref.photo_sources = i ? std::vector<int>{0} : std::vector<int>(11, 1);
+    ref.geo_sources = ref.photo_sources;
+    auto& options = ref.photo_options;
+    options.gpu_index = "0";
+    options.geom_consistency = false;
+    options.filter = false;
+    options.depth_min = 1;
+    options.depth_max = 5;
+    options.sigma_spatial = 5;
+    options.num_iterations = 1;
+    options.num_samples = 2;
+    options.random_seed = 0;
+    options.num_threads = 1;
+    ref.geo_options = options;
+    ref.geo_options.geom_consistency = true;
+    ref.geo_options.filter = true;
+    jobs.push_back({i, ref.photo_sources, ref.geo_sources});
+  }
+  FixedCohortBudget declarations;
+  declarations.max_active_owners = 1;
+  declarations.process = {1ull << 20, 1ull << 20};
+  declarations.unknown = {16ull << 20, 16ull << 20};
+  declarations.unknown_provenance =
+      "integration fixture estimate, not physical-fit certification";
+  declarations.headroom_reserve = {1ull << 20, 1ull << 20};
+  auto budget = BuildFixedCohortLogicalInventory(shapes, jobs, declarations);
+  PhasePlanDevice device;
+  device.ordinal = 0;
+  device.uuid = observed.device_uuid;
+  device.capacity_bytes =
+      std::min<uint64_t>(observed.available.device, 2ull << 30);
+  const auto directory = std::filesystem::current_path();
+  const auto disk = std::filesystem::space(directory).available;
+  const auto baseline_plan = PlanSingleDeviceHostFixedCohort(
+      shapes, refs, declarations, device, 2ull << 30, disk, directory, "auto");
+  const auto started = std::chrono::steady_clock::now();
+  const auto progress = [&](const char* run,
+                            bool geo,
+                            int device,
+                            size_t job,
+                            const char* event) {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started);
+    std::fprintf(stderr,
+                 "[HOST-QUAL] run=%s phase=%s device=%d job=%zu event=%s "
+                 "elapsed_ms=%lld\n",
+                 run,
+                 geo ? "GEO" : "PHOTO",
+                 device,
+                 job,
+                 event,
+                 static_cast<long long>(elapsed.count()));
+    std::fflush(stderr);
+  };
+  const auto baseline = RunMultiGpuFixedCohortPhotoGeo(
+      images,
+      refs,
+      budget,
+      baseline_plan,
+      NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
+      32,
+      nullptr,
+      [&](bool geo, int device, size_t job, const char* event) {
+        progress("baseline", geo, device, job, event);
+      });
+  device.capacity_bytes = 32ull << 20;
+  const auto mixed = PlanSingleDeviceHostFixedCohort(
+      shapes, refs, declarations, device, 2ull << 30, disk, directory, "auto");
+  for (size_t phase = 0; phase < 2; ++phase) {
+    ASSERT_EQ(mixed.single_device_host->admission.records[phase][0].mode,
+              StereoVolumeMode::kStripFile);
+    ASSERT_EQ(mixed.single_device_host->admission.records[phase][1].mode,
+              StereoVolumeMode::kResidentPrivate);
+    EXPECT_GT(mixed.single_device_host->admission.records[phase][0].columns,
+              32);
+  }
+  auto changed_plan = mixed;
+  changed_plan.single_device_host->admission.records[0][0].mode =
+      StereoVolumeMode::kResidentPrivate;
+  EXPECT_THROW(RunMultiGpuFixedCohortPhotoGeo(
+                   images,
+                   refs,
+                   budget,
+                   changed_plan,
+                   NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
+                   32),
+               std::invalid_argument);
+  changed_plan = mixed;
+  changed_plan.single_device_host->admission.records[0][0].columns += 32;
+  EXPECT_THROW(RunMultiGpuFixedCohortPhotoGeo(
+                   images,
+                   refs,
+                   budget,
+                   changed_plan,
+                   NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
+                   32),
+               std::invalid_argument);
+  PatchMatch::Problem problem;
+  problem.images = &images;
+  problem.ref_image_idx = 0;
+  problem.src_image_idxs = refs[0].photo_sources;
+  StripStreamingOptions wrong_storage;
+  EXPECT_THROW(
+      (PatchMatchCuda(refs[0].photo_options,
+                      problem,
+                      32,
+                      mixed.single_device_host->admission.records[0][0],
+                      wrong_storage)),
+      std::invalid_argument);
+  std::array<bool, 2> photo_done{};
+  size_t joins = 0, banks = 0;
+  const auto result = RunMultiGpuFixedCohortPhotoGeo(
+      images,
+      refs,
+      budget,
+      mixed,
+      NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
+      32,
+      nullptr,
+      [&](bool geo, int device, size_t job, const char* event) {
+        progress("mixed", geo, device, job, event);
+        const std::string name(event);
+        if (name == "bank_ready") ++banks;
+        if (!geo && name == "output") photo_done.at(job) = true;
+        if (geo && name == "begin")
+          for (bool done : photo_done) EXPECT_TRUE(done);
+        if (name == "joined") ++joins;
+      });
+  EXPECT_EQ(joins, 2);
+  EXPECT_EQ(banks, 0);
+  ASSERT_EQ(result.geo.size(), baseline.geo.size());
+  for (size_t i = 0; i < result.geo.size(); ++i) {
+    for (const auto& pair :
+         {std::make_pair(&result.geo[i].depth.GetData(),
+                         &baseline.geo[i].depth.GetData()),
+          std::make_pair(&result.geo[i].normal.GetData(),
+                         &baseline.geo[i].normal.GetData())}) {
+      ASSERT_FALSE(pair.first->empty());
+      ASSERT_EQ(pair.first->size(), pair.second->size());
+      EXPECT_EQ(std::memcmp(pair.first->data(),
+                            pair.second->data(),
+                            pair.first->size() * sizeof(float)),
+                0);
+    }
+  }
+  EXPECT_THROW(RunMultiGpuFixedCohortPhotoGeo(
+                   images,
+                   refs,
+                   budget,
+                   mixed,
+                   NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
+                   32,
+                   nullptr,
+                   [](bool, int, size_t, const char* event) {
+                     if (std::string(event) == "output")
+                       throw std::runtime_error("injected output failure");
+                   }),
+               std::runtime_error);
+  std::atomic<bool> cancelled{true};
+  EXPECT_THROW(RunMultiGpuFixedCohortPhotoGeo(
+                   images,
+                   refs,
+                   budget,
+                   mixed,
+                   NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
+                   32,
+                   &cancelled),
+               std::runtime_error);
+}
+
 struct Fixture {
   std::vector<Image> images;
   std::vector<FixedCohortReference> refs;

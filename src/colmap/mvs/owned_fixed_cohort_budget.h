@@ -20,11 +20,21 @@ inline ByteCharge LimitFixedCohortAvailable(
     ByteCharge available,
     std::optional<uint64_t> host_cap = std::nullopt,
     std::optional<uint64_t> device_cap = std::nullopt) {
-  return {host_cap ? std::min(available.host, *host_cap) : available.host,
-          device_cap ? std::min(available.device, *device_cap) : available.device};
+  return {
+      host_cap ? std::min(available.host, *host_cap) : available.host,
+      device_cap ? std::min(available.device, *device_cap) : available.device};
 }
 
 enum class FixedCohortOutputPolicy { kPhotoAndGeo, kFinalGeoOnly };
+inline const char* FixedCohortOutputPolicyName(FixedCohortOutputPolicy policy) {
+  switch (policy) {
+    case FixedCohortOutputPolicy::kPhotoAndGeo:
+      return "photo_and_geo";
+    case FixedCohortOutputPolicy::kFinalGeoOnly:
+      return "final_geo_only";
+  }
+  throw std::invalid_argument("invalid fixed-cohort output policy");
+}
 // Explicit opt-in: global padding may cost more than private packing.
 enum class FixedCohortPhotoSourceStorage { kPrivate, kShared };
 

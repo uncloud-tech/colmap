@@ -172,6 +172,12 @@ def parse_args(argv):
         "--num-samples", type=int, choices=range(1, 16), default=15
     )
     parser.add_argument("--random-seed", type=int, default=0)
+    parser.add_argument(
+        "--output-policy",
+        choices=("final_geo_only", "photo_and_geo"),
+        default="final_geo_only",
+        help="retain final GEO maps only, or also the native PHOTO maps",
+    )
     parser.add_argument("--cache-size-gib", type=positive_float, default=1)
     parser.add_argument(
         "--max-image-size",
@@ -340,7 +346,7 @@ lower workload or free capacity (budgets cannot raise FREE)"""
             "--active_owners_ceiling",
             str(a.active_owners_ceiling),
             "--output_policy",
-            "final_geo_only",
+            a.output_policy,
             "--deadline_seconds",
             str(seconds),
             "--tile_threads",
@@ -359,8 +365,14 @@ lower workload or free capacity (budgets cannot raise FREE)"""
         ):
             argv += ["--" + name + "_bytes", str(getattr(a, name + "_bytes"))]
         stereo_devices = getattr(self, "stereo_devices", [])
-        multi_gpu = len(stereo_devices) > 1
-        if multi_gpu:
+        if len(stereo_devices) == 1:
+            argv += [
+                "--automatic_stereo_storage",
+                "1",
+                "--stereo_disk_capacity_bytes",
+                str(self.dense_disk_capacity),
+            ]
+        if stereo_devices:
             argv += [
                 "--stereo_devices",
                 ",".join(
@@ -371,10 +383,22 @@ lower workload or free capacity (budgets cannot raise FREE)"""
                     + str(
                         min(
                             int(d["available_device_bytes"]),
+                            getattr(
+                                self,
+                                "dense_device_capacity",
+                                int(d["available_device_bytes"]),
+                            ),
                             a.device_budget_bytes,
                         )
                         if a.device_budget_bytes is not None
-                        else int(d["available_device_bytes"])
+                        else min(
+                            int(d["available_device_bytes"]),
+                            getattr(
+                                self,
+                                "dense_device_capacity",
+                                int(d["available_device_bytes"]),
+                            ),
+                        )
                     )
                     for d in stereo_devices
                 ),
@@ -382,7 +406,9 @@ lower workload or free capacity (budgets cannot raise FREE)"""
         for name, value in (
             (
                 "host",
-                self.dense_host_capacity if multi_gpu else a.host_budget_bytes,
+                self.dense_host_capacity
+                if stereo_devices
+                else a.host_budget_bytes,
             ),
             ("device", a.device_budget_bytes),
         ):
@@ -595,9 +621,12 @@ resource admission gates remain authoritative""",
                     backend="CUDA SIFT exhaustive",
                     threads=self.args.threads,
                     gpu_index=self.args.gpu_index,
+                    random_seed=self.args.random_seed,
                 ),
                 mapping=dict(
-                    backend="incremental CPU Ceres", threads=self.args.threads
+                    backend="incremental CPU Ceres",
+                    threads=self.args.threads,
+                    random_seed=self.args.random_seed,
                 ),
                 undistortion=dict(threads=self.args.threads),
                 stereo=dict(
@@ -621,6 +650,7 @@ resource admission gates remain authoritative""",
                     source_cap=self.args.source_cap,
                     num_samples=self.args.num_samples,
                     random_seed=self.args.random_seed,
+                    output_policy=self.args.output_policy,
                     cache_size_gib=self.args.cache_size_gib,
                     tile=self.args.tile,
                     lookahead=not self.args.no_lookahead,
@@ -1094,6 +1124,8 @@ resize/fallback."""
             self.native(
                 "exhaustive_matcher",
                 *common,
+                "--TwoViewGeometry.random_seed",
+                a.random_seed,
                 "--FeatureMatching.gpu_index",
                 a.gpu_index,
                 "--FeatureMatching.num_threads",
@@ -1131,10 +1163,17 @@ resize/fallback."""
                 sparse,
                 "--Mapper.num_threads",
                 a.threads,
+                "--Mapper.random_seed",
+                a.random_seed,
                 "--Mapper.ba_gpu_index",
                 a.gpu_index,
                 "--Mapper.host_budget_bytes",
-                mapping_capacity,
+                # Serialize the explicit ceiling, not sampled availability.
+                # RSS accounting above and native admission remain bounded
+                # by current availability; no-cap behavior stays dynamic.
+                a.host_budget_bytes
+                if a.host_budget_bytes is not None
+                else mapping_capacity,
                 "--Mapper.policy_host_bytes",
                 a.loader_scratch_host_bytes
                 + a.process_host_bytes
@@ -1281,6 +1320,15 @@ resize/fallback."""
         for phase in ("photo", "geo"):
             jobs = self.graph["phases"][phase]["jobs"]
             if self.graph["phases"][phase]["requested_options"].get(
+                "random_seed"
+            ) != a.random_seed or any(
+                job["options"].get("random_seed") != a.random_seed
+                for job in jobs
+            ):
+                raise ValueError(
+                    "native dense plan changed the requested random seed"
+                )
+            if self.graph["phases"][phase]["requested_options"].get(
                 "max_image_size"
             ) != -1 or any(
                 job["options"].get("max_image_size") != -1 for job in jobs
@@ -1340,12 +1388,17 @@ resize/fallback."""
     def dense_stage(self):
         self.check_inputs(self.input_files)
         capacity = self.resources()
-        multi_gpu = len(getattr(self, "stereo_devices", [])) > 1
+        stereo_devices = getattr(self, "stereo_devices", [])
+        multi_gpu = len(stereo_devices) > 1
+        planned = bool(stereo_devices)
         assignments = None
-        if multi_gpu:
+        if planned:
             # Freeze the invocation host cap for both metadata planning and
             # execution. Native FREE checks may refuse, never silently replan.
             self.dense_host_capacity = capacity["host"]
+            if not multi_gpu:
+                self.dense_device_capacity = capacity["device"]
+                self.dense_disk_capacity = shutil.disk_usage(self.dense).free
             plan_path = self.assets / "multi-gpu-plan.json"
             arguments = self.dense_arguments()
             arguments[arguments.index("--report_path") + 1] = str(plan_path)
@@ -1353,18 +1406,36 @@ resize/fallback."""
                 "experimental_fixed_cohort", *arguments, "--prepare_only", "1"
             )
             self.multi_gpu_plan = json.loads(plan_path.read_bytes())
-            assignments = bind_multi_gpu_plan(
-                self.multi_gpu_plan, self.graph, self.stereo_devices
-            )
+            if multi_gpu:
+                assignments = bind_multi_gpu_plan(
+                    self.multi_gpu_plan,
+                    self.graph,
+                    self.stereo_devices,
+                    output_policy=self.args.output_policy,
+                )
+            else:
+                approved_capacity = arguments[
+                    arguments.index("--stereo_devices") + 1
+                ].rsplit(":", 1)[1]
+                assignments = bind_single_device_plan(
+                    self.multi_gpu_plan,
+                    self.graph,
+                    self.stereo_devices,
+                    self.identity["allocation_fingerprint"],
+                    approved_capacity,
+                    output_policy=self.args.output_policy,
+                )
             print(
                 (
-                    "Resolved multi-GPU phase groups/budgets (a"
-                    "pproval required): "
+                    "Resolved native stereo execution/storage plan: "
+                    if not multi_gpu
+                    else "Resolved multi-GPU phase groups/budgets "
+                    "(approval required): "
                 )
                 + json.dumps(self.multi_gpu_plan, sort_keys=True),
                 flush=True,
             )
-            if not self.args.yes:
+            if multi_gpu and not self.args.yes:
                 approve_plan(self.process)
             self.check_inputs(self.input_files)
             self.native(
@@ -1376,13 +1447,37 @@ resize/fallback."""
         else:
             self.native("experimental_fixed_cohort", *self.dense_arguments())
         self.report = json.loads((self.assets / "cohort.json").read_bytes())
-        if (
-            multi_gpu
-            and self.report.get("multi_gpu_plan") != self.multi_gpu_plan
-        ):
+        if planned and self.report.get("multi_gpu_plan") != self.multi_gpu_plan:
             raise ValueError(
                 "native multi-GPU placement differs from approved plan"
             )
+        if (
+            planned
+            and self.report.get("output_policy")
+            != self.multi_gpu_plan["output_policy"]
+        ):
+            raise ValueError("native output policy changed after approval")
+        if planned and not multi_gpu:
+            metadata_key = (
+                "snapshot"
+                if self.multi_gpu_plan["execution_kind"] == "resident_snapshot"
+                else "single_device_host"
+            )
+            if (
+                self.report.get("execution_kind")
+                != self.multi_gpu_plan["execution_kind"]
+                or self.report.get("effective_storage")
+                != self.multi_gpu_plan[metadata_key][
+                    "effective_photo_source_storage"
+                ]
+                or self.report.get("host_capacity_bytes")
+                != str(self.dense_host_capacity)
+                or self.report.get("device_capacity_bytes") != approved_capacity
+            ):
+                raise ValueError(
+                    "native single-device execution "
+                    "mode/storage/capacity changed"
+                )
         if (
             self.report.get("status") != "completed"
             or self.report.get("effective_backend")
@@ -1416,8 +1511,30 @@ resize/fallback."""
                     "native fixed-cohort effective " + phase + " plan changed"
                 )
         self.check_inputs(self.input_files)
-        # Publish only complete native outputs into the fresh undistorted tree.
-        # Native final_geo_only retains PHOTO until the final GEO drain.
+        if self.args.output_policy == "photo_and_geo":
+            if self.report.get("output_policy") != "photo_and_geo":
+                raise ValueError("native PHOTO retention policy changed")
+            # Retained PHOTO maps stay in cohort; fusion consumes GEO only.
+            # Validate every requested PHOTO body before publishing any GEO map.
+            for job in self.graph["phases"]["photo"]["jobs"]:
+                image = self.images[job["reference"]]
+                for kind, channels in (("depth_maps", 1), ("normal_maps", 3)):
+                    source = (
+                        self.workspace
+                        / "cohort/stereo"
+                        / kind
+                        / (image["name"] + ".photometric.bin")
+                    )
+                    validate_dense_map(
+                        source,
+                        image["width"],
+                        image["height"],
+                        channels,
+                        check=self.process.remaining,
+                    )
+        # Publish only complete GEO outputs into the fresh undistorted tree.
+        # Both policies keep the immutable PHOTO exchange through GEO drain.
+        pending_outputs = []
         for job in self.graph["phases"]["geo"]["jobs"]:
             name = self.images[job["reference"]]["name"]
             for kind in ("depth_maps", "normal_maps"):
@@ -1432,9 +1549,11 @@ resize/fallback."""
                     check=self.process.remaining,
                 )
                 target = self.dense / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                # link is an atomic no-clobber publication, not an overwrite.
-                os.link(source, target)
+                if target.exists() or target.is_symlink():
+                    raise ValueError(
+                        "native dense output publication would clobber"
+                    )
+                pending_outputs.append((source, target))
         fusion = self.dense / "stereo/fusion.cfg"
         names = [
             self.images[j["reference"]]["name"]
@@ -1451,10 +1570,78 @@ resize/fallback."""
             raise ValueError(
                 "fusion eligibility differs from complete GEO producers"
             )
+        # Validate the entire complete result and fusion eligibility before
+        # publishing the first map. Links remain atomic/no-clobber per path.
+        for source, target in pending_outputs:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.link(source, target)
 
 
-def bind_multi_gpu_plan(plan, graph, devices):
+def bind_single_device_plan(
+    plan, graph, devices, fingerprint, capacity, output_policy="final_geo_only"
+):
+    """Bind native policy/identity, never reproduce its memory inventory."""
+    if len(devices) != 1 or plan.get("allocation_fingerprint") != fingerprint:
+        raise ValueError("single-device native identity changed")
+    kind = plan.get("execution_kind")
+    if kind not in ("resident_snapshot", "single_device_host_exchange"):
+        raise ValueError("invalid single-device execution kind")
+    assignments = bind_multi_gpu_plan(
+        plan, graph, devices, output_policy=output_policy
+    )
+    key = "snapshot" if kind == "resident_snapshot" else "single_device_host"
+    metadata = plan.get(key)
+    if not isinstance(metadata, dict):
+        raise ValueError("single-device storage plan missing")
+    if metadata.get("output_policy") != plan["output_policy"]:
+        raise ValueError("single-device output policy changed")
+    storage = metadata.get("effective_photo_source_storage")
+    if storage not in ("private", "shared") or (
+        kind == "single_device_host_exchange" and storage != "private"
+    ):
+        raise ValueError("single-device source storage changed")
+    if [p.get("phase") for p in metadata.get("phases", [])] != ["photo", "geo"]:
+        raise ValueError("single-device phase records missing")
+    for placement, phase in zip(
+        plan["phases"], metadata["phases"], strict=True
+    ):
+        if placement["groups"][0].get("capacity_bytes") != str(capacity):
+            raise ValueError("single-device approved capacity changed")
+        expected = graph["phases"][phase["phase"]]["jobs"]
+        records = phase.get("records", [])
+        if len(records) != len(expected):
+            raise ValueError("single-device reference records changed")
+        for record, job in zip(records, expected, strict=True):
+            options = job["options"]
+            if (
+                record.get("reference") != job["reference"]
+                or record.get("sources") != job["sources"]
+            ):
+                raise ValueError("single-device scientific read-set changed")
+            for policy in ("owned_cuda_graphs", "owned_async_pool"):
+                if type(record.get(policy)) is not bool or record[
+                    policy
+                ] != options.get(policy, False):
+                    raise ValueError("single-device execution policy changed")
+            mode = record.get("volume_mode")
+            if mode not in ("resident_private", "strip_file") or (
+                kind == "resident_snapshot" and mode != "resident_private"
+            ):
+                raise ValueError("single-device volume mode changed")
+            if mode == "strip_file" and record["owned_cuda_graphs"]:
+                raise ValueError(
+                    "graphs conflict with selected strip reference"
+                )
+    return assignments
+
+
+def bind_multi_gpu_plan(plan, graph, devices, output_policy="final_geo_only"):
     """Bind exact scientific inputs plus unique approved phase placement."""
+    if (
+        output_policy not in ("final_geo_only", "photo_and_geo")
+        or plan.get("output_policy") != output_policy
+    ):
+        raise ValueError("native output policy changed")
     if plan.get("schema_version") != 1:
         raise ValueError("invalid multi-GPU plan version")
     expected = []

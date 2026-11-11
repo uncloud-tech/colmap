@@ -67,6 +67,14 @@ void TestDensePlanOptions() {
   Check(json.find("\"geom_consistency\":false") != std::string::npos);
   Check(json.find("\"depth_min\":-1") != std::string::npos);
   Check(json.find("\"gpu_index\":\"-1\"") != std::string::npos);
+  Check(json.find("\"owned_cuda_graphs\":false") != std::string::npos);
+  Check(json.find("\"owned_async_pool\":false") != std::string::npos);
+  options.owned_cuda_graphs = true;
+  options.owned_async_pool = true;
+  const auto policies = dense_plan::OptionsJson(options).Dump();
+  Check(policies != json);
+  Check(policies.find("\"owned_cuda_graphs\":true") != std::string::npos);
+  Check(policies.find("\"owned_async_pool\":true") != std::string::npos);
 }
 void TestDensePlanConcurrency() {
   Check(dense_plan::ConcurrencySupportJson(true, 7).Dump() ==

@@ -6,7 +6,9 @@
 // Requires static COLMAP libraries so solver-object relocations are
 // intercepted.
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
+#include <functional>
 #include <map>
 #include <stdexcept>
 #include <tuple>
@@ -32,6 +34,27 @@ struct Capture {
   bool fault_drained = false, release_before_fault_drain = false;
   cudaStream_t fault_stream = nullptr;
   cudaEvent_t fault_event = nullptr;
+  // Native HOST qualification arms capture on its sole owner thread. Match a
+  // strip transfer, not constructor upload or final full-map readback.
+  std::atomic<bool>* cancel_after_submission = nullptr;
+  size_t copy_width = 0, copy_height = 0;
+  cudaMemcpyKind copy_kind = cudaMemcpyDefault;
+  std::function<void()> on_submission;
+  size_t pitched_calls = 0, fail_pitched_call = 0;
+  size_t allocation_fault = 0, last_synchronize = 0;
+
+  bool MatchesCopy(size_t width, size_t height, cudaMemcpyKind kind) const {
+    return (fail_copy_after_submission || cancel_after_submission) &&
+           !fault_submitted && (!copy_width || copy_width == width) &&
+           (!copy_height || copy_height == height) &&
+           (copy_kind == cudaMemcpyDefault || copy_kind == kind);
+  }
+  void Submitted(cudaStream_t stream) {
+    fault_submitted = true;
+    fault_stream = stream;
+    if (on_submission) on_submission();
+    if (cancel_after_submission) cancel_after_submission->store(true);
+  }
 
   void Add(Kind kind,
            void* pointer,
@@ -43,7 +66,9 @@ struct Capture {
         {kind, pointer, row, rows, layers, pitch, ++sequence});
   }
   void BeforeRelease() {
-    if (fault_submitted && !fault_drained) release_before_fault_drain = true;
+    if ((fault_submitted && !fault_drained) ||
+        (allocation_fault && last_synchronize <= allocation_fault))
+      release_before_fault_drain = true;
   }
   void Release(void* pointer,
                bool async = false,
@@ -65,7 +90,7 @@ struct Capture {
     invalid_release = true;
   }
   void Synchronized(cudaStream_t stream) {
-    ++sequence;
+    last_synchronize = ++sequence;
     if (fault_submitted && stream == fault_stream) fault_drained = true;
     for (auto& allocation : allocations)
       if (allocation.free_pending && allocation.pending_free == stream) {
@@ -138,6 +163,14 @@ cudaError_t CUDARTAPI __wrap_cudaMallocPitch(void** pointer,
                                              size_t rows) {
   using namespace colmap::mvs::owned::strip_test;
   Pause pause;
+  if (pause.capture &&
+      ++pause.capture->pitched_calls == pause.capture->fail_pitched_call) {
+    // A real admitted constructor reaches this application CUDA request after
+    // owning earlier staging buffers and its reserved/unlinked scratch file.
+    pause.capture->allocation_fault = ++pause.capture->sequence;
+    if (pause.capture->on_submission) pause.capture->on_submission();
+    return cudaErrorMemoryAllocation;
+  }
   const auto result = __real_cudaMallocPitch(pointer, pitch, row, rows);
   if (result == cudaSuccess && pause.capture)
     pause.capture->Add(Kind::kPitched, *pointer, row, rows, 1, *pitch);
@@ -199,14 +232,12 @@ cudaError_t CUDARTAPI __wrap_cudaMemcpy2DAsync(void* dst,
   const auto result = __real_cudaMemcpy2DAsync(
       dst, dst_pitch, src, src_pitch, width, height, kind, stream);
   if (result == cudaSuccess && pause.capture &&
-      pause.capture->fail_copy_after_submission &&
-      !pause.capture->fault_submitted) {
-    // Record a real event behind real queued work, then make the caller throw.
+      pause.capture->MatchesCopy(width, height, kind)) {
+    // Record behind actual queued work before faulting or requesting cancel.
     const auto recorded = cudaEventRecord(pause.capture->fault_event, stream);
     if (recorded != cudaSuccess) return recorded;
-    pause.capture->fault_submitted = true;
-    pause.capture->fault_stream = stream;
-    return cudaErrorInvalidValue;
+    pause.capture->Submitted(stream);
+    if (pause.capture->fail_copy_after_submission) return cudaErrorInvalidValue;
   }
   return result;
 }
@@ -278,15 +309,13 @@ cudaError_t CUDARTAPI __wrap_cudaMemcpy2DAsync_ptsz(void* dst,
   const auto result = __real_cudaMemcpy2DAsync_ptsz(
       dst, dst_pitch, src, src_pitch, width, height, kind, stream);
   if (result == cudaSuccess && pause.capture &&
-      pause.capture->fail_copy_after_submission &&
-      !pause.capture->fault_submitted) {
-    // Record a real event behind real queued work, then make the caller throw.
+      pause.capture->MatchesCopy(width, height, kind)) {
+    // Preserve PTDS event semantics for this actual queued transfer as well.
     const auto recorded =
         cudaEventRecord_ptsz(pause.capture->fault_event, stream);
     if (recorded != cudaSuccess) return recorded;
-    pause.capture->fault_submitted = true;
-    pause.capture->fault_stream = stream;
-    return cudaErrorInvalidValue;
+    pause.capture->Submitted(stream);
+    if (pause.capture->fail_copy_after_submission) return cudaErrorInvalidValue;
   }
   return result;
 }

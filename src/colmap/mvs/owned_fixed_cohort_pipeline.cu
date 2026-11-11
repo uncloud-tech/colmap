@@ -5,12 +5,11 @@
 
 #if !defined(COLMAP_HIP_ENABLED)
 #include "colmap/mvs/owned_geo_photo_input.h"
+#include "colmap/mvs/owned_inventory_cuda_driver.h"
 #include "colmap/mvs/owned_pair_run.h"
 #include "colmap/mvs/owned_tile.h"
 #include "colmap/mvs/patch_match_cuda_owned.h"
 #include "colmap/mvs/patch_match_execution.h"
-
-#include "colmap/mvs/owned_inventory_cuda_driver.h"
 
 #include <algorithm>
 #include <cmath>
@@ -72,15 +71,19 @@ std::vector<FixedCohortDeviceObservation> ObserveFixedCohortDevices(
   guard.Check();
   InventoryCudaDriver driver;
   const auto init = driver.Lookup<decltype(&cuInit)>("cuInit");
-  const auto get_current = driver.Lookup<decltype(&cuCtxGetCurrent)>("cuCtxGetCurrent");
-  const auto set_current = driver.Lookup<decltype(&cuCtxSetCurrent)>("cuCtxSetCurrent");
-  const auto error_string = driver.Lookup<decltype(&cuGetErrorString)>("cuGetErrorString");
+  const auto get_current =
+      driver.Lookup<decltype(&cuCtxGetCurrent)>("cuCtxGetCurrent");
+  const auto set_current =
+      driver.Lookup<decltype(&cuCtxSetCurrent)>("cuCtxSetCurrent");
+  const auto error_string =
+      driver.Lookup<decltype(&cuGetErrorString)>("cuGetErrorString");
   const auto driver_query = [error_string](CUresult status) {
     if (status == CUDA_SUCCESS) return;
     const char* reason = nullptr;
     (void)error_string(status, &reason);
-    throw std::runtime_error(std::string("CUDA inventory context query/restore failed: ") +
-                             (reason ? reason : "unknown driver error"));
+    throw std::runtime_error(
+        std::string("CUDA inventory context query/restore failed: ") +
+        (reason ? reason : "unknown driver error"));
   };
   const auto initialized = init(0);
   if (initialized == CUDA_ERROR_NO_DEVICE) return {};
@@ -102,9 +105,10 @@ std::vector<FixedCohortDeviceObservation> ObserveFixedCohortDevices(
       if (!restored) {
         const auto status = Restore();
         if (status != CUDA_SUCCESS)
-          std::fprintf(stderr,
-                       "CUDA inventory: context restoration failed during cleanup: %d\n",
-                       static_cast<int>(status));
+          std::fprintf(
+              stderr,
+              "CUDA inventory: context restoration failed during cleanup: %d\n",
+              static_cast<int>(status));
       }
     }
   } restore{previous, set_current};
@@ -156,11 +160,45 @@ std::vector<FixedCohortDeviceObservation> ObserveFixedCohortDevices(
 
 FixedCohortResult PreparedFixedCohortWorkspace::Run(
     const std::atomic<bool>* cancel) const {
+  if (multi_gpu_plan_ && multi_gpu_plan_->snapshot_budget) {
+    ValidateMultiGpuFixedCohortPlan(
+        images_, references_, budget_, *multi_gpu_plan_);
+    Require(multi_gpu_plan_->snapshot_inventory->tile_threads == tile_threads_,
+            "snapshot tile policy changed");
+    uint64_t pixels = 0;
+    for (const auto& image : images_)
+      pixels = CheckedAdd(pixels, image.GetBitmap().NumBytes());
+    CheckMultiGpuFixedCohortAvailable(*multi_gpu_plan_, pixels);
+    SnapshotStereoInventory inventory;
+    inventory.budget = budget_;
+    inventory.records = multi_gpu_plan_->snapshot_inventory->admission.records;
+    return RunFixedCohortPhotoGeo(images_,
+                                  references_,
+                                  budget_,
+                                  capacity_,
+                                  deadline_,
+                                  dispatch_,
+                                  tile_threads_,
+                                  cancel,
+                                  {},
+                                  &inventory);
+  }
   if (multi_gpu_plan_)
-    return RunMultiGpuFixedCohortPhotoGeo(images_, references_, budget_, *multi_gpu_plan_,
-                                         deadline_, tile_threads_, cancel);
-  return RunFixedCohortPhotoGeo(images_, references_, budget_, capacity_,
-                              deadline_, dispatch_, tile_threads_, cancel);
+    return RunMultiGpuFixedCohortPhotoGeo(images_,
+                                          references_,
+                                          budget_,
+                                          *multi_gpu_plan_,
+                                          deadline_,
+                                          tile_threads_,
+                                          cancel);
+  return RunFixedCohortPhotoGeo(images_,
+                                references_,
+                                budget_,
+                                capacity_,
+                                deadline_,
+                                dispatch_,
+                                tile_threads_,
+                                cancel);
 }
 
 FixedCohortResult RunFixedCohortPhotoGeo(
@@ -172,10 +210,35 @@ FixedCohortResult RunFixedCohortPhotoGeo(
     PairDispatch dispatch,
     int tile_threads,
     const std::atomic<bool>* cancel,
-    std::function<void(bool, size_t, int, int)> sweep_observer) {
+    std::function<void(bool, size_t, int, int)> sweep_observer,
+    const SnapshotStereoInventory* admission) {
   // Small metadata validation only before the envelope is accepted; no pixel
   // clone, context query, adapter or solver allocation precedes this boundary.
   ValidateOwnedTileThreads(tile_threads);
+  if (admission) {
+    for (size_t phase = 0; phase < 2; ++phase) {
+      Require(admission->records[phase].size() == references.size(),
+              "snapshot record count changed");
+      for (size_t job = 0; job < references.size(); ++job) {
+        const auto& ref = references[job];
+        const auto& image = images.at(ref.reference_image_idx);
+        const auto& options = phase ? ref.geo_options : ref.photo_options;
+        const auto& record = admission->records[phase][job];
+        ValidateStereoExecutionBinding(
+            record,
+            ref.reference_image_idx,
+            image.GetWidth(),
+            image.GetHeight(),
+            phase ? ref.geo_sources : ref.photo_sources,
+            phase,
+            {options.filter && options.num_iterations > 0,
+             options.owned_cuda_graphs,
+             options.owned_async_pool});
+        Require(record.mode == StereoVolumeMode::kResidentPrivate,
+                "snapshot record volume mode changed");
+      }
+    }
+  }
   Require(dispatch == PairDispatch::kSerial || dispatch == PairDispatch::kPair,
           "fixed-cohort invalid dispatch");
   Require((dispatch == PairDispatch::kSerial ? budget.max_active_owners == 1
@@ -299,27 +362,37 @@ FixedCohortResult RunFixedCohortPhotoGeo(
                                          result.actual_snapshot_bytes,
                                          result.actual_geo_staging_bytes);
         }
-        PatchMatchCuda solver(options, problem, tile_threads, std::move(input));
+        std::unique_ptr<PatchMatchCuda> solver;
+        if (admission)
+          solver = std::make_unique<PatchMatchCuda>(
+              options,
+              problem,
+              tile_threads,
+              std::move(input),
+              admission->records[geo].at(owner));
+        else
+          solver = std::make_unique<PatchMatchCuda>(
+              options, problem, tile_threads, std::move(input));
         if (options.owned_cuda_graphs)
-          solver.SetGraphCoordinator(graphs, owner);
+          solver->SetGraphCoordinator(graphs, owner);
         if (cancel || sweep_observer)
-          solver.SetSweepObserver([&](int iteration, int sweep) {
+          solver->SetSweepObserver([&](int iteration, int sweep) {
             if (sweep_observer) sweep_observer(geo, owner, iteration, sweep);
             check();
           });
         coordinator.ReadyAndWait(owner);
         check();
-        solver.Run();
+        solver->Run();
         check();
         coordinator.SolverDone(owner);
         coordinator.BeginOutput(owner);
         if (geo ||
             budget.output_policy == FixedCohortOutputPolicy::kPhotoAndGeo) {
           auto& maps = geo ? result.geo[owner] : result.photo[owner];
-          maps.depth = solver.GetDepthMap();
-          maps.normal = solver.GetNormalMap();
+          maps.depth = solver->GetDepthMap();
+          maps.normal = solver->GetNormalMap();
         }
-        if (!geo) snapshots[owner] = solver.SnapshotPhotoOutput();
+        if (!geo) snapshots[owner] = solver->SnapshotPhotoOutput();
         check();
         coordinator.EndOutput(owner);
         // solver drains/destructs here, before rolling retirement and join.

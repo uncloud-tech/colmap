@@ -2,6 +2,7 @@
 #include "colmap/mvs/owned_strip_storage.h"
 
 #include <cassert>
+#include <cerrno>
 #include <csignal>
 #include <cstring>
 #include <iostream>
@@ -17,17 +18,31 @@
 #include <unistd.h>
 static size_t io_chunk = SIZE_MAX;
 static bool io_eof = false;
+static int io_error = 0;
+static std::atomic<bool>* cancel_after_io = nullptr;
 extern "C" ssize_t __real_pread(int, void*, size_t, off_t);
 extern "C" ssize_t __real_pwrite(int, const void*, size_t, off_t);
 extern "C" ssize_t __wrap_pread(int fd, void* data, size_t size, off_t offset) {
   if (io_eof) return 0;
-  return __real_pread(fd, data, std::min(size, io_chunk), offset);
+  if (io_error) {
+    errno = std::exchange(io_error, 0);
+    return -1;
+  }
+  const auto n = __real_pread(fd, data, std::min(size, io_chunk), offset);
+  if (cancel_after_io) cancel_after_io->store(true);
+  return n;
 }
 extern "C" ssize_t __wrap_pwrite(int fd,
                                  const void* data,
                                  size_t size,
                                  off_t offset) {
-  return __real_pwrite(fd, data, std::min(size, io_chunk), offset);
+  if (io_error) {
+    errno = std::exchange(io_error, 0);
+    return -1;
+  }
+  const auto n = __real_pwrite(fd, data, std::min(size, io_chunk), offset);
+  if (cancel_after_io) cancel_after_io->store(true);
+  return n;
 }
 #endif
 
@@ -70,6 +85,11 @@ int main() {
   Refuses([] { ValidateStripColumns(0, 32); });
   Refuses([] { ValidateStripColumns(32, 7); });
   const size_t files = Files();
+  const auto descriptors = [] {
+    return std::distance(std::filesystem::directory_iterator("/proc/self/fd"),
+                         std::filesystem::directory_iterator{});
+  };
+  const auto initial_descriptors = descriptors();
   {
     // Independent literal CudaRotate mapping: canonical [1 2 3;4 5 6].
     StripFileStore store(".", 3, 2, 1, true, 54);
@@ -108,6 +128,29 @@ int main() {
     io_eof = true;
     Refuses([&] { store.Read(StripPlane::kCost, 0, 0, 3, output); });
     io_eof = false;
+    io_error = EINTR;
+    store.Write(StripPlane::kCost, 0, 0, 3, input);
+    io_error = EINTR;
+    store.Read(StripPlane::kCost, 0, 0, 3, output);
+    assert(std::memcmp(input, output, sizeof(input)) == 0);
+    io_error = EIO;
+    Refuses([&] { store.Write(StripPlane::kCost, 0, 0, 3, input); });
+    io_error = EIO;
+    Refuses([&] { store.Read(StripPlane::kCost, 0, 0, 3, output); });
+  }
+  {
+    std::atomic<bool> stop{false};
+    StripFileStore store(".", 3, 2, 1, false, 48, &stop);
+    float tile[6] = {};
+    io_chunk = 3;
+    cancel_after_io = &stop;
+    Refuses([&] { store.Write(StripPlane::kCost, 0, 0, 3, tile); });
+    assert(store.BytesWritten() == 3);
+    stop = false;
+    Refuses([&] { store.Read(StripPlane::kCost, 0, 0, 3, tile); });
+    assert(store.BytesRead() == 3);
+    cancel_after_io = nullptr;
+    io_chunk = SIZE_MAX;
   }
 #endif
   // More than three aligned strips plus a tail in both orientations. Write
@@ -199,6 +242,7 @@ int main() {
     Refuses([] { StripFileStore bad("/dev/shm", 3, 2, 1, false, 100); });
 #endif
   assert(Files() == files);
+  assert(descriptors() == initial_descriptors);
   std::cout
       << "strip storage: real spill/reload, 4 orientations, ragged strips, "
          "bounds, exhaustion, cancellation and unlink passed\n";

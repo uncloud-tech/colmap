@@ -93,6 +93,45 @@ Controller SIGKILL cannot be handled: use an external service/cgroup for
 controller-death containment or hard memory enforcement. Native children are
 trusted not to detach from their process groups.
 
+## Random seed and repeatability
+
+`--random-seed` defaults to `0`. The same value is explicitly passed to matching's
+geometric verification (`TwoViewGeometry.random_seed`), incremental reconstruction
+(`Mapper.random_seed`), and dense planning/execution. Matching and mapping no
+longer silently use their native unseeded defaults while only stereo receives the
+requested seed. The approval plan records the matching, mapping and stereo seeds;
+a dense plan with a different requested or per-job seed refuses before execution.
+Native command defaults outside this frontend are unchanged.
+
+A nonnegative value selects a fixed seed. Explicit `--random-seed -1` retains the
+native unseeded matching/mapping behavior and legacy dense initialization; it is
+not a seeded-repeatability configuration. A fixed seed does not by itself prove
+byte-identical results across builds, devices or threading configurations. Exact
+repeatability requires comparison of actual scientific outputs from fresh runs
+with identical inputs, executable, options and hardware. Do not replace an exact
+comparison with rounded values or numerical tolerances.
+
+## Retaining PHOTO maps for exact comparisons
+
+The default `--output-policy final_geo_only` is unchanged. Explicit
+`--output-policy photo_and_geo` requests the existing native retention policy and
+is recorded in approval and bound to native planning/execution. It retains
+`*.photometric.bin` depth/normal maps under `cohort/stereo/`; final GEO maps are
+published under `dense/stereo/` and remain the fusion inputs. Every requested
+PHOTO map must have its expected shape/extent and finite float32 values before
+any GEO map is published. Missing or invalid retained maps refuse completion.
+
+Retaining intermediate maps adds storage and I/O. Single-device native admission
+accounts for the requested policy's output disk and memory; this is not a
+physical-fit guarantee or a numerical option change. Multi-device execution
+currently lacks output-disk admission for retained maps: insufficient disk can
+fail late with partial outputs, so its output-space qualification remains open.
+Preserve the native plan, ordered PHOTO/GEO read sets, phase evidence and retained
+bodies for comparisons. A post-run file hash is not, by itself, a measurement of
+what was read at a particular earlier instant: immutable-exchange/source bindings
+and the complete PHOTO-before-GEO barrier must also be established. Compare the
+actual retained bytes, not just counts, dimensions or policy labels.
+
 ## Multi-device stereo
 
 The default approval preview discloses the stereo device ordinals/UUIDs separately

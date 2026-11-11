@@ -12,7 +12,9 @@
 #include "colmap/mvs/owned_input_bank.h"
 #include "colmap/mvs/owned_prng.h"
 #include "colmap/mvs/owned_prng_seed.h"
+#include "colmap/mvs/owned_rotation_memory.h"
 #include "colmap/mvs/owned_source_cache.h"
+#include "colmap/mvs/owned_stereo_admission.h"
 #include "colmap/mvs/owned_texture_row_batch.h"
 #include "colmap/mvs/patch_match_cuda_owned.h"
 #include "colmap/mvs/patch_match_execution.h"
@@ -1741,15 +1743,46 @@ PatchMatchCuda::PatchMatchCuda(const PatchMatchOptions& options,
                      nullptr,
                      std::make_unique<StripStreamingOptions>(streaming)) {}
 
+PatchMatchCuda::PatchMatchCuda(const PatchMatchOptions& options,
+                               const PatchMatch::Problem& problem,
+                               int tile,
+                               const StereoExecutionRecord& admission,
+                               const StripStreamingOptions& storage)
+    : PatchMatchCuda(options,
+                     problem,
+                     tile,
+                     nullptr,
+                     admission.mode == StereoVolumeMode::kStripFile
+                         ? std::make_unique<StripStreamingOptions>(storage)
+                         : nullptr,
+                     std::make_shared<const StereoExecutionRecord>(admission)) {
+}
+
+PatchMatchCuda::PatchMatchCuda(const PatchMatchOptions& options,
+                               const PatchMatch::Problem& problem,
+                               int tile,
+                               std::shared_ptr<const GeoPhotoInput> input,
+                               const StereoExecutionRecord& admission)
+    : PatchMatchCuda(options,
+                     problem,
+                     tile,
+                     std::move(input),
+                     nullptr,
+                     std::make_shared<const StereoExecutionRecord>(admission),
+                     false) {}
+
 PatchMatchCuda::PatchMatchCuda(
     const PatchMatchOptions& options,
     const PatchMatch::Problem& problem,
     int owned_tile_threads,
     std::shared_ptr<const GeoPhotoInput> geo_photo_input,
-    std::unique_ptr<StripStreamingOptions> streaming)
+    std::unique_ptr<StripStreamingOptions> streaming,
+    std::shared_ptr<const StereoExecutionRecord> admission,
+    bool host_exchange)
     : options_(options),
       owned_tile_threads_(ValidateOwnedTileThreads(owned_tile_threads)),
       streaming_(std::move(streaming)),
+      admission_(std::move(admission)),
       problem_(problem),
       photo_output_camera_(problem.images->at(problem.ref_image_idx)),
       geo_photo_input_(std::move(geo_photo_input)),
@@ -1761,6 +1794,33 @@ PatchMatchCuda::PatchMatchCuda(
                               options_.window_step,
                               options_.geom_consistency,
                               true);
+  if (admission_) {
+    const auto& ref = problem_.images->at(problem_.ref_image_idx);
+    ValidateStereoExecutionBinding(
+        *admission_,
+        problem_.ref_image_idx,
+        ref.GetWidth(),
+        ref.GetHeight(),
+        problem_.src_image_idxs,
+        options_.geom_consistency,
+        {options_.filter && options_.num_iterations > 0,
+         options_.owned_cuda_graphs,
+         options_.owned_async_pool});
+    if (host_exchange && (problem_.resident_bank ||
+                          problem_.photo_grayscale.bank || geo_photo_input_))
+      throw std::invalid_argument(
+          "admitted HOST factory forbids borrowed banks and snapshots");
+    if (!host_exchange &&
+        admission_->mode != StereoVolumeMode::kResidentPrivate)
+      throw std::invalid_argument("snapshot factory cannot consume strip mode");
+    if (streaming_ &&
+        (streaming_->columns != admission_->columns ||
+         streaming_->host_staging_bytes != admission_->staging_host_bytes ||
+         streaming_->device_staging_bytes != admission_->staging_device_bytes ||
+         streaming_->disk_bytes != admission_->scratch_disk_bytes))
+      throw std::invalid_argument(
+          "admitted HOST factory strip storage binding changed");
+  }
   if (streaming_) {
     ValidateStripColumns(streaming_->columns, owned_tile_threads_);
     if (options_.owned_cuda_graphs || problem_.resident_bank ||
@@ -2456,30 +2516,12 @@ void PatchMatchCuda::InitRefImage() {
   ref_width_ = ref_image.GetWidth();
   ref_height_ = ref_image.GetHeight();
 
-  rotation_layout_ = BuildOwnedBoundaryRotationLayout(
+  rotation_layout_ = BuildOwnedExecutionRotationLayout(
       ref_width_,
       ref_height_,
       problem_.src_image_idxs.size(),
-      options_.filter && options_.num_iterations > 0);
-
-  if (streaming_) {
-    auto& slots = rotation_layout_.slot_layouts;
-    slots.erase(
-        std::remove_if(slots.begin(),
-                       slots.end(),
-                       [&](const auto& slot) {
-                         const bool scaled =
-                             slot.role == RotationRole::kCost ||
-                             slot.role == RotationRole::kSelectionCurrent ||
-                             slot.role == RotationRole::kSelectionPrevious ||
-                             slot.role == RotationRole::kMask;
-                         if (scaled)
-                           rotation_layout_.logical_bytes -=
-                               slot.requested_span_bytes;
-                         return scaled;
-                       }),
-        slots.end());
-  }
+      options_.filter && options_.num_iterations > 0,
+      static_cast<bool>(streaming_));
 
   // Upload to device and filter.
   ref_image_.Set(0, std::make_unique<GpuMatRefImage>(ref_width_, ref_height_));
@@ -2933,6 +2975,11 @@ void PatchMatchCuda::InitWorkspaceMemory() {
 void PatchMatchCuda::InitRotationStorage() {
   static_assert(sizeof(curandState) == 48, "Rotation layout requires XORWOW48");
   const size_t sources = problem_.src_image_idxs.size();
+  initialization_prng_pitch_ = init_rand_state_map_->GetPitch();
+  if (admission_ &&
+      initialization_prng_pitch_ > admission_->initialization_prng_pitch)
+    throw std::invalid_argument(
+        "initialization PRNG pitch exceeds admitted plane");
   // Keep original full-image initialization (including PHOTO rejection draws)
   // and compact only AFTER it has completed. Interior states never feed a
   // sweep.
@@ -2978,12 +3025,14 @@ void PatchMatchCuda::InitRotationStorage() {
 
 void PatchMatchCuda::EmitRotationAllocations() {
   THROW_CHECK_GE(problem_.ref_image_idx, 0);
+  std::vector<RotationAllocationRecord> returned;
   const auto emit = [&](const RotationSlotLayout& slot, const auto& mat) {
     THROW_CHECK_EQ(slot.width, mat.GetWidth());
     THROW_CHECK_EQ(slot.height, mat.GetHeight());
     THROW_CHECK_EQ(slot.depth, mat.GetDepth());
     THROW_CHECK_EQ(slot.element_bytes, sizeof(*mat.GetPtr()));
     const auto record = MakeRotationAllocationRecord(slot, mat.GetPitch());
+    if (admission_) returned.push_back(record);
     std::ostringstream line;
     line.imbue(std::locale::classic());
     line << "OWNED_ROTATION_ALLOCATION reference=" << problem_.ref_image_idx
@@ -3034,6 +3083,16 @@ void PatchMatchCuda::EmitRotationAllocations() {
         emit(slot, *global_workspace_);
         break;
     }
+  }
+  if (admission_) {
+    std::array<uint64_t, 4> staging{};
+    if (streaming_)
+      staging = {strip_cost_->GetPitch(),
+                 strip_previous_->GetPitch(),
+                 strip_current_->GetPitch(),
+                 strip_mask_ ? strip_mask_->GetPitch() : 0};
+    ValidateStereoReturnedPitches(
+        *admission_, returned, initialization_prng_pitch_, staging);
   }
 }
 

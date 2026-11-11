@@ -185,10 +185,9 @@ struct StripFileStore::Impl {
         if (write) Io(true, row.data(), count, offset);
       }
     }
-    if (write && fdatasync(fd)) Fail("sync");
-    // Advice is not a memory guarantee; aggregate cgroup cache is measured by
-    // qualification. Synchronous writeback bounds dirty data to this transfer.
-    (void)posix_fadvise(fd, 0, off_t(bytes), POSIX_FADV_DONTNEED);
+    // This unlinked scratch file is not a durable checkpoint: pwrite/pread
+    // provide coherence without per-transfer writeback or cache eviction.
+    // Admission charges the full file size to aggregate host page cache.
 #else
     (void)element;
     (void)write;

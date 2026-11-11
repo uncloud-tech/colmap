@@ -46,6 +46,7 @@ COLMAP_ADD_LIBRARY(
     SRCS
         owned_prng_seed.h
         owned_strip_storage.h owned_strip_storage.cc
+        owned_stereo_admission.h owned_stereo_admission.cc
         advancing_front_meshing.h advancing_front_meshing.cc
         consistency_graph.h consistency_graph.cc
         delaunay_meshing.h delaunay_meshing.cc
@@ -654,6 +655,24 @@ if(TESTS_ENABLED)
         target_compile_options(colmap_mvs_owned_strip_test_identity_test PRIVATE -UNDEBUG)
     endif()
     add_test(NAME "mvs/owned_strip_test_identity_test" COMMAND colmap_mvs_owned_strip_test_identity_test)
+    add_executable(colmap_mvs_owned_stereo_admission_test
+        owned_stereo_admission_test.cc owned_stereo_admission.cc
+        owned_strip_storage.cc)
+    target_include_directories(colmap_mvs_owned_stereo_admission_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    if(MSVC)
+        target_compile_options(colmap_mvs_owned_stereo_admission_test PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(colmap_mvs_owned_stereo_admission_test PRIVATE -UNDEBUG)
+    endif()
+    add_test(NAME "mvs/owned_stereo_admission_test" COMMAND colmap_mvs_owned_stereo_admission_test)
+    add_executable(colmap_mvs_single_device_host_plan_test single_device_host_plan_test.cc)
+    target_link_libraries(colmap_mvs_single_device_host_plan_test PRIVATE colmap_mvs)
+    if(MSVC)
+        target_compile_options(colmap_mvs_single_device_host_plan_test PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(colmap_mvs_single_device_host_plan_test PRIVATE -UNDEBUG)
+    endif()
+    add_test(NAME "mvs/single_device_host_plan_test" COMMAND colmap_mvs_single_device_host_plan_test)
     add_executable(colmap_mvs_owned_strip_storage_test
         owned_strip_storage_test.cc owned_strip_storage.cc)
     target_include_directories(colmap_mvs_owned_strip_storage_test PRIVATE "${PROJECT_SOURCE_DIR}/src")

@@ -47,6 +47,36 @@ size_t NumRegisteredPosePriors(const std::vector<PosePrior>& pose_priors,
 
 }  // namespace
 
+namespace internal {
+
+StructureLessAbsolutePoseEstimationOptions
+BuildStructureLessAbsolutePoseOptions(
+    const IncrementalMapper::Options& options) {
+  StructureLessAbsolutePoseEstimationOptions abs_pose_options;
+  // Structure-less resectioning uses epipolar Sampson error, so we are stricter
+  // in accepting 2D-2D correspondences inliers.
+  abs_pose_options.ransac_options.max_error = 0.5 * options.abs_pose_max_error;
+  abs_pose_options.ransac_options.min_inlier_ratio =
+      options.abs_pose_min_inlier_ratio;
+  // As opposed to structure-based resectioning, structure-less resectioning
+  // is based on an expensive minimal solver, so we use multi-threading, which
+  // leads to a significant speedup based on benchmarking.
+  abs_pose_options.ransac_options.num_threads = options.num_threads;
+  abs_pose_options.ransac_options.random_seed = options.random_seed;
+  return abs_pose_options;
+}
+
+EstimateTriangulationOptions BuildStructureLessTriangulationOptions(
+    const IncrementalMapper::Options& options) {
+  EstimateTriangulationOptions tri_options;
+  tri_options.min_tri_angle = options.filter_min_tri_angle;
+  tri_options.ransac_options.max_error = options.abs_pose_max_error;
+  tri_options.ransac_options.random_seed = options.random_seed;
+  return tri_options;
+}
+
+}  // namespace internal
+
 bool IncrementalMapper::Options::Check() const {
   CHECK_OPTION_GT(init_min_num_inliers, 0);
   CHECK_OPTION_GT(init_max_error, 0.0);
@@ -731,16 +761,8 @@ bool IncrementalMapper::RegisterNextStructureLessImage(const Options& options,
   // Structure-less resectioning
   //////////////////////////////////////////////////////////////////////////////
 
-  StructureLessAbsolutePoseEstimationOptions abs_pose_options;
-  // Structure-less resectioning uses epipolar Sampson error, so we are stricter
-  // in accepting 2D-2D correspondences inliers.
-  abs_pose_options.ransac_options.max_error = 0.5 * options.abs_pose_max_error;
-  abs_pose_options.ransac_options.min_inlier_ratio =
-      options.abs_pose_min_inlier_ratio;
-  // As opposed to structure-based resectioning, structure-less resectioning
-  // is based on an expensive minimal solver, so we use multi-threading, which
-  // leads to a significant speedup based on benchmarking.
-  abs_pose_options.ransac_options.num_threads = options.num_threads;
+  const auto abs_pose_options =
+      internal::BuildStructureLessAbsolutePoseOptions(options);
 
   BundleAdjustmentOptions abs_pose_refinement_options;
   if (abs_pose_refinement_options.ceres) {
@@ -876,9 +898,8 @@ bool IncrementalMapper::RegisterNextStructureLessImage(const Options& options,
     tri_cameras.push_back(&camera);
 
     Eigen::Vector3d tri_xyz;
-    EstimateTriangulationOptions tri_options;
-    tri_options.min_tri_angle = options.filter_min_tri_angle;
-    tri_options.ransac_options.max_error = options.abs_pose_max_error;
+    const auto tri_options =
+        internal::BuildStructureLessTriangulationOptions(options);
     if (!EstimateTriangulation(tri_options,
                                tri_points,
                                tri_cams_from_world,
