@@ -19,6 +19,9 @@ for name in "${contracts[@]}"; do
     exit 1
   fi
 done
+echo "CPU contract: Mapper forwarding/accounting (not native qualification)"
+PYTHONPATH="$root/python" python3 -m unittest discover \
+  -s python/tests -p test_mapping_admission.py -v
 work=$(mktemp -d "${RUNNER_TEMP:-$root}/mvs-cpu.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT
 export TMPDIR="$work"
