@@ -6,6 +6,8 @@ import copy
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -88,10 +90,11 @@ def fixture(root, image_names=("0.jpg", "1.jpg")):
             jobs=[
                 dict(
                     reference=i,
-                    sources=[1 - i, 1 - i],
+                    sources=[j for j in range(len(images)) if j != i]
+                    * (2 if len(images) == 2 else 1),
                     options=dict(random_seed=0, num_threads=1, gpu_index="0"),
                 )
-                for i in range(2)
+                for i in range(len(images))
             ],
         )
         for p in ("photo", "geo")
@@ -166,15 +169,15 @@ def fixture(root, image_names=("0.jpg", "1.jpg")):
     )
     write(
         "planning/sparse-model.json",
-        dict(name="0", counts=dict(num_registered_images=2)),
+        dict(name="0", counts=dict(num_registered_images=len(images))),
     )
     write(
         "result.json",
         dict(
             status="completed",
-            registered_images=2,
-            photo_references=2,
-            geo_references=2,
+            registered_images=len(images),
+            photo_references=len(images),
+            geo_references=len(images),
         ),
     )
     write("database.db", "database")
@@ -274,7 +277,12 @@ class InventoryTest(unittest.TestCase):
                 tempfile.TemporaryDirectory() as directory,
             ):
                 root = Path(directory)
-                qualification = fixture(root)
+                qualification = fixture(
+                    root,
+                    ("0.jpg", "1.jpg", "2.jpg")
+                    if mutation == "order"
+                    else ("0.jpg", "1.jpg"),
+                )
                 baseline = capture(root, qualification)
                 a, b = root / "dense/images/0.jpg", root / "dense/images/1.jpg"
                 if mutation == "flip":
@@ -305,7 +313,8 @@ class InventoryTest(unittest.TestCase):
                     path = root / "sparse/0/project.ini"
                     path.write_text(
                         path.read_text().replace(
-                            "random_seed=0", "random_seed=-1"
+                            "[Mapper]\nrandom_seed=0",
+                            "[Mapper]\nrandom_seed=-1",
                         )
                     )
                 else:
@@ -315,13 +324,33 @@ class InventoryTest(unittest.TestCase):
                         jobs = data["phases"]["photo"]
                         if filename == "dense-plan":
                             jobs = jobs["jobs"]
-                        jobs[0]["sources"] = [0, 1]
+                        jobs[0]["sources"].reverse()
                         path.write_text(json.dumps(data))
-                try:
+                invalid_members = {
+                    "rename",
+                    "missing",
+                    "directory",
+                    "link",
+                    "missing_photo",
+                }
+                if mutation in invalid_members or mutation == "seed":
+                    message = (
+                        "Mapper INI must record seed0/thread1"
+                        if mutation == "seed"
+                        else "missing/wrong-type required"
+                    )
+                    with self.assertRaisesRegex(ValueError, message):
+                        capture(root, qualification)
+                else:
                     candidate = capture(root, qualification)
-                except ValueError:
-                    continue
-                self.assertFalse(compare(baseline, candidate)["product_equal"])
+                    verdict = compare(baseline, candidate)
+                    self.assertFalse(verdict["product_equal"])
+                    if mutation == "order":
+                        self.assertFalse(verdict["binding_equal"])
+                        self.assertEqual(verdict["changed"]["scientific"], [])
+                    else:
+                        self.assertTrue(verdict["binding_equal"])
+                        self.assertTrue(verdict["changed"]["scientific"])
 
     def test_same_basename_publications_remain_distinct_and_swaps_fail(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -351,6 +380,37 @@ class InventoryTest(unittest.TestCase):
             second.unlink()
             with self.assertRaises(ValueError):
                 capture(root, qualification)
+
+    def test_utf8_metadata_independent_of_locale(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            json_path, ini_path = root / "metadata.json", root / "project.ini"
+            json_path.write_text(
+                json.dumps({"name": "caf\u00e9"}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            ini_path.write_text("label=caf\u00e9\n", encoding="utf-8")
+            code = r"""
+import sys
+from pathlib import Path
+from colmap_reconstruction.byte_golden import read_json, ini_binding
+assert read_json(sys.argv[1])["name"] == "caf\u00e9"
+assert ini_binding(Path(sys.argv[2]), {})["/label"] == "caf\u00e9"
+"""
+            result = subprocess.run(
+                [sys.executable, "-c", code, str(json_path), str(ini_path)],
+                env={
+                    **os.environ,
+                    "LC_ALL": "C",
+                    "PYTHONUTF8": "0",
+                    "PYTHONCOERCECLOCALE": "0",
+                    "PYTHONOPTIMIZE": "0",
+                },
+                capture_output=True,
+            )
+            self.assertEqual(
+                result.returncode, 0, result.stderr.decode(errors="replace")
+            )
 
     def test_rejects_unsafe_and_malformed_manifests(self):
         with tempfile.TemporaryDirectory() as directory:

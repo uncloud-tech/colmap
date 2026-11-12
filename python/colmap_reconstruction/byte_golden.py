@@ -80,7 +80,7 @@ def unique_object(pairs):
 
 def read_json(path):
     return json.loads(
-        Path(path).read_text(),
+        Path(path).read_text(encoding="utf-8"),
         object_pairs_hook=unique_object,
         parse_constant=lambda x: (_ for _ in ()).throw(ValueError(x)),
     )
@@ -132,7 +132,7 @@ def ini_binding(path, expected_paths):
     section = ""
     values = {}
     scientific = {}
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         syntax = line.strip()
         if not syntax or syntax.startswith(("#", ";")):
             continue
