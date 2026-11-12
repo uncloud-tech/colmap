@@ -622,3 +622,7 @@ COLMAP_TEST_EXECUTABLE=/prefix/bin/colmap PYTHONPATH=python python3 -m unittest 
 ```
 
 The existing GPU tests are opt-in; their skip is not execution qualification.
+
+For offline exact regression checks on ceased small-fixture workspaces, see the
+[developer byte-golden guard](byte-golden.md). It inventories raw scientific and
+operational domains separately; it does not run reconstruction or ship photos.
