@@ -127,6 +127,10 @@ scientific products equal but must never be reported as whole-package equality.
 
 ## Limits and acceptance
 
+The lean CPU CI job runs the stdlib guard suite directly, without a native
+installation or GPU. Coverage includes distinct relative publications sharing a
+basename and same-length body swaps between them.
+
 Synthetic unit mutations cover the guard, not an installed reconstruction pair.
 Actual selected five-photo execution, complete new workspace inventory, usable
 private evidence, measured wall times and fresh read-only review are separate

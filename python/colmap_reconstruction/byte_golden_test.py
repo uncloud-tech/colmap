@@ -62,7 +62,7 @@ opt_double cache_size 3ff0000000000000
     return "COLMAP_OPTIMIZED_PHOTO_OPTIONS_V1\n" + fields
 
 
-def fixture(root):
+def fixture(root, image_names=("0.jpg", "1.jpg")):
     def write(name, value):
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -79,7 +79,8 @@ def fixture(root):
         workspace=str(root),
     )
     images = [
-        dict(index=i, name=f"{i}.jpg", width=4, height=3) for i in range(2)
+        dict(index=i, name=name, width=4, height=3)
+        for i, name in enumerate(image_names)
     ]
     phases = {
         p: dict(
@@ -101,22 +102,22 @@ def fixture(root):
         dict(
             options=options,
             input_binding={
-                f"{i}.jpg": dict(target=f"/private/{i}.jpg", sha256=HASH)
-                for i in range(2)
+                name: dict(target="/private/" + name, sha256=HASH)
+                for name in image_names
             },
         ),
     )
     write(
         "planning/extraction-inventory.json",
-        dict(effective_order=["0.jpg", "1.jpg"]),
+        dict(effective_order=list(image_names)),
     )
     write(
         "planning/resolution-intent.json",
         dict(
             original=dict(
                 photos=[
-                    dict(path=f"{i}.jpg", width=4, height=3, orientation=None)
-                    for i in range(2)
+                    dict(path=name, width=4, height=3, orientation=None)
+                    for name in image_names
                 ]
             )
         ),
@@ -321,6 +322,35 @@ class InventoryTest(unittest.TestCase):
                 except ValueError:
                     continue
                 self.assertFalse(compare(baseline, candidate)["product_equal"])
+
+    def test_same_basename_publications_remain_distinct_and_swaps_fail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            names = ("west/shared.jpg", "east/shared.jpg")
+            qualification = fixture(root, names)
+            baseline = capture(root, qualification)
+            paths = [
+                f"cohort/stereo/depth_maps/{name}.geometric.bin"
+                for name in names
+            ]
+            self.assertNotEqual(
+                baseline["scientific"][paths[0]]["sha256"],
+                baseline["scientific"][paths[1]]["sha256"],
+            )
+            self.assertEqual(
+                baseline["scientific"][paths[0]]["length"],
+                baseline["scientific"][paths[1]]["length"],
+            )
+            first, second = (root / name for name in paths)
+            first_bytes, second_bytes = first.read_bytes(), second.read_bytes()
+            first.write_bytes(second_bytes)
+            second.write_bytes(first_bytes)
+            verdict = compare(baseline, capture(root, qualification))
+            self.assertFalse(verdict["product_equal"])
+            self.assertEqual(verdict["changed"]["scientific"], sorted(paths))
+            second.unlink()
+            with self.assertRaises(ValueError):
+                capture(root, qualification)
 
     def test_rejects_unsafe_and_malformed_manifests(self):
         with tempfile.TemporaryDirectory() as directory:
