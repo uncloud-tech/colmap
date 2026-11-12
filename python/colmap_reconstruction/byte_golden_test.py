@@ -522,6 +522,11 @@ assert ini_binding(Path(sys.argv[2]), {})["/label"] == "caf\u00e9"
             self.assertFalse(verdict["package_equal"])
             path = second / "planning/dense-plan.json"
             original = path.read_text()
+            refusals = {
+                "config": "V1 path does not bind actual graph",
+                "unknown": "invalid V1 field/order/token",
+                "trailing": "trailing/unknown V1 fields",
+            }
             for mutation in ("nonpath", "config", "unknown", "trailing"):
                 data = json.loads(original)
                 job = data["phases"]["photo"]["jobs"][0]
@@ -538,11 +543,15 @@ assert ini_binding(Path(sys.argv[2]), {})["/label"] == "caf\u00e9"
                 else:
                     job["effective_options_wire_v1"] += "extra\n"
                 path.write_text(json.dumps(data))
-                try:
+                if mutation == "nonpath":
                     candidate = capture(second, qualification)
-                except ValueError:
-                    continue
-                self.assertFalse(compare(baseline, candidate)["product_equal"])
+                    changed = compare(baseline, candidate)
+                    self.assertFalse(changed["product_equal"])
+                    self.assertFalse(changed["binding_equal"])
+                    self.assertEqual(changed["changed"]["scientific"], [])
+                else:
+                    with self.assertRaisesRegex(ValueError, refusals[mutation]):
+                        capture(second, qualification)
 
     def test_entrypoint_capture_is_exclusive_and_compare_is_read_only(self):
         with tempfile.TemporaryDirectory() as directory:
