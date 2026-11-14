@@ -814,6 +814,12 @@ void WritePointsVisibility(
       WriteBinaryLittleEndian<uint32_t>(&file, image_idx);
     }
   }
+
+  THROW_CHECK(file.good()) << "Failed to write points visibility: " << path;
+  file.flush();
+  THROW_CHECK(file.good()) << "Failed to flush points visibility: " << path;
+  file.close();
+  THROW_CHECK(!file.fail()) << "Failed to close points visibility: " << path;
 }
 
 std::vector<std::vector<int>> ReadPointsVisibility(

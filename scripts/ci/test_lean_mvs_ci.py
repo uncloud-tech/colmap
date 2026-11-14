@@ -134,6 +134,11 @@ class LeanMvsCiTest(unittest.TestCase):
             "StereoFusion.PlyWriterCliFailureDoesNotPublishSuccessReceipt",
             script,
         )
+        self.assertIn("WritePointsVisibility.*", script)
+        self.assertIn(
+            "StereoFusion.VisibilityWriterCliFailureDoesNotPublishSuccessReceipt",
+            script,
+        )
         self.assertIn('suite.attrib.get("skipped", "0")', script)
 
     def test_container_trust_is_limited_to_checked_out_workspace(self):

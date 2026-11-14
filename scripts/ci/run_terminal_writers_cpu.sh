@@ -18,10 +18,9 @@ sha256sum "$COLMAP_BINARY" "$build/src/colmap/util/ply_test" \
 timeout 60s "$build/src/colmap/util/ply_test" \
   --gtest_filter='Ply.BinaryPointWriter*' \
   --gtest_output="xml:$build/ply-writer.xml"
-# VIS remains a diagnostic-only lane until its independently reproduced RED
-# is accepted. Its successful wire/open controls are safe to retain here.
+# Both writer failure contracts and their actual CLI callers must execute.
 timeout 180s "$build/src/colmap/mvs/fusion_test" \
-  --gtest_filter='WritePointsVisibility.ExactBytesEmptyAndOpenError:StereoFusion.PlyWriterCliFailureDoesNotPublishSuccessReceipt' \
+  --gtest_filter='WritePointsVisibility.*:StereoFusion.PlyWriterCliFailureDoesNotPublishSuccessReceipt:StereoFusion.VisibilityWriterCliFailureDoesNotPublishSuccessReceipt' \
   --gtest_output="xml:$build/fusion-writer.xml"
 # Missing/renamed tests and skipped integration must not masquerade as GREEN.
 python3 - "$build" <<'PY'
@@ -30,7 +29,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 build = Path(sys.argv[1])
-for name, count in (("ply-writer.xml", 5), ("fusion-writer.xml", 2)):
+for name, count in (("ply-writer.xml", 5), ("fusion-writer.xml", 5)):
     suite = ET.parse(build / name).getroot()
     assert int(suite.attrib["tests"]) == count, suite.attrib
     for field in ("failures", "errors"):

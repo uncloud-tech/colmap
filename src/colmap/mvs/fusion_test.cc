@@ -1114,7 +1114,11 @@ void RunTerminalWriterCliFailure(const std::string& failure) {
         << "exec failure is not writer evidence";
     if (mode == "success") {
       ASSERT_EQ(WEXITSTATUS(status), 0);
-      ASSERT_FALSE(ReadPly(output).empty());
+      const auto points = ReadPly(output);
+      ASSERT_FALSE(points.empty());
+      EXPECT_EQ(ReadPointsVisibility(output.string() + ".vis", points.size())
+                    .size(),
+                points.size());
       EXPECT_TRUE(std::filesystem::is_regular_file(receipt));
     } else {
       EXPECT_NE(WEXITSTATUS(status), 0);
