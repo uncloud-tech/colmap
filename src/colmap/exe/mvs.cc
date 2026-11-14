@@ -1100,6 +1100,9 @@ int RunStereoFuser(int argc, char** argv) {
     // publish an optimized dispatch receipt on logical resource exhaustion.
     LOG(ERROR) << error.what();
     return 3;
+  } catch (const std::exception& error) {
+    LOG(ERROR) << error.what();
+    return EXIT_FAILURE;
   }
 
   if (optimized_only)

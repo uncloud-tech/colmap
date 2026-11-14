@@ -43,7 +43,7 @@ jobs:
             libboost-program-options-dev libboost-graph-dev libboost-system-dev \
             libeigen3-dev libceres-dev libopenimageio-dev openimageio-tools \
             libsuitesparse-dev libmetis-dev libgoogle-glog-dev \
-            libgtest-dev libgmock-dev libsqlite3-dev libunwind-dev \
+            libgtest-dev libgmock-dev libsqlite3-dev libunwind-dev libglew-dev \
             libcurl4-openssl-dev libopenblas-dev liblapack-dev
           sudo mkdir -p /usr/include/opencv4
       - name: Run native terminal writer CPU tests and actual CLI caller

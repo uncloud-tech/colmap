@@ -123,6 +123,12 @@ class LeanMvsCiTest(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/lean-mvs.yml").read_text()
         cpu = workflow.split("  cpu:\n", 1)[1].split("  cuda-compile:\n", 1)[0]
         self.assertIn("bash scripts/ci/run_terminal_writers_cpu.sh", cpu)
+        # FindDependencies requires GLEW even with OPENGL_ENABLED=OFF.
+        native_deps = cpu.split(
+            "      - name: Install native terminal writer CPU test dependencies\n",
+            1,
+        )[1].split("      - name:", 1)[0]
+        self.assertIn("libglew-dev", native_deps)
         script = (ROOT / "scripts/ci/run_terminal_writers_cpu.sh").read_text()
         self.assertIn("-DCUDA_ENABLED=OFF", script)
         self.assertIn("colmap_util_ply_test colmap_mvs_fusion_test", script)
