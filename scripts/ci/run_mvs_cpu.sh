@@ -19,6 +19,9 @@ for name in "${contracts[@]}"; do
     exit 1
   fi
 done
+echo "CPU contract: offline byte-golden guard (not a reconstruction run)"
+PYTHONPATH="$root/python" python3 -m unittest \
+  colmap_reconstruction.byte_golden_test
 echo "CPU contract: Mapper forwarding/accounting (not native qualification)"
 PYTHONPATH="$root/python" python3 -m unittest discover \
   -s python/tests -p test_mapping_admission.py -v
