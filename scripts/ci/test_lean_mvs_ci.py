@@ -119,6 +119,23 @@ class LeanMvsCiTest(unittest.TestCase):
         self.assertNotIn("ctest", cuda)
         self.assertNotIn("--gpus", cuda)
 
+    def test_terminal_writer_native_cpu_execution(self):
+        workflow = (ROOT / ".github/workflows/lean-mvs.yml").read_text()
+        cpu = workflow.split("  cpu:\n", 1)[1].split("  cuda-compile:\n", 1)[0]
+        self.assertIn("bash scripts/ci/run_terminal_writers_cpu.sh", cpu)
+        script = (ROOT / "scripts/ci/run_terminal_writers_cpu.sh").read_text()
+        self.assertIn("-DCUDA_ENABLED=OFF", script)
+        self.assertIn("colmap_util_ply_test colmap_mvs_fusion_test", script)
+        self.assertIn(
+            'export COLMAP_BINARY="$build/src/colmap/exe/colmap"', script
+        )
+        self.assertIn("Ply.BinaryPointWriter*", script)
+        self.assertIn(
+            "StereoFusion.PlyWriterCliFailureDoesNotPublishSuccessReceipt",
+            script,
+        )
+        self.assertIn('suite.attrib.get("skipped", "0")', script)
+
     def test_container_trust_is_limited_to_checked_out_workspace(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             directory = Path(directory)

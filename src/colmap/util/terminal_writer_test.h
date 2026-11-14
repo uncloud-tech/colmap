@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <exception>
 #include <filesystem>
+#include <string>
 
 #include <fcntl.h>
 #include <gtest/gtest.h>
@@ -22,7 +23,8 @@ namespace terminal_writer_test {
 
 // Only the forked child gets the resource limit. Exit 10 means the actual
 // writer silently returned despite a verified EFBIG; 11 means it reported an
-// exception. All other statuses are harness failures, NOT writer RED evidence.
+// exception containing the output path. Exit 12 is a diagnostic-contract
+// failure (exception missing the path); 70..75 are invalid probes, NOT RED.
 template <typename Writer>
 void ExpectFileSizeFailure(const std::filesystem::path& path,
                            const rlim_t limit,
@@ -39,10 +41,13 @@ void ExpectFileSizeFailure(const std::filesystem::path& path,
     const struct rlimit child_limit = {limit, old_limit.rlim_max};
     if (setrlimit(RLIMIT_FSIZE, &child_limit) != 0) _exit(71);
     bool threw = false;
+    bool reported_path = false;
     try {
       writer();
     } catch (const std::exception& error) {
       threw = true;
+      reported_path =
+          std::string(error.what()).find(path.string()) != std::string::npos;
       dprintf(STDERR_FILENO,
               "writer exception path=%s: %s\n",
               path.c_str(),
@@ -66,7 +71,7 @@ void ExpectFileSizeFailure(const std::filesystem::path& path,
             path.c_str(),
             static_cast<unsigned long long>(limit),
             threw ? "THREW" : "SILENT_RETURN");
-    _exit(threw ? 11 : 10);
+    _exit(threw ? (reported_path ? 11 : 12) : 10);
   }
   int status = 0;
   pid_t waited;
@@ -76,7 +81,8 @@ void ExpectFileSizeFailure(const std::filesystem::path& path,
   ASSERT_EQ(waited, pid);
   ASSERT_TRUE(WIFEXITED(status)) << "raw wait status=" << status;
   EXPECT_EQ(WEXITSTATUS(status), 11)
-      << "10 = verified silent-return RED; 70..75 = invalid probe";
+      << "10 = verified silent-return RED; 12 = exception missing output path; "
+         "70..75 = invalid probe";
 }
 
 }  // namespace terminal_writer_test

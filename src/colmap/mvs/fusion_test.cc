@@ -1051,7 +1051,7 @@ TEST(WritePointsVisibility, ReportsPayloadFailure) {
   });
 }
 
-TEST(StereoFusion, TerminalWriterCliFailureDoesNotPublishSuccessReceipt) {
+void RunTerminalWriterCliFailure(const std::string& failure) {
   const char* binary = std::getenv("COLMAP_BINARY");
   if (binary == nullptr || binary[0] == '\0') {
     GTEST_SKIP() << "Runtime must supply actual current COLMAP_BINARY; skip is "
@@ -1070,7 +1070,7 @@ TEST(StereoFusion, TerminalWriterCliFailureDoesNotPublishSuccessReceipt) {
 
   const auto dir = CreateTestDir();
   CreateFusionWorkspace(dir);
-  for (const std::string mode : {"success", "ply", "vis"}) {
+  for (const std::string& mode : {std::string("success"), failure}) {
     SCOPED_TRACE(mode);
     const auto output = dir / (mode + ".ply");
     const auto receipt = dir / (mode + ".receipt");
@@ -1120,9 +1120,19 @@ TEST(StereoFusion, TerminalWriterCliFailureDoesNotPublishSuccessReceipt) {
       EXPECT_NE(WEXITSTATUS(status), 0);
       EXPECT_FALSE(std::filesystem::exists(receipt));
       // Ordinary partial output may remain; no atomicity/rollback contract.
-      if (mode == "vis") EXPECT_FALSE(ReadPly(output).empty());
+      if (mode == "vis") {
+        EXPECT_FALSE(ReadPly(output).empty());
+      }
     }
   }
+}
+
+TEST(StereoFusion, PlyWriterCliFailureDoesNotPublishSuccessReceipt) {
+  RunTerminalWriterCliFailure("ply");
+}
+
+TEST(StereoFusion, VisibilityWriterCliFailureDoesNotPublishSuccessReceipt) {
+  RunTerminalWriterCliFailure("vis");
 }
 #endif
 
