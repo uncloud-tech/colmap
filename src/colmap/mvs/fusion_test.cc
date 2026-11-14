@@ -9,6 +9,7 @@
 #include "colmap/sensor/bitmap.h"
 #include "colmap/util/file.h"
 #include "colmap/util/ply.h"
+#include "colmap/util/terminal_writer_test.h"
 #include "colmap/util/testing.h"
 #include "colmap/util/threading.h"
 
@@ -1009,6 +1010,121 @@ TEST(StereoFusion, MappedOptions) {
   options.use_cache = true;
   EXPECT_TRUE(options.Check());
 }
+
+TEST(WritePointsVisibility, ExactBytesEmptyAndOpenError) {
+  const auto dir = CreateTestDir();
+  const auto path = dir / "points.vis";
+  WritePointsVisibility(path, {{1, 256}, {}});
+  const std::string expected(
+      "\x02\x00\x00\x00\x00\x00\x00\x00"
+      "\x02\x00\x00\x00\x01\x00\x00\x00"
+      "\x00\x01\x00\x00\x00\x00\x00\x00",
+      24);
+  auto bytes = [&] {
+    std::ifstream file(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(file), {});
+  };
+  EXPECT_EQ(bytes(), expected);
+  WritePointsVisibility(path, {});
+  EXPECT_EQ(bytes(), std::string(8, '\0'));
+  const auto missing = dir / "missing" / "points.vis";
+  try {
+    WritePointsVisibility(missing, {});
+    FAIL() << "missing parent must fail";
+  } catch (const std::exception& error) {
+    EXPECT_NE(std::string(error.what()).find(missing.string()),
+              std::string::npos);
+  }
+}
+
+#if defined(__linux__)
+TEST(WritePointsVisibility, ReportsBufferedFinalizationFailure) {
+  const auto path = CreateTestDir() / "buffered.vis";
+  terminal_writer_test::ExpectFileSizeFailure(
+      path, 1, [&] { WritePointsVisibility(path, {}); });
+}
+
+TEST(WritePointsVisibility, ReportsPayloadFailure) {
+  const auto path = CreateTestDir() / "payload.vis";
+  terminal_writer_test::ExpectFileSizeFailure(path, 7, [&] {
+    WritePointsVisibility(path, {std::vector<int>(16384, 1)});
+  });
+}
+
+TEST(StereoFusion, TerminalWriterCliFailureDoesNotPublishSuccessReceipt) {
+  const char* binary = std::getenv("COLMAP_BINARY");
+  if (binary == nullptr || binary[0] == '\0') {
+    GTEST_SKIP() << "Runtime must supply actual current COLMAP_BINARY; skip is "
+                    "not proof";
+  }
+  ASSERT_TRUE(std::filesystem::is_regular_file(binary));
+  // Verify the real device failure independently of the production writers.
+  const int fd = open("/dev/full", O_WRONLY);
+  ASSERT_GE(fd, 0);
+  errno = 0;
+  const ssize_t result = write(fd, "!", 1);
+  const int error = errno;
+  close(fd);
+  ASSERT_EQ(result, -1);
+  ASSERT_EQ(error, ENOSPC);
+
+  const auto dir = CreateTestDir();
+  CreateFusionWorkspace(dir);
+  for (const std::string mode : {"success", "ply", "vis"}) {
+    SCOPED_TRACE(mode);
+    const auto output = dir / (mode + ".ply");
+    const auto receipt = dir / (mode + ".receipt");
+    if (mode == "ply") {
+      std::filesystem::create_symlink("/dev/full", output);
+    } else if (mode == "vis") {
+      std::filesystem::create_symlink("/dev/full", output.string() + ".vis");
+    }
+    const pid_t pid = fork();
+    ASSERT_NE(pid, -1);
+    if (pid == 0) {
+      alarm(60);
+      execl(binary,
+            binary,
+            "stereo_fusion",
+            "--workspace_path",
+            dir.c_str(),
+            "--output_path",
+            output.c_str(),
+            "--optimized_only",
+            "true",
+            "--optimized_dispatch_receipt",
+            receipt.c_str(),
+            "--StereoFusion.num_threads",
+            "1",
+            "--StereoFusion.min_num_pixels",
+            "1",
+            "--StereoFusion.host_budget_bytes",
+            "1073741824",
+            static_cast<char*>(nullptr));
+      _exit(127);
+    }
+    int status = 0;
+    pid_t waited;
+    do {
+      waited = waitpid(pid, &status, 0);
+    } while (waited == -1 && errno == EINTR);
+    ASSERT_EQ(waited, pid);
+    ASSERT_TRUE(WIFEXITED(status)) << "raw status=" << status;
+    ASSERT_NE(WEXITSTATUS(status), 127)
+        << "exec failure is not writer evidence";
+    if (mode == "success") {
+      ASSERT_EQ(WEXITSTATUS(status), 0);
+      ASSERT_FALSE(ReadPly(output).empty());
+      EXPECT_TRUE(std::filesystem::is_regular_file(receipt));
+    } else {
+      EXPECT_NE(WEXITSTATUS(status), 0);
+      EXPECT_FALSE(std::filesystem::exists(receipt));
+      // Ordinary partial output may remain; no atomicity/rollback contract.
+      if (mode == "vis") EXPECT_FALSE(ReadPly(output).empty());
+    }
+  }
+}
+#endif
 
 TEST(ReadPointsVisibility, RoundTrip) {
   const auto test_dir = CreateTestDir();
