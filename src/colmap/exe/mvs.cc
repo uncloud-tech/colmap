@@ -446,10 +446,10 @@ int RunPatchMatchStereoWithExecution(
       &optimized_dispatch_receipt,
       "NEW JSON completion receipt; required with optimized_only");
   options.AddDefaultOption("owned_tile_threads", &owned_tile_threads);
-  options.AddDefaultOption(
-      "owned_photo_forecast",
-      &owned_photo_forecast,
-      "SHA-bound PHOTO admission: V2 single reference or V3 bound rolling jobs");
+  options.AddDefaultOption("owned_photo_forecast",
+                           &owned_photo_forecast,
+                           "SHA-bound PHOTO admission: V2 single reference or "
+                           "V3 bound rolling jobs");
   options.AddDefaultOption(
       "owned_photo_options_export",
       &owned_photo_options_export,
@@ -1035,9 +1035,12 @@ int RunStereoFuser(int argc, char** argv) {
   options.AddStereoFusionOptions();
   // Byte counts use strict string parsing; BaseOptionManager deliberately
   // does not support uint64 options and unsigned Boost parsing accepts -1.
-  options.AddDefaultOption("StereoFusion.host_budget_bytes", &fusion_host_budget);
-  options.AddDefaultOption("StereoFusion.policy_host_bytes", &fusion_policy_host);
-  options.AddDefaultOption("StereoFusion.reserve_host_bytes", &fusion_reserve_host);
+  options.AddDefaultOption("StereoFusion.host_budget_bytes",
+                           &fusion_host_budget);
+  options.AddDefaultOption("StereoFusion.policy_host_bytes",
+                           &fusion_policy_host);
+  options.AddDefaultOption("StereoFusion.reserve_host_bytes",
+                           &fusion_reserve_host);
   options.AddDefaultOption("optimized_only", &optimized_only);
   options.AddDefaultOption("optimized_dispatch_receipt",
                            &optimized_dispatch_receipt);
@@ -1087,14 +1090,14 @@ int RunStereoFuser(int argc, char** argv) {
   // the fuser, so do not duplicate the dense points in a Reconstruction.
   try {
     RunStereoFuserWithMaterialization(output_path,
-                                     workspace_path,
-                                     workspace_format,
-                                     pmvs_option_name,
-                                     input_type,
-                                     *options.stereo_fusion,
-                                     output_type,
-                                     {},
-                                     /*materialize_ply=*/false);
+                                      workspace_path,
+                                      workspace_format,
+                                      pmvs_option_name,
+                                      input_type,
+                                      *options.stereo_fusion,
+                                      output_type,
+                                      {},
+                                      /*materialize_ply=*/false);
   } catch (const mvs::FusionResourceError& error) {
     // Run drains workers before propagating; never serialize partial output or
     // publish an optimized dispatch receipt on logical resource exhaustion.
@@ -1160,7 +1163,8 @@ Reconstruction RunStereoFuserWithMaterialization(
 
   if (options.host_budget_bytes && (materialize_ply || output_type != "ply"))
     throw std::invalid_argument(
-        "budgeted fusion supports CLI PLY only; dense model materialization is unaccounted");
+        "budgeted fusion supports CLI PLY only; dense model materialization is "
+        "unaccounted");
 
   mvs::StereoFusion fuser(
       options, workspace_path, workspace_format, pmvs_option_name, input_type);

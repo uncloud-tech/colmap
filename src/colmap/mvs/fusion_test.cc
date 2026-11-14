@@ -55,8 +55,9 @@ std::vector<std::string> CreateFusionWorkspace(
   SyntheticDatasetOptions synthetic_dataset_options;
   synthetic_dataset_options.num_rigs = 1;
   synthetic_dataset_options.num_cameras_per_rig = heterogeneous ? 2 : 1;
-  synthetic_dataset_options.num_frames_per_rig =
-      heterogeneous ? 1 : default_quality ? 5 : 2;
+  synthetic_dataset_options.num_frames_per_rig = heterogeneous     ? 1
+                                                 : default_quality ? 5
+                                                                   : 2;
   synthetic_dataset_options.camera_width = kWidth;
   synthetic_dataset_options.camera_height = kHeight;
   if (default_quality) {
@@ -68,7 +69,8 @@ std::vector<std::string> CreateFusionWorkspace(
   SynthesizeDataset(synthetic_dataset_options, &reconstruction);
   if (heterogeneous) {
     EXPECT_GE(reconstruction.NumCameras(), 2);
-    reconstruction.Camera(reconstruction.Cameras().begin()->first).Rescale(4, 4);
+    reconstruction.Camera(reconstruction.Cameras().begin()->first)
+        .Rescale(4, 4);
   }
   if (default_quality) {
     for (const auto& [image_id, image] : reconstruction.Images()) {
@@ -305,20 +307,31 @@ TEST(StereoFusion, BudgetedCliFailureDoesNotPublishOutputOrReceipt) {
   if (binary == nullptr || binary[0] == '\0') GTEST_SKIP();
   const auto dir = CreateTestDir();
   CreateFusionWorkspace(dir);
-  const std::array<const char*, 5> caps{"1", "20765", "1073741824", "-1",
-                                       "1073741824"};
+  const std::array<const char*, 5> caps{
+      "1", "20765", "1073741824", "-1", "1073741824"};
   for (size_t i = 0; i < caps.size(); ++i) {
     const auto output = dir / (std::to_string(i) + ".ply");
     const auto receipt = dir / (std::to_string(i) + ".receipt");
     const pid_t pid = fork();
     ASSERT_NE(pid, -1);
     if (pid == 0) {
-      execl(binary, binary, "stereo_fusion", "--workspace_path", dir.c_str(),
-            "--output_path", output.c_str(), "--optimized_only", "true",
-            "--optimized_dispatch_receipt", receipt.c_str(),
-            "--StereoFusion.num_threads", i == 2 ? "2" : "1",
-            "--StereoFusion.min_num_pixels", "1",
-            "--StereoFusion.host_budget_bytes", caps[i],
+      execl(binary,
+            binary,
+            "stereo_fusion",
+            "--workspace_path",
+            dir.c_str(),
+            "--output_path",
+            output.c_str(),
+            "--optimized_only",
+            "true",
+            "--optimized_dispatch_receipt",
+            receipt.c_str(),
+            "--StereoFusion.num_threads",
+            i == 2 ? "2" : "1",
+            "--StereoFusion.min_num_pixels",
+            "1",
+            "--StereoFusion.host_budget_bytes",
+            caps[i],
             static_cast<char*>(nullptr));
       _exit(127);
     }
@@ -372,14 +385,16 @@ TEST(StereoFusion, BudgetDeduplicatesAndValidatesMapsBeforeDecode) {
   StereoFusionOptions options;
   options.num_threads = 1;
   options.min_num_pixels = options.max_num_pixels;
-  options.host_budget_bytes = 20765;  // Exact 2-image input peak, not 4 entries.
+  options.host_budget_bytes =
+      20765;  // Exact 2-image input peak, not 4 entries.
   StereoFusion fusion(options, dir, "COLMAP", "", "geometric");
   EXPECT_NO_THROW(fusion.Run());
   EXPECT_TRUE(fusion.GetFusedPoints().empty());
   // Complete malformed map plus invalid bitmap: map validation must occur
   // before RGB decode even when admission has generous space.
   std::ofstream(dir / "stereo" / "depth_maps" /
-                (names.front() + ".geometric.bin")) << "malformed";
+                (names.front() + ".geometric.bin"))
+      << "malformed";
   std::ofstream(dir / "images" / names.front()) << "bad bitmap";
   options.host_budget_bytes = uint64_t{1} << 30;
   StereoFusion malformed(options, dir, "COLMAP", "", "geometric");
@@ -410,7 +425,8 @@ TEST(StereoFusion, BudgetedMergeRefusesWithoutPublishingPartialPoints) {
       fusion.Run();
       high = options.host_budget_bytes;
     } catch (const FusionResourceError& error) {
-      if (std::string(error.what()).find("workers drained") == std::string::npos) {
+      if (std::string(error.what()).find("workers drained") ==
+          std::string::npos) {
         merge_refused = true;
         EXPECT_TRUE(fusion.GetFusedPoints().empty());
       }
@@ -1116,9 +1132,9 @@ void RunTerminalWriterCliFailure(const std::string& failure) {
       ASSERT_EQ(WEXITSTATUS(status), 0);
       const auto points = ReadPly(output);
       ASSERT_FALSE(points.empty());
-      EXPECT_EQ(ReadPointsVisibility(output.string() + ".vis", points.size())
-                    .size(),
-                points.size());
+      EXPECT_EQ(
+          ReadPointsVisibility(output.string() + ".vis", points.size()).size(),
+          points.size());
       EXPECT_TRUE(std::filesystem::is_regular_file(receipt));
     } else {
       EXPECT_NE(WEXITSTATUS(status), 0);

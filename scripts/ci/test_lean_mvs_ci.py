@@ -125,7 +125,8 @@ class LeanMvsCiTest(unittest.TestCase):
         self.assertIn("bash scripts/ci/run_terminal_writers_cpu.sh", cpu)
         # FindDependencies requires GLEW even with OPENGL_ENABLED=OFF.
         native_deps = cpu.split(
-            "      - name: Install native terminal writer CPU test dependencies\n",
+            "      - name: Install native terminal writer CPU test "
+            "dependencies\n",
             1,
         )[1].split("      - name:", 1)[0]
         self.assertIn("libglew-dev", native_deps)
