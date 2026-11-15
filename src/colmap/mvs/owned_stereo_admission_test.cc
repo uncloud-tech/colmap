@@ -73,6 +73,9 @@ int main() {
   assert(probe_known < published.capability_probe_host_raw);
   assert(published.capability_probe_host_raw == 8388608);
   assert(published.publication_probe_host_raw == 1024);
+  assert(published.post_output_metadata_raw == 786432);
+  assert(published.post_photo_host_raw ==
+         14745632 + 1843204 + 4000 + published.photo_output_cache_raw + 786432);
   assert(published.post_photo_host_raw > published.validation_host_raw / 2);
   auto published_boundary = published_request;
   published_boundary.capacity = published.admitted;

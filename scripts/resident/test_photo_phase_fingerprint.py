@@ -240,12 +240,14 @@ int main() {
             self.assertIn(
                 hashlib.sha256(encoded).hexdigest(), output.read_text()
             )
-            self.assertEqual(len(generator.CLOSURE), 59)
+            self.assertEqual(len(generator.CLOSURE), 61)
             self.assertTrue(
                 {
                     "src/colmap/mvs/owned_strip_storage.h",
                     "src/colmap/mvs/owned_strip_storage.cc",
                     "src/colmap/mvs/owned_strip_view.h",
+                    "src/colmap/mvs/published_geo.h",
+                    "src/colmap/mvs/published_geo.cc",
                 }
                 <= set(generator.CLOSURE)
             )

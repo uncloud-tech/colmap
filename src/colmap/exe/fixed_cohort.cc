@@ -537,6 +537,7 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
         for (const auto& ref : named) names.push_back(ref.reference);
         publisher = std::make_unique<owned::PublishedGeoWriter>(
             output_path, std::move(names), &multi_gpu_cancelled);
+        mvs::NativeRunDeadlineGuard qualification_guard(deadline);
         publisher->QualifyCache();  // After approval, BEFORE any CUDA query.
       }
 #endif

@@ -278,20 +278,23 @@ StereoAdmissionPlan PlanSingleDeviceStereoAdmission(
     plan.validation_output_cache_raw = CheckedMultiply(
         request.output_policy == FixedCohortOutputPolicy::kPhotoAndGeo ? 2 : 1,
         plan.photo_output_cache_raw);
+    plan.post_output_metadata_raw = CheckedMultiply(
+        request.output_policy == FixedCohortOutputPolicy::kPhotoAndGeo ? 2 : 1,
+        plan.publication_metadata_raw);
     const auto photo_cache = plan.photo_output_cache_raw;
     plan.post_photo_host_raw =
         CheckedAdd(base,
-                   CheckedAdd(plan.publication_metadata_raw,
+                   CheckedAdd(plan.post_output_metadata_raw,
                               CheckedAdd(maps, photo_cache)));
     if (request.output_policy == FixedCohortOutputPolicy::kFinalGeoOnly)
       plan.post_photo_host_raw =
-          CheckedAdd(base, plan.publication_metadata_raw);
+          CheckedAdd(base, plan.post_output_metadata_raw);
     // Installed validation is after native completion; conservatively charge
     // BOTH requested map domains' entire cache plus existing process/unknown.
     plan.validation_host_raw =
         CheckedAdd(fixed.host,
                    CheckedAdd(plan.validation_output_cache_raw,
-                              plan.publication_metadata_raw));
+                              plan.post_output_metadata_raw));
     plan.common_host_raw =
         CheckedAdd(CheckedAdd(CheckedMultiply(2, pixels), maps),
                    CheckedAdd(plan.transient_pair_cache_raw,
@@ -461,6 +464,7 @@ bool SameStereoAdmissionPlan(const StereoAdmissionPlan& a,
                     p.validation_host_raw,
                     p.photo_output_cache_raw,
                     p.validation_output_cache_raw,
+                    p.post_output_metadata_raw,
                     p.active_owners,
                     p.peak_raw.host,
                     p.peak_raw.device,

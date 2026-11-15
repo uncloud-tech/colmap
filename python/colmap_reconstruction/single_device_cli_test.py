@@ -68,10 +68,14 @@ class SingleDeviceCommandTest(unittest.TestCase):
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn("at least two", refused.stdout + refused.stderr)
 
-    def test_published_geo_prepare_is_conditional_side_effect_free_and_bound(self):
+    def test_published_geo_prepare_is_conditional_and_side_effect_free(self):
         report = self.root / "published-plan.json"
         args = self.automatic_args(report) + [
-            "--geo_retention", "published", "--active_owners_ceiling", "1"]
+            "--geo_retention",
+            "published",
+            "--active_owners_ceiling",
+            "1",
+        ]
         result = self.invoke(args)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         plan = json.loads(report.read_bytes())
@@ -79,15 +83,21 @@ class SingleDeviceCommandTest(unittest.TestCase):
         self.assertEqual(plan["execution_kind"], "single_device_host_exchange")
         metadata = plan["single_device_host"]
         self.assertEqual(metadata["geo_retention"], "published")
-        self.assertEqual(metadata["required_cache_capability"],
-            "linux_4k_sync_dontneed_mincore_zero_private_no_readers")
+        self.assertEqual(
+            metadata["required_cache_capability"],
+            "linux_4k_sync_dontneed_mincore_zero_private_no_readers",
+        )
         self.assertGreater(int(metadata["transient_pair_cache_raw"]), 0)
         self.assertFalse(self.output.exists())
         self.assertFalse(list(self.workspace.glob(".published-geo-probe-*")))
         # Approval tampering must fail before driver/decode/probe/output.
         changed = self.root / "changed-published.json"
-        changed.write_text(report.read_text().replace('"geo_retention":"published"',
-                                                     '"geo_retention":"materialized"'))
+        changed.write_text(
+            report.read_text().replace(
+                '"geo_retention":"published"',
+                '"geo_retention":"materialized"',
+            )
+        )
         run = list(args)
         run[run.index("--prepare_only") + 1] = "0"
         run[run.index("--report_path") + 1] = str(self.root / "run.json")

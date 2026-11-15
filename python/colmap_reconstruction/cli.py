@@ -179,9 +179,13 @@ def parse_args(argv):
         help="retain final GEO maps only, or also the native PHOTO maps",
     )
     parser.add_argument(
-        "--geo-retention", choices=("materialized", "published"),
+        "--geo-retention",
+        choices=("materialized", "published"),
         default="materialized",
-        help="published: Linux single HOST owner, private/no-readers cohort until native completion",
+        help=(
+            "published: Linux single HOST owner, private/no-readers "
+            "cohort until native completion"
+        ),
     )
     parser.add_argument("--cache-size-gib", type=positive_float, default=1)
     parser.add_argument(
@@ -329,7 +333,9 @@ lower workload or free capacity (budgets cannot raise FREE)"""
             len(getattr(self, "stereo_devices", [])) != 1
             or a.active_owners_ceiling != 1
         ):
-            raise ValueError("published GEO requires one approved device and owner ceiling 1")
+            raise ValueError(
+                "published GEO requires one approved device and owner ceiling 1"
+            )
         seconds = math.floor(self.process.remaining())
         if seconds < 1:
             raise NativeFailure(
@@ -1461,7 +1467,10 @@ resize/fallback."""
         else:
             self.native("experimental_fixed_cohort", *self.dense_arguments())
         self.report = json.loads((self.assets / "cohort.json").read_bytes())
-        if self.report.get("geo_retention", "materialized") != self.args.geo_retention:
+        if (
+            self.report.get("geo_retention", "materialized")
+            != self.args.geo_retention
+        ):
             raise ValueError("native GEO retention differs from requested mode")
         if planned and self.report.get("multi_gpu_plan") != self.multi_gpu_plan:
             raise ValueError(
@@ -1594,7 +1603,12 @@ resize/fallback."""
 
 
 def bind_single_device_plan(
-    plan, graph, devices, fingerprint, capacity, output_policy="final_geo_only",
+    plan,
+    graph,
+    devices,
+    fingerprint,
+    capacity,
+    output_policy="final_geo_only",
     geo_retention="materialized",
 ):
     """Bind native policy/identity, never reproduce its memory inventory."""
@@ -1618,11 +1632,13 @@ def bind_single_device_plan(
     ):
         raise ValueError("single-device GEO retention changed")
     if geo_retention == "published":
-        if (kind != "single_device_host_exchange"
+        if (
+            kind != "single_device_host_exchange"
             or metadata.get("active_owners") != "1"
             or plan.get("active_owners_ceiling") != "1"
-            or metadata.get("required_cache_capability") !=
-                "linux_4k_sync_dontneed_mincore_zero_private_no_readers"):
+            or metadata.get("required_cache_capability")
+            != "linux_4k_sync_dontneed_mincore_zero_private_no_readers"
+        ):
             raise ValueError("published GEO capability/owner binding changed")
         for phase in plan["phases"]:
             for cohort in phase["groups"][0]["cohorts"]:

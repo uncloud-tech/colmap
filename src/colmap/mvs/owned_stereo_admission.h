@@ -80,6 +80,7 @@ struct StereoAdmissionPlan {
   uint64_t publication_metadata_raw = 0, capability_probe_host_raw = 0;
   uint64_t post_photo_host_raw = 0, validation_host_raw = 0;
   uint64_t photo_output_cache_raw = 0, validation_output_cache_raw = 0;
+  uint64_t post_output_metadata_raw = 0;
   FixedCohortOutputPolicy output_policy = FixedCohortOutputPolicy::kPhotoAndGeo;
   std::array<std::vector<StereoExecutionRecord>, 2> records;
   size_t active_owners = 1;

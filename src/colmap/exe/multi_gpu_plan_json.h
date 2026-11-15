@@ -94,6 +94,8 @@ inline Json SingleDeviceHostJson(
         Json(std::to_string(plan.photo_output_cache_raw))},
        {"validation_output_cache_raw",
         Json(std::to_string(plan.validation_output_cache_raw))},
+       {"post_output_metadata_raw",
+        Json(std::to_string(plan.post_output_metadata_raw))},
        {"post_photo_host_raw", Json(std::to_string(plan.post_photo_host_raw))},
        {"validation_host_raw", Json(std::to_string(plan.validation_host_raw))},
        {"peak_host_raw", Json(std::to_string(plan.peak_raw.host))},
