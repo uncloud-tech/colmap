@@ -3,9 +3,8 @@
 
 #include "colmap/mvs/multi_gpu_fixed_cohort.h"
 
-#include <optional>
-
 #include <filesystem>
+#include <optional>
 #include <string>
 
 namespace colmap::mvs::owned {

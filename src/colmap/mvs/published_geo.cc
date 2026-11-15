@@ -52,7 +52,7 @@ struct File {
   }
 };
 PublishedGeoFile Identity(int fd, const std::filesystem::path& path) {
-  struct stat info {};
+  struct stat info{};
   Require(fstat(fd, &info) == 0 && S_ISREG(info.st_mode) &&
               info.st_uid == geteuid() && info.st_nlink == 1 &&
               info.st_size > 0,
@@ -132,7 +132,7 @@ PublishedGeoWriter::PublishedGeoWriter(const std::filesystem::path& root,
   Require(
       std::filesystem::canonical(root_.parent_path()) == root_.parent_path(),
       "published GEO parent missing or symlinked");
-  struct statfs filesystem {};
+  struct statfs filesystem{};
   Require(statfs(root_.parent_path().c_str(), &filesystem) == 0 &&
               filesystem.f_type != TMPFS_MAGIC &&
               filesystem.f_type != RAMFS_MAGIC,
@@ -149,7 +149,7 @@ void PublishedGeoWriter::Check() const {
 void PublishedGeoWriter::Verify() const {
   Check();
 #ifdef __linux__
-  struct stat root {};
+  struct stat root{};
   Require(lstat(root_.c_str(), &root) == 0 && S_ISDIR(root.st_mode) &&
               root.st_uid == geteuid() && !(root.st_mode & 0077),
           "published GEO namespace is no longer private");

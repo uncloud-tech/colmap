@@ -190,9 +190,7 @@ int main() {
   assert(child >= 0);
   if (!child) {
     signal(SIGXFSZ, SIG_IGN);
-    struct rlimit limit {
-      8, 8
-    };
+    struct rlimit limit{8, 8};
     if (setrlimit(RLIMIT_FSIZE, &limit)) _exit(2);
     PublishedGeoWriter limited(root / "limited", {"x"});
     try {

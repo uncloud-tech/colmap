@@ -191,7 +191,8 @@ class MultiGpuBindingTest(unittest.TestCase):
         base = ["--photos", ".", "--workspace", "."]
         self.assertEqual(parse_args(base).geo_retention, "materialized")
         selected = parse_args(
-            base + ["--geo-retention", "published", "--active-owners-ceiling", "1"]
+            base
+            + ["--geo-retention", "published", "--active-owners-ceiling", "1"]
         )
         self.assertEqual(selected.geo_retention, "published")
 
@@ -391,9 +392,7 @@ class MultiGpuBindingTest(unittest.TestCase):
                     ordinal=0,
                     uuid="a" * 32,
                     capacity_bytes="1000",
-                    cohorts=[
-                        dict(jobs=[i], active_owners=1) for i in range(2)
-                    ],
+                    cohorts=[dict(jobs=[i], active_owners=1) for i in range(2)],
                 )
             ]
         plan["single_device_host"] = dict(
@@ -427,19 +426,30 @@ class MultiGpuBindingTest(unittest.TestCase):
             plan["single_device_host"]["output_policy"] = policy
             self.assertEqual(
                 bind_single_device_plan(
-                    plan, graph, devices, "fp", "1000",
-                    output_policy=policy, geo_retention="published",
+                    plan,
+                    graph,
+                    devices,
+                    "fp",
+                    "1000",
+                    output_policy=policy,
+                    geo_retention="published",
                 )["geo"],
                 {0: "0", 1: "0"},
             )
         for field in (
-            "geo_retention", "active_owners", "required_cache_capability"
+            "geo_retention",
+            "active_owners",
+            "required_cache_capability",
         ):
             changed = copy.deepcopy(original)
             changed["single_device_host"][field] = "changed"
             with self.subTest(field=field), self.assertRaises(ValueError):
                 bind_single_device_plan(
-                    changed, graph, devices, "fp", "1000",
+                    changed,
+                    graph,
+                    devices,
+                    "fp",
+                    "1000",
                     geo_retention="published",
                 )
         with self.assertRaises(ValueError):
@@ -450,7 +460,11 @@ class MultiGpuBindingTest(unittest.TestCase):
         ]
         with self.assertRaises(ValueError):
             bind_single_device_plan(
-                changed, graph, devices, "fp", "1000",
+                changed,
+                graph,
+                devices,
+                "fp",
+                "1000",
                 geo_retention="published",
             )
 
