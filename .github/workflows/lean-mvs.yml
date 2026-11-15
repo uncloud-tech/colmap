@@ -19,7 +19,7 @@ jobs:
     # Never execute external-fork PR code on these self-hosted runners.
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -35,6 +35,19 @@ jobs:
           bash scripts/ci/check_mvs_format.sh "$FORMAT_BASE"
       - name: Run standalone production CPU contracts and packaging regressions
         run: bash scripts/ci/run_mvs_cpu.sh
+      - name: Install native terminal writer CPU test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config \
+            libboost-program-options-dev libboost-graph-dev libboost-system-dev \
+            libeigen3-dev libceres-dev libopenimageio-dev openimageio-tools \
+            libsuitesparse-dev libmetis-dev libgoogle-glog-dev \
+            libgtest-dev libgmock-dev libsqlite3-dev libunwind-dev libglew-dev \
+            libcurl4-openssl-dev libopenblas-dev liblapack-dev
+          sudo mkdir -p /usr/include/opencv4
+      - name: Run native terminal writer CPU tests and actual CLI caller
+        run: bash scripts/ci/run_terminal_writers_cpu.sh
 
   cuda-compile:
     name: ${{ matrix.name }}

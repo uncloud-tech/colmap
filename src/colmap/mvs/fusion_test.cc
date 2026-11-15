@@ -9,6 +9,7 @@
 #include "colmap/sensor/bitmap.h"
 #include "colmap/util/file.h"
 #include "colmap/util/ply.h"
+#include "colmap/util/terminal_writer_test.h"
 #include "colmap/util/testing.h"
 #include "colmap/util/threading.h"
 
@@ -54,8 +55,9 @@ std::vector<std::string> CreateFusionWorkspace(
   SyntheticDatasetOptions synthetic_dataset_options;
   synthetic_dataset_options.num_rigs = 1;
   synthetic_dataset_options.num_cameras_per_rig = heterogeneous ? 2 : 1;
-  synthetic_dataset_options.num_frames_per_rig =
-      heterogeneous ? 1 : default_quality ? 5 : 2;
+  synthetic_dataset_options.num_frames_per_rig = heterogeneous     ? 1
+                                                 : default_quality ? 5
+                                                                   : 2;
   synthetic_dataset_options.camera_width = kWidth;
   synthetic_dataset_options.camera_height = kHeight;
   if (default_quality) {
@@ -67,7 +69,8 @@ std::vector<std::string> CreateFusionWorkspace(
   SynthesizeDataset(synthetic_dataset_options, &reconstruction);
   if (heterogeneous) {
     EXPECT_GE(reconstruction.NumCameras(), 2);
-    reconstruction.Camera(reconstruction.Cameras().begin()->first).Rescale(4, 4);
+    reconstruction.Camera(reconstruction.Cameras().begin()->first)
+        .Rescale(4, 4);
   }
   if (default_quality) {
     for (const auto& [image_id, image] : reconstruction.Images()) {
@@ -304,20 +307,31 @@ TEST(StereoFusion, BudgetedCliFailureDoesNotPublishOutputOrReceipt) {
   if (binary == nullptr || binary[0] == '\0') GTEST_SKIP();
   const auto dir = CreateTestDir();
   CreateFusionWorkspace(dir);
-  const std::array<const char*, 5> caps{"1", "20765", "1073741824", "-1",
-                                       "1073741824"};
+  const std::array<const char*, 5> caps{
+      "1", "20765", "1073741824", "-1", "1073741824"};
   for (size_t i = 0; i < caps.size(); ++i) {
     const auto output = dir / (std::to_string(i) + ".ply");
     const auto receipt = dir / (std::to_string(i) + ".receipt");
     const pid_t pid = fork();
     ASSERT_NE(pid, -1);
     if (pid == 0) {
-      execl(binary, binary, "stereo_fusion", "--workspace_path", dir.c_str(),
-            "--output_path", output.c_str(), "--optimized_only", "true",
-            "--optimized_dispatch_receipt", receipt.c_str(),
-            "--StereoFusion.num_threads", i == 2 ? "2" : "1",
-            "--StereoFusion.min_num_pixels", "1",
-            "--StereoFusion.host_budget_bytes", caps[i],
+      execl(binary,
+            binary,
+            "stereo_fusion",
+            "--workspace_path",
+            dir.c_str(),
+            "--output_path",
+            output.c_str(),
+            "--optimized_only",
+            "true",
+            "--optimized_dispatch_receipt",
+            receipt.c_str(),
+            "--StereoFusion.num_threads",
+            i == 2 ? "2" : "1",
+            "--StereoFusion.min_num_pixels",
+            "1",
+            "--StereoFusion.host_budget_bytes",
+            caps[i],
             static_cast<char*>(nullptr));
       _exit(127);
     }
@@ -371,14 +385,16 @@ TEST(StereoFusion, BudgetDeduplicatesAndValidatesMapsBeforeDecode) {
   StereoFusionOptions options;
   options.num_threads = 1;
   options.min_num_pixels = options.max_num_pixels;
-  options.host_budget_bytes = 20765;  // Exact 2-image input peak, not 4 entries.
+  options.host_budget_bytes =
+      20765;  // Exact 2-image input peak, not 4 entries.
   StereoFusion fusion(options, dir, "COLMAP", "", "geometric");
   EXPECT_NO_THROW(fusion.Run());
   EXPECT_TRUE(fusion.GetFusedPoints().empty());
   // Complete malformed map plus invalid bitmap: map validation must occur
   // before RGB decode even when admission has generous space.
   std::ofstream(dir / "stereo" / "depth_maps" /
-                (names.front() + ".geometric.bin")) << "malformed";
+                (names.front() + ".geometric.bin"))
+      << "malformed";
   std::ofstream(dir / "images" / names.front()) << "bad bitmap";
   options.host_budget_bytes = uint64_t{1} << 30;
   StereoFusion malformed(options, dir, "COLMAP", "", "geometric");
@@ -409,7 +425,8 @@ TEST(StereoFusion, BudgetedMergeRefusesWithoutPublishingPartialPoints) {
       fusion.Run();
       high = options.host_budget_bytes;
     } catch (const FusionResourceError& error) {
-      if (std::string(error.what()).find("workers drained") == std::string::npos) {
+      if (std::string(error.what()).find("workers drained") ==
+          std::string::npos) {
         merge_refused = true;
         EXPECT_TRUE(fusion.GetFusedPoints().empty());
       }
@@ -1009,6 +1026,135 @@ TEST(StereoFusion, MappedOptions) {
   options.use_cache = true;
   EXPECT_TRUE(options.Check());
 }
+
+TEST(WritePointsVisibility, ExactBytesEmptyAndOpenError) {
+  const auto dir = CreateTestDir();
+  const auto path = dir / "points.vis";
+  WritePointsVisibility(path, {{1, 256}, {}});
+  const std::string expected(
+      "\x02\x00\x00\x00\x00\x00\x00\x00"
+      "\x02\x00\x00\x00\x01\x00\x00\x00"
+      "\x00\x01\x00\x00\x00\x00\x00\x00",
+      24);
+  auto bytes = [&] {
+    std::ifstream file(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(file), {});
+  };
+  EXPECT_EQ(bytes(), expected);
+  WritePointsVisibility(path, {});
+  EXPECT_EQ(bytes(), std::string(8, '\0'));
+  const auto missing = dir / "missing" / "points.vis";
+  try {
+    WritePointsVisibility(missing, {});
+    FAIL() << "missing parent must fail";
+  } catch (const std::exception& error) {
+    EXPECT_NE(std::string(error.what()).find(missing.string()),
+              std::string::npos);
+  }
+}
+
+#if defined(__linux__)
+TEST(WritePointsVisibility, ReportsBufferedFinalizationFailure) {
+  const auto path = CreateTestDir() / "buffered.vis";
+  terminal_writer_test::ExpectFileSizeFailure(
+      path, 1, [&] { WritePointsVisibility(path, {}); });
+}
+
+TEST(WritePointsVisibility, ReportsPayloadFailure) {
+  const auto path = CreateTestDir() / "payload.vis";
+  terminal_writer_test::ExpectFileSizeFailure(path, 7, [&] {
+    WritePointsVisibility(path, {std::vector<int>(16384, 1)});
+  });
+}
+
+void RunTerminalWriterCliFailure(const std::string& failure) {
+  const char* binary = std::getenv("COLMAP_BINARY");
+  if (binary == nullptr || binary[0] == '\0') {
+    GTEST_SKIP() << "Runtime must supply actual current COLMAP_BINARY; skip is "
+                    "not proof";
+  }
+  ASSERT_TRUE(std::filesystem::is_regular_file(binary));
+  // Verify the real device failure independently of the production writers.
+  const int fd = open("/dev/full", O_WRONLY);
+  ASSERT_GE(fd, 0);
+  errno = 0;
+  const ssize_t result = write(fd, "!", 1);
+  const int error = errno;
+  close(fd);
+  ASSERT_EQ(result, -1);
+  ASSERT_EQ(error, ENOSPC);
+
+  const auto dir = CreateTestDir();
+  CreateFusionWorkspace(dir);
+  for (const std::string& mode : {std::string("success"), failure}) {
+    SCOPED_TRACE(mode);
+    const auto output = dir / (mode + ".ply");
+    const auto receipt = dir / (mode + ".receipt");
+    if (mode == "ply") {
+      std::filesystem::create_symlink("/dev/full", output);
+    } else if (mode == "vis") {
+      std::filesystem::create_symlink("/dev/full", output.string() + ".vis");
+    }
+    const pid_t pid = fork();
+    ASSERT_NE(pid, -1);
+    if (pid == 0) {
+      alarm(60);
+      execl(binary,
+            binary,
+            "stereo_fusion",
+            "--workspace_path",
+            dir.c_str(),
+            "--output_path",
+            output.c_str(),
+            "--optimized_only",
+            "true",
+            "--optimized_dispatch_receipt",
+            receipt.c_str(),
+            "--StereoFusion.num_threads",
+            "1",
+            "--StereoFusion.min_num_pixels",
+            "1",
+            "--StereoFusion.host_budget_bytes",
+            "1073741824",
+            static_cast<char*>(nullptr));
+      _exit(127);
+    }
+    int status = 0;
+    pid_t waited;
+    do {
+      waited = waitpid(pid, &status, 0);
+    } while (waited == -1 && errno == EINTR);
+    ASSERT_EQ(waited, pid);
+    ASSERT_TRUE(WIFEXITED(status)) << "raw status=" << status;
+    ASSERT_NE(WEXITSTATUS(status), 127)
+        << "exec failure is not writer evidence";
+    if (mode == "success") {
+      ASSERT_EQ(WEXITSTATUS(status), 0);
+      const auto points = ReadPly(output);
+      ASSERT_FALSE(points.empty());
+      EXPECT_EQ(
+          ReadPointsVisibility(output.string() + ".vis", points.size()).size(),
+          points.size());
+      EXPECT_TRUE(std::filesystem::is_regular_file(receipt));
+    } else {
+      EXPECT_NE(WEXITSTATUS(status), 0);
+      EXPECT_FALSE(std::filesystem::exists(receipt));
+      // Ordinary partial output may remain; no atomicity/rollback contract.
+      if (mode == "vis") {
+        EXPECT_FALSE(ReadPly(output).empty());
+      }
+    }
+  }
+}
+
+TEST(StereoFusion, PlyWriterCliFailureDoesNotPublishSuccessReceipt) {
+  RunTerminalWriterCliFailure("ply");
+}
+
+TEST(StereoFusion, VisibilityWriterCliFailureDoesNotPublishSuccessReceipt) {
+  RunTerminalWriterCliFailure("vis");
+}
+#endif
 
 TEST(ReadPointsVisibility, RoundTrip) {
   const auto test_dir = CreateTestDir();

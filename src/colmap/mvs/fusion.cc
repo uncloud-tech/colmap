@@ -5,12 +5,12 @@
 #include "colmap/math/math.h"
 #include "colmap/mvs/fusion_dependencies.h"
 #include "colmap/mvs/owned_fixed_cohort_validation.h"
-#include "colmap/util/oiio_utils.h"
 #include "colmap/util/eigen_alignment.h"
 #include "colmap/util/endian.h"
 #include "colmap/util/file.h"
 #include "colmap/util/hash_containers.h"
 #include "colmap/util/misc.h"
+#include "colmap/util/oiio_utils.h"
 #include "colmap/util/threading.h"
 #include "colmap/util/timer.h"
 
@@ -192,8 +192,8 @@ void StereoFusion::Run() {
     // mapping owners for the run. Mapping payload is not a resident charge.
     const auto capacity = std::min(options_.host_budget_bytes,
                                    owned::ObserveFixedCohortHostAvailable());
-    FusionLogicalBudget budget(capacity, options_.policy_host_bytes,
-                               options_.reserve_host_bytes);
+    FusionLogicalBudget budget(
+        capacity, options_.policy_host_bytes, options_.reserve_host_bytes);
     FusionInputInventory inventory;
     const auto& model = workspace_->GetModel();
     std::vector<char> seen(model.images.size(), false);
@@ -203,9 +203,11 @@ void StereoFusion::Run() {
     mapped_normal_maps_.resize(model.images.size());
     for (const auto& name : image_names) {
       const auto idx = model.GetImageIdx(name);
-      if (!FusionInputsAvailable(name, workspace_->GetBitmapPath(idx),
-                                  workspace_->GetDepthMapPath(idx),
-                                  workspace_->GetNormalMapPath(idx), true))
+      if (!FusionInputsAvailable(name,
+                                 workspace_->GetBitmapPath(idx),
+                                 workspace_->GetDepthMapPath(idx),
+                                 workspace_->GetNormalMapPath(idx),
+                                 true))
         continue;
       if (seen.at(idx)) continue;
       seen.at(idx) = true;
@@ -216,13 +218,21 @@ void StereoFusion::Run() {
       if (FusionCheckedMultiply(
               FusionCheckedMultiply(image.GetWidth(), image.GetHeight()), 3) >
           static_cast<uint64_t>(std::numeric_limits<int>::max()))
-        throw std::invalid_argument("budgeted fusion bitmap shape exceeds int decoder range");
-      mapped_depth_maps_[idx] = std::make_unique<FusionMappedMat>(
-          workspace_->GetDepthMapPath(idx), image.GetWidth(), image.GetHeight(), 1);
-      mapped_normal_maps_[idx] = std::make_unique<FusionMappedMat>(
-          workspace_->GetNormalMapPath(idx), image.GetWidth(), image.GetHeight(), 3);
+        throw std::invalid_argument(
+            "budgeted fusion bitmap shape exceeds int decoder range");
+      mapped_depth_maps_[idx] =
+          std::make_unique<FusionMappedMat>(workspace_->GetDepthMapPath(idx),
+                                            image.GetWidth(),
+                                            image.GetHeight(),
+                                            1);
+      mapped_normal_maps_[idx] =
+          std::make_unique<FusionMappedMat>(workspace_->GetNormalMapPath(idx),
+                                            image.GetWidth(),
+                                            image.GetHeight(),
+                                            3);
     }
-    LOG(INFO) << "Fusion logical retained input bytes: " << inventory.retained_bytes
+    LOG(INFO) << "Fusion logical retained input bytes: "
+              << inventory.retained_bytes
               << ", initialization peak: " << inventory.peak_bytes
               << ", mapped file payload (not resident floor/free credit): "
               << inventory.mapped_bytes
@@ -235,20 +245,20 @@ void StereoFusion::Run() {
     EnsureOpenImageIOInitialized();
     for (size_t idx = 0; idx < seen.size(); ++idx) {
       if (!seen[idx]) continue;
-      const auto input = OIIO::ImageInput::open(
-          workspace_->GetBitmapPath(idx).string());
+      const auto input =
+          OIIO::ImageInput::open(workspace_->GetBitmapPath(idx).string());
       if (!input) throw std::invalid_argument("fusion invalid bitmap header");
       const auto& spec = input->spec();
       const auto& image = model.images.at(idx);
       const bool valid = spec.width == image.GetWidth() &&
-                         spec.height == image.GetHeight() &&
-                         spec.depth == 1 && spec.nchannels >= 1 &&
-                         spec.nchannels <= 4;
+                         spec.height == image.GetHeight() && spec.depth == 1 &&
+                         spec.nchannels >= 1 && spec.nchannels <= 4;
       input->close();
-      if (!valid) throw std::invalid_argument("fusion bitmap/model shape mismatch");
+      if (!valid)
+        throw std::invalid_argument("fusion bitmap/model shape mismatch");
     }
-    output_ledger_ = std::make_unique<FusionOutputLedger>(
-        budget, inventory.retained_bytes);
+    output_ledger_ =
+        std::make_unique<FusionOutputLedger>(budget, inventory.retained_bytes);
   }
   if (!options_.use_cache && !options_.use_mmap) {
     workspace_->Load(image_names);
@@ -453,7 +463,8 @@ void StereoFusion::Run() {
       } catch (...) {
       }
       if (resource_failed_.load())
-        throw FusionResourceError("fusion runtime output budget exhausted; workers drained");
+        throw FusionResourceError(
+            "fusion runtime output budget exhausted; workers drained");
       std::rethrow_exception(error);
     }
     VerifyMappedInputs();
@@ -463,10 +474,10 @@ void StereoFusion::Run() {
 
     total_fused_points = 0;
     for (const auto& task_fused_points : task_fused_points_) {
-      total_fused_points = options_.host_budget_bytes
-                               ? FusionCheckedAdd(total_fused_points,
-                                                  task_fused_points.size())
-                               : total_fused_points + task_fused_points.size();
+      total_fused_points =
+          options_.host_budget_bytes
+              ? FusionCheckedAdd(total_fused_points, task_fused_points.size())
+              : total_fused_points + task_fused_points.size();
     }
     LOG(INFO) << StringPrintf(
         " in %.3fs (%d points)", timer.ElapsedSeconds(), total_fused_points);
@@ -788,7 +799,8 @@ void StereoFusion::Fuse(const int thread_id,
       output_ledger_->GrowForAppend(visibility);
       std::vector<int> indices;
       output_ledger_->Reserve(indices, fused_point_visibility.size());
-      indices.insert(indices.end(), fused_point_visibility.begin(),
+      indices.insert(indices.end(),
+                     fused_point_visibility.begin(),
                      fused_point_visibility.end());
       points.push_back(fused_point);
       visibility.push_back(std::move(indices));
@@ -814,6 +826,12 @@ void WritePointsVisibility(
       WriteBinaryLittleEndian<uint32_t>(&file, image_idx);
     }
   }
+
+  THROW_CHECK(file.good()) << "Failed to write points visibility: " << path;
+  file.flush();
+  THROW_CHECK(file.good()) << "Failed to flush points visibility: " << path;
+  file.close();
+  THROW_CHECK(!file.fail()) << "Failed to close points visibility: " << path;
 }
 
 std::vector<std::vector<int>> ReadPointsVisibility(

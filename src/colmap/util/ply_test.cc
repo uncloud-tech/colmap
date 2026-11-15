@@ -2,14 +2,97 @@
 
 #include "colmap/util/ply.h"
 
+#include "colmap/util/terminal_writer_test.h"
 #include "colmap/util/testing.h"
 
 #include <fstream>
+#include <iterator>
+#include <stdexcept>
 
 #include <gtest/gtest.h>
 
 namespace colmap {
 namespace {
+
+std::string BinaryPointHeader(const size_t count,
+                              const bool normals = false,
+                              const bool rgb = false) {
+  return "ply\nformat binary_little_endian 1.0\nelement vertex " +
+         std::to_string(count) +
+         "\nproperty float x\nproperty float y\nproperty float z\n" +
+         (normals ? "property float nx\nproperty float ny\nproperty float nz\n"
+                  : "") +
+         (rgb ? "property uchar red\nproperty uchar green\nproperty uchar "
+                "blue\n"
+              : "") +
+         "end_header\n";
+}
+
+std::string ReadPointBytes(const std::filesystem::path& path) {
+  std::ifstream file(path, std::ios::binary);
+  return std::string(std::istreambuf_iterator<char>(file), {});
+}
+
+TEST(Ply, BinaryPointWriterExactBytesAndEmpty) {
+  const auto dir = CreateTestDir();
+  PlyPoint point;
+  point.x = 1.0f;
+  point.r = 1;
+  point.g = 2;
+  point.b = 3;
+  for (const bool normals : {false, true}) {
+    for (const bool rgb : {false, true}) {
+      const auto path = dir / "points.ply";
+      WriteBinaryPlyPoints(path, {point}, normals, rgb);
+      std::string expected = BinaryPointHeader(1, normals, rgb);
+      // Independent IEEE754 little-endian oracle: (1,0,0), zero normals.
+      expected.append("\x00\x00\x80\x3f\x00\x00\x00\x00\x00\x00\x00\x00", 12);
+      if (normals) expected.append(12, '\0');
+      if (rgb) expected.append("\x01\x02\x03", 3);
+      EXPECT_EQ(ReadPointBytes(path), expected);
+      WriteBinaryPlyPoints(path, {}, normals, rgb);
+      EXPECT_EQ(ReadPointBytes(path), BinaryPointHeader(0, normals, rgb));
+    }
+  }
+}
+
+TEST(Ply, BinaryPointWriterPreservesOpenError) {
+  const auto path = CreateTestDir() / "missing" / "points.ply";
+  try {
+    WriteBinaryPlyPoints(path, {});
+    FAIL() << "missing parent must fail";
+  } catch (const std::exception& error) {
+    EXPECT_NE(std::string(error.what()).find(path.string()), std::string::npos);
+  }
+}
+
+#if defined(__linux__)
+TEST(Ply, BinaryPointWriterReportsHeaderFinalizationFailure) {
+  const auto path = CreateTestDir() / "header.ply";
+  terminal_writer_test::ExpectFileSizeFailure(
+      path, 32, [&] { WriteBinaryPlyPoints(path, {}, false, false); });
+  EXPECT_EQ(ReadPointBytes(path), BinaryPointHeader(0).substr(0, 32));
+}
+
+TEST(Ply, BinaryPointWriterReportsAppendBufferedFinalizationFailure) {
+  const auto path = CreateTestDir() / "buffered.ply";
+  // Header fits in its first stream; the tiny append fails on finalization.
+  const auto header = BinaryPointHeader(1);
+  terminal_writer_test::ExpectFileSizeFailure(path, header.size() + 1, [&] {
+    WriteBinaryPlyPoints(path, {PlyPoint()}, false, false);
+  });
+  EXPECT_EQ(ReadPointBytes(path), header + std::string(1, '\0'));
+}
+
+TEST(Ply, BinaryPointWriterReportsAppendPayloadFailure) {
+  const auto path = CreateTestDir() / "payload.ply";
+  const auto header = BinaryPointHeader(4096);
+  terminal_writer_test::ExpectFileSizeFailure(path, header.size() + 7, [&] {
+    WriteBinaryPlyPoints(path, std::vector<PlyPoint>(4096), false, false);
+  });
+  EXPECT_EQ(ReadPointBytes(path), header + std::string(7, '\0'));
+}
+#endif
 
 TEST(PlyPoint, DefaultConstructor) {
   PlyPoint point;

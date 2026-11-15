@@ -376,7 +376,11 @@ void WriteBinaryPlyPoints(const std::filesystem::path& path,
   }
 
   text_file << "end_header\n";
+  THROW_CHECK(text_file.good()) << "Failed to write PLY header: " << path;
+  text_file.flush();
+  THROW_CHECK(text_file.good()) << "Failed to flush PLY header: " << path;
   text_file.close();
+  THROW_CHECK(!text_file.fail()) << "Failed to close PLY header: " << path;
 
   std::fstream binary_file(path,
                            std::ios::out | std::ios::binary | std::ios::app);
@@ -400,7 +404,11 @@ void WriteBinaryPlyPoints(const std::filesystem::path& path,
     }
   }
 
+  THROW_CHECK(binary_file.good()) << "Failed to write PLY points: " << path;
+  binary_file.flush();
+  THROW_CHECK(binary_file.good()) << "Failed to flush PLY points: " << path;
   binary_file.close();
+  THROW_CHECK(!binary_file.fail()) << "Failed to close PLY points: " << path;
 }
 
 PlyTexturedMesh ReadPlyMesh(const std::filesystem::path& path) {
