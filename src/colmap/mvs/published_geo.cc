@@ -186,7 +186,8 @@ PublishedGeoFile PublishedGeoWriter::Write(const std::filesystem::path& path,
   const auto write_all = [&](const void* data, size_t remaining) {
     const auto* bytes = static_cast<const char*>(data);
     while (remaining) {
-      Verify();  // Prior files BEFORE any new advice, even while normal writes.
+      // Chunk-local cancel/state; full scans precede advice.
+      Check();
       const auto count =
           write(file.fd, bytes, std::min<size_t>(remaining, 1048576));
       if (count < 0 && errno == EINTR) continue;

@@ -104,6 +104,18 @@ void RemainsFailed(PublishedGeoWriter& writer,
 }
 #ifdef PUBLISHED_GEO_WRAP_IO
 int fail_sync = 0, fail_close = 0, fail_advice = 0, fail_write = 0;
+// Count real probes; never substitute a residency result or touch the mapping.
+size_t mincore_calls = 0, advice_calls = 0;
+const PublishedGeoFile* read_during_write = nullptr;
+bool midwrite_read = false;
+size_t advice_calls_at_read = 0;
+extern "C" int __real_mincore(void*, size_t, unsigned char*);
+extern "C" int __wrap_mincore(void* address,
+                              size_t length,
+                              unsigned char* residency) {
+  ++mincore_calls;
+  return __real_mincore(address, length, residency);
+}
 // Inject only the timestamp observation seen in CI, on this owned inode.
 // Actual files, link counts, I/O, residency, and all other metadata stay real.
 const PublishedGeoFile* identical_ctime = nullptr;
@@ -142,6 +154,7 @@ extern "C" int __wrap_posix_fadvise(int fd,
                                     off_t offset,
                                     off_t count,
                                     int advice) {
+  ++advice_calls;
   if (fail_advice == 1) return ENOSYS;
   // Inject advice success without eviction, to exercise the real ZERO check.
   if (fail_advice == 2) return 0;
@@ -152,7 +165,19 @@ extern "C" ssize_t __wrap_write(int fd, const void* data, size_t count) {
     errno = EIO;
     return -1;
   }
-  return __real_write(fd, data, count);
+  const auto result = __real_write(fd, data, count);
+  if (result > 0 && count == 1048576 && read_during_write) {
+    // Deliberate no-reader violation after a real large-body chunk was written.
+    const int prior_fd = open(read_during_write->path.c_str(), O_RDONLY);
+    assert(prior_fd >= 0);
+    char byte = 0;
+    assert(pread(prior_fd, &byte, 1, 0) == 1 && byte == '3');
+    assert(close(prior_fd) == 0);
+    midwrite_read = true;
+    advice_calls_at_read = advice_calls;
+    read_during_write = nullptr;
+  }
+  return result;
 }
 #endif
 }  // namespace
@@ -480,6 +505,63 @@ int main() {
             root / ("failed-" + std::to_string(failure)),
             [&] { failed.VerifyComplete(); });
     assert(failed.Products().empty());
+  }
+  {
+    // Cross both the write-chunk and probe-window boundaries with a small pair.
+    const size_t width =
+        PublishedGeoWriter::kProbeWindowBytes / sizeof(float) + 1;
+    Mat<float> large_depth(width, 1, 1), large_normal(width, 1, 3);
+    large_depth.Fill(1.0f);
+    large_normal.Fill(-2.0f);
+    PublishedGeoWriter midreader(root / "midwrite-reader", {"first", "second"});
+    midreader.Publish(0, depth, normal);
+    const auto prior = midreader.Products()[0].depth;
+    advice_calls = 0;
+    midwrite_read = false;
+    read_during_write = &prior;
+    Refuses("midwrite-prior-reader",
+            "prior cache residency nonzero",
+            prior.path,
+            [&] {
+              try {
+                midreader.Publish(1, large_depth, large_normal);
+              } catch (const std::runtime_error& error) {
+                assert(std::string(error.what()) ==
+                       "published GEO cache residency is nonzero");
+                throw;
+              }
+            });
+    assert(midwrite_read && !read_during_write);
+    assert(advice_calls_at_read == 0 && advice_calls == 0);
+    assert(midreader.Products().size() == 1);
+    assert(!std::filesystem::exists(
+        root / "midwrite-reader/stereo/normal_maps/second.geometric.bin"));
+    RemainsFailed(midreader, prior.path, depth, normal);
+    std::cerr
+        << "[published-geo boundary] midwrite reader refused before advice\n";
+    PublishedGeoWriter bounded(root / "boundary-probes", {"first", "second"});
+    bounded.Publish(0, depth, normal);
+    const auto windows = [](const PublishedGeoFile& file) {
+      return (file.bytes + PublishedGeoWriter::kProbeWindowBytes - 1) /
+             PublishedGeoWriter::kProbeWindowBytes;
+    };
+    const auto prior_windows = windows(bounded.Products()[0].depth) +
+                               windows(bounded.Products()[0].normal);
+    mincore_calls = 0;
+    bounded.Publish(1, large_depth, large_normal);
+    bounded.VerifyComplete();
+    const auto depth_windows = windows(bounded.Products()[1].depth);
+    const auto normal_windows = windows(bounded.Products()[1].normal);
+    // Full scans: Publish entry, each file's post-sync/pre-advice boundary,
+    // each new file's post-advice ZERO check, Publish end, VerifyComplete.
+    const auto boundary_probes =
+        prior_windows + prior_windows + depth_windows +
+        (prior_windows + depth_windows) + normal_windows +
+        (prior_windows + depth_windows + normal_windows) +
+        (prior_windows + depth_windows + normal_windows);
+    std::cerr << "[published-geo boundary] mincore=" << mincore_calls
+              << " boundary_bound=" << boundary_probes << '\n';
+    assert(mincore_calls <= boundary_probes);
   }
 #endif
   std::filesystem::remove_all(root);
