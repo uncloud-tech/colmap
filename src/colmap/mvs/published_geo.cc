@@ -21,6 +21,24 @@ namespace {
 void Require(bool condition, const char* message) {
   if (!condition) throw std::runtime_error(message);
 }
+void ValidateMat(const Mat<float>& map) {
+  const auto width = map.GetWidth(), height = map.GetHeight();
+  const auto channels = map.GetDepth();
+  const auto maximum = std::numeric_limits<size_t>::max();
+  Require(width && height && channels &&
+              width <= size_t(std::numeric_limits<int>::max()) &&
+              height <= size_t(std::numeric_limits<int>::max()) &&
+              width <= maximum / height,
+          "published GEO map dimensions outside native range");
+  const auto area = width * height;
+  Require(area <= maximum / channels, "published GEO map size overflow");
+  const auto count = area * channels;
+  Require(count <= maximum / sizeof(float) && count == map.GetData().size() &&
+              count * sizeof(float) <=
+                  uint64_t(std::numeric_limits<int64_t>::max()) -
+                      PublishedGeoWriter::kPageBytes,
+          "published GEO map payload/offset mismatch");
+}
 #ifdef __linux__
 struct File {
   int fd;
@@ -204,6 +222,8 @@ void PublishedGeoWriter::Publish(size_t job,
               depth.GetWidth() == normal.GetWidth() &&
               depth.GetHeight() == normal.GetHeight(),
           "published GEO pair shape mismatch");
+  ValidateMat(depth);
+  ValidateMat(normal);
   const auto name = references_[job] + ".geometric.bin";
   const auto d = Write(root_ / "stereo" / "depth_maps" / name, depth);
   files_.push_back(d);

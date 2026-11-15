@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <limits>
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -110,6 +111,14 @@ int main() {
   assert(bytes(legacy_normal) ==
          bytes(root / "stereo/normal_maps/nested/image.jpg.geometric.bin"));
 #endif
+  // Mat's constructor historically does unchecked products; publication must
+  // not turn a wrapped allocation into a success-shaped malformed map file.
+  const auto wrapped_width = std::numeric_limits<size_t>::max() / 2 + 2;
+  Mat<float> malformed_depth(wrapped_width, 2, 1);
+  Mat<float> malformed_normal(wrapped_width, 2, 3);
+  PublishedGeoWriter malformed(root / "malformed", {"x"});
+  Refuses([&] { malformed.Publish(0, malformed_depth, malformed_normal); });
+  Refuses([&] { malformed.VerifyComplete(); });
   // Ordinary filesystem failures and identity changes use the REAL writer.
   Refuses([&] { PublishedGeoWriter duplicate(root, {"other"}); });
   Refuses(
