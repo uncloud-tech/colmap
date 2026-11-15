@@ -44,6 +44,14 @@ for name in "${contracts[@]}"; do
     -pthread -Isrc -I"$work/include" "src/colmap/mvs/$name.cc" -o "$work/$name"
   timeout 30s "$work/$name"
 done
+echo "CPU contract: published_geo_test (real filesystem/cache; no GPU)"
+"${CXX:-c++}" -std=c++17 -O2 -UNDEBUG -Wall -Wextra -Werror -pedantic \
+  -Isrc src/colmap/mvs/published_geo_test.cc src/colmap/mvs/published_geo.cc \
+  -DPUBLISHED_GEO_WRAP_IO \
+  -Wl,--wrap=fdatasync,--wrap=close,--wrap=posix_fadvise,--wrap=write \
+  -o "$work/published_geo_test"
+timeout 30s "$work/published_geo_test"
+PYTHONPATH="$root/python" python3 -m unittest colmap_reconstruction.multi_gpu_cli_test
 echo "CPU contract: owned_strip_storage_test"
 "${CXX:-c++}" -std=c++17 -O2 -UNDEBUG -Wall -Wextra -Werror -pedantic \
   -Isrc src/colmap/mvs/owned_strip_storage_test.cc \

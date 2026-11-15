@@ -175,6 +175,8 @@ CLOSURE = (
     "src/colmap/mvs/owned_strip_storage.cc",
     "src/colmap/mvs/owned_stereo_admission.h",
     "src/colmap/mvs/owned_stereo_admission.cc",
+    "src/colmap/mvs/published_geo.h",
+    "src/colmap/mvs/published_geo.cc",
     "src/colmap/mvs/owned_strip_view.h",
     "src/colmap/mvs/resident_contract.h",
     "src/colmap/mvs/resident_contract.cc",

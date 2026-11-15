@@ -188,7 +188,8 @@ MultiGpuFixedCohortPlan PlanSingleDeviceHostFixedCohort(
     const std::filesystem::path& scratch_directory,
     const std::string& requested_storage,
     uint64_t loader_scratch_host_raw,
-    int tile_threads) {
+    int tile_threads,
+    GeoRetention geo_retention) {
   ValidateOwnedTileThreads(tile_threads);
   ValidateFixedCohortLiveProcess(declarations);
   Require(device.ordinal >= 0 && !device.uuid.empty() &&
@@ -202,6 +203,7 @@ MultiGpuFixedCohortPlan PlanSingleDeviceHostFixedCohort(
               !declarations.unknown_provenance.empty(),
           "single-device HOST requires explicit unknown allowance/provenance");
   StereoAdmissionRequest request;
+  request.geo_retention = geo_retention;
   request.images = images;
   request.capacity = {host_capacity, device.capacity_bytes};
   request.disk_capacity = disk_capacity;
@@ -227,6 +229,7 @@ MultiGpuFixedCohortPlan PlanSingleDeviceHostFixedCohort(
     request.references.push_back(std::move(r));
   }
   MultiGpuFixedCohortPlan result;
+  result.geo_retention = geo_retention;
   result.output_policy = declarations.output_policy;
   result.host_capacity = host_capacity;
   result.host_reserve = declarations.headroom_reserve.host;
@@ -293,7 +296,8 @@ MultiGpuFixedCohortPlan PlanSingleDeviceStereoFixedCohort(
     const std::string& requested_storage,
     size_t ceiling,
     uint64_t loader_scratch_host_raw,
-    int tile_threads) {
+    int tile_threads,
+    GeoRetention geo_retention) {
   ValidateOwnedTileThreads(tile_threads);
   ValidateFixedCohortLiveProcess(declarations);
   Require(!refs.empty() && ceiling && device.ordinal >= 0 &&
@@ -307,6 +311,21 @@ MultiGpuFixedCohortPlan PlanSingleDeviceStereoFixedCohort(
   Require((declarations.unknown.host || declarations.unknown.device) &&
               !declarations.unknown_provenance.empty(),
           "explicit unknown allowance/provenance required");
+  GeoRetentionName(geo_retention);
+  if (geo_retention == GeoRetention::kPublished) {
+    Require(ceiling == 1, "published GEO requires single HOST owner");
+    return PlanSingleDeviceHostFixedCohort(images,
+                                           refs,
+                                           declarations,
+                                           device,
+                                           host_capacity,
+                                           disk_capacity,
+                                           scratch_directory,
+                                           requested_storage,
+                                           loader_scratch_host_raw,
+                                           tile_threads,
+                                           geo_retention);
+  }
   StereoAdmissionRequest request;
   request.images = images;
   request.capacity = {host_capacity, device.capacity_bytes};
@@ -476,6 +495,24 @@ void CheckMultiGpuFixedCohortAvailable(const MultiGpuFixedCohortPlan&,
 }
 #endif
 
+void ValidateGeoExecutionMode(const MultiGpuFixedCohortPlan& plan,
+                              GeoRetention expected) {
+  Require(plan.geo_retention == expected, "GEO execution API/mode mismatch");
+  if (expected == GeoRetention::kPublished) {
+    Require(plan.single_device_host && !plan.snapshot_budget &&
+                !plan.snapshot_inventory && plan.active_owners_ceiling == 1 &&
+                plan.single_device_host->admission.geo_retention == expected &&
+                plan.single_device_host->admission.active_owners == 1,
+            "published GEO requires bound single HOST owner");
+    for (const auto& phase : plan.phases) {
+      Require(phase.groups.size() == 1, "published GEO requires one device");
+      for (const auto& cohort : phase.groups[0].cohorts)
+        Require(cohort.active_owners == 1 && cohort.jobs.size() == 1,
+                "published GEO requires singleton cohorts");
+    }
+  }
+}
+
 void ValidateMultiGpuFixedCohortPlan(
     const std::vector<Image>& images,
     const std::vector<FixedCohortReference>& refs,
@@ -484,6 +521,12 @@ void ValidateMultiGpuFixedCohortPlan(
   // Existing explicit-one-device scientific validation remains authoritative.
   // Its inventory is a metadata floor only here; snapshot storage is never
   // allocated by this host-map executor.
+  GeoRetentionName(plan.geo_retention);
+  Require(plan.geo_retention == GeoRetention::kMaterialized ||
+              (plan.single_device_host && !plan.snapshot_budget &&
+               plan.single_device_host->admission.geo_retention ==
+                   GeoRetention::kPublished),
+          "published GEO requires bound single-device HOST execution");
   Require(plan.output_policy == budget.output_policy,
           "fixed-cohort output policy changed");
   ValidateFixedCohortShape(images, refs, budget);
@@ -554,7 +597,8 @@ void ValidateMultiGpuFixedCohortPlan(
                                         single.scratch_directory,
                                         single.requested_photo_source_storage,
                                         plan.loader_scratch_host_raw,
-                                        single.tile_threads);
+                                        single.tile_threads,
+                                        plan.geo_retention);
     Require(single.process.host == budget.process.host &&
                 single.process.device == budget.process.device &&
                 single.unknown.host == budget.unknown.host &&
@@ -573,7 +617,8 @@ void ValidateMultiGpuFixedCohortPlan(
                                           plan.active_owners_ceiling,
                                           plan.loader_scratch_host_raw);
   }
-  Require(plan.host_peak_raw == regenerated.host_peak_raw &&
+  Require(plan.geo_retention == regenerated.geo_retention &&
+              plan.host_peak_raw == regenerated.host_peak_raw &&
               plan.loader_host_raw == regenerated.loader_host_raw &&
               plan.host_reserve == regenerated.host_reserve,
           "multi-GPU aggregate plan changed");

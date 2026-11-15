@@ -178,6 +178,11 @@ def parse_args(argv):
         default="final_geo_only",
         help="retain final GEO maps only, or also the native PHOTO maps",
     )
+    parser.add_argument(
+        "--geo-retention", choices=("materialized", "published"),
+        default="materialized",
+        help="published: Linux single HOST owner, private/no-readers cohort until native completion",
+    )
     parser.add_argument("--cache-size-gib", type=positive_float, default=1)
     parser.add_argument(
         "--max-image-size",
@@ -320,6 +325,11 @@ lower workload or free capacity (budgets cannot raise FREE)"""
 
     def dense_arguments(self):
         a = self.args
+        if a.geo_retention == "published" and (
+            len(getattr(self, "stereo_devices", [])) != 1
+            or a.active_owners_ceiling != 1
+        ):
+            raise ValueError("published GEO requires one approved device and owner ceiling 1")
         seconds = math.floor(self.process.remaining())
         if seconds < 1:
             raise NativeFailure(
@@ -347,6 +357,8 @@ lower workload or free capacity (budgets cannot raise FREE)"""
             str(a.active_owners_ceiling),
             "--output_policy",
             a.output_policy,
+            "--geo_retention",
+            a.geo_retention,
             "--deadline_seconds",
             str(seconds),
             "--tile_threads",
@@ -651,6 +663,7 @@ resource admission gates remain authoritative""",
                     num_samples=self.args.num_samples,
                     random_seed=self.args.random_seed,
                     output_policy=self.args.output_policy,
+                    geo_retention=self.args.geo_retention,
                     cache_size_gib=self.args.cache_size_gib,
                     tile=self.args.tile,
                     lookahead=not self.args.no_lookahead,
@@ -1424,6 +1437,7 @@ resize/fallback."""
                     self.identity["allocation_fingerprint"],
                     approved_capacity,
                     output_policy=self.args.output_policy,
+                    geo_retention=self.args.geo_retention,
                 )
             print(
                 (
@@ -1447,6 +1461,8 @@ resize/fallback."""
         else:
             self.native("experimental_fixed_cohort", *self.dense_arguments())
         self.report = json.loads((self.assets / "cohort.json").read_bytes())
+        if self.report.get("geo_retention", "materialized") != self.args.geo_retention:
+            raise ValueError("native GEO retention differs from requested mode")
         if planned and self.report.get("multi_gpu_plan") != self.multi_gpu_plan:
             raise ValueError(
                 "native multi-GPU placement differs from approved plan"
@@ -1578,7 +1594,8 @@ resize/fallback."""
 
 
 def bind_single_device_plan(
-    plan, graph, devices, fingerprint, capacity, output_policy="final_geo_only"
+    plan, graph, devices, fingerprint, capacity, output_policy="final_geo_only",
+    geo_retention="materialized",
 ):
     """Bind native policy/identity, never reproduce its memory inventory."""
     if len(devices) != 1 or plan.get("allocation_fingerprint") != fingerprint:
@@ -1595,6 +1612,22 @@ def bind_single_device_plan(
         raise ValueError("single-device storage plan missing")
     if metadata.get("output_policy") != plan["output_policy"]:
         raise ValueError("single-device output policy changed")
+    if geo_retention not in ("materialized", "published") or (
+        plan.get("geo_retention", "materialized") != geo_retention
+        or metadata.get("geo_retention", "materialized") != geo_retention
+    ):
+        raise ValueError("single-device GEO retention changed")
+    if geo_retention == "published":
+        if (kind != "single_device_host_exchange"
+            or metadata.get("active_owners") != "1"
+            or plan.get("active_owners_ceiling") != "1"
+            or metadata.get("required_cache_capability") !=
+                "linux_4k_sync_dontneed_mincore_zero_private_no_readers"):
+            raise ValueError("published GEO capability/owner binding changed")
+        for phase in plan["phases"]:
+            for cohort in phase["groups"][0]["cohorts"]:
+                if cohort["active_owners"] != 1 or len(cohort["jobs"]) != 1:
+                    raise ValueError("published GEO requires singleton cohorts")
     storage = metadata.get("effective_photo_source_storage")
     if storage not in ("private", "shared") or (
         kind == "single_device_host_exchange" and storage != "private"

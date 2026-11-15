@@ -73,6 +73,29 @@ inline Json SingleDeviceHostJson(
       {{"status", Json("estimate_runtime_checked_not_physical_certification")},
        {"output_policy",
         Json(mvs::owned::FixedCohortOutputPolicyName(plan.output_policy))},
+       {"geo_retention",
+        Json(mvs::owned::GeoRetentionName(plan.geo_retention))},
+       {"required_cache_capability",
+        Json(plan.geo_retention == mvs::owned::GeoRetention::kPublished
+                 ? "linux_4k_sync_dontneed_mincore_zero_private_no_readers"
+                 : "not_required")},
+       {"publication_allowance_profile",
+        Json("initial_linux_4k_2MiB_file_granule_128B_live_page_64KiB_retained_"
+             "file_target_qualification_required")},
+       {"transient_pair_cache_raw",
+        Json(std::to_string(plan.transient_pair_cache_raw))},
+       {"publication_probe_host_raw",
+        Json(std::to_string(plan.publication_probe_host_raw))},
+       {"publication_metadata_raw",
+        Json(std::to_string(plan.publication_metadata_raw))},
+       {"capability_probe_host_raw",
+        Json(std::to_string(plan.capability_probe_host_raw))},
+       {"photo_output_cache_raw",
+        Json(std::to_string(plan.photo_output_cache_raw))},
+       {"validation_output_cache_raw",
+        Json(std::to_string(plan.validation_output_cache_raw))},
+       {"post_photo_host_raw", Json(std::to_string(plan.post_photo_host_raw))},
+       {"validation_host_raw", Json(std::to_string(plan.validation_host_raw))},
        {"peak_host_raw", Json(std::to_string(plan.peak_raw.host))},
        {"peak_device_raw", Json(std::to_string(plan.peak_raw.device))},
        {"requested_photo_source_storage",
@@ -196,6 +219,8 @@ inline Json MultiGpuPlanJson(
   }
   return Json::Object(
       {{"schema_version", Json(1)},
+       {"geo_retention",
+        Json(mvs::owned::GeoRetentionName(plan.geo_retention))},
        {"output_policy",
         Json(mvs::owned::FixedCohortOutputPolicyName(plan.output_policy))},
        {"allocation_fingerprint", Json(allocation_fingerprint)},

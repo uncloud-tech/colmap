@@ -145,6 +145,8 @@ int main() {
             "src/colmap/mvs/owned_geo_photo_input.cu",
             "src/colmap/mvs/owned_stereo_admission.h",
             "src/colmap/mvs/owned_stereo_admission.cc",
+            "src/colmap/mvs/published_geo.h",
+            "src/colmap/mvs/published_geo.cc",
             "src/colmap/exe/fixed_cohort.h",
             "src/colmap/exe/fixed_cohort.cc",
             "src/colmap/mvs/owned_fixed_cohort_budget.h",

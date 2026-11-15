@@ -208,5 +208,9 @@ FixedCohortResult PreparedFixedCohortWorkspace::Run(
   throw std::runtime_error(
       "fixed-cohort workspace execution requires native CUDA");
 }
+PublishedFixedCohortResult PreparedFixedCohortWorkspace::RunPublishedGeo(
+    PublishedGeoWriter&, const std::atomic<bool>*) const {
+  throw std::runtime_error("published GEO execution requires native CUDA");
+}
 #endif
 }  // namespace colmap::mvs::owned

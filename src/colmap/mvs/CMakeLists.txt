@@ -47,6 +47,7 @@ COLMAP_ADD_LIBRARY(
         owned_prng_seed.h
         owned_strip_storage.h owned_strip_storage.cc
         owned_stereo_admission.h owned_stereo_admission.cc
+        published_geo.h published_geo.cc
         advancing_front_meshing.h advancing_front_meshing.cc
         consistency_graph.h consistency_graph.cc
         delaunay_meshing.h delaunay_meshing.cc
@@ -647,6 +648,15 @@ endif()
 # Dependency-free optimized-dispatch contract executables also run without a
 # configured COLMAP tree using the commands in doc/optimized_dispatch.md.
 if(TESTS_ENABLED)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(colmap_mvs_published_geo_test published_geo_test.cc published_geo.cc)
+        target_include_directories(colmap_mvs_published_geo_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+        target_compile_definitions(colmap_mvs_published_geo_test PRIVATE PUBLISHED_GEO_WRAP_IO PUBLISHED_GEO_NATIVE_MAT)
+        target_compile_options(colmap_mvs_published_geo_test PRIVATE -UNDEBUG)
+        target_link_options(colmap_mvs_published_geo_test PRIVATE "-Wl,--wrap=fdatasync,--wrap=close,--wrap=posix_fadvise,--wrap=write")
+        target_link_libraries(colmap_mvs_published_geo_test PRIVATE colmap_mvs)
+        add_test(NAME "mvs/published_geo_test" COMMAND colmap_mvs_published_geo_test)
+    endif()
     add_executable(colmap_mvs_owned_strip_test_identity_test owned_strip_test_identity_test.cc)
     target_include_directories(colmap_mvs_owned_strip_test_identity_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
     if(MSVC)

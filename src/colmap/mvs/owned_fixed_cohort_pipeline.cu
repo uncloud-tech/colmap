@@ -160,6 +160,8 @@ std::vector<FixedCohortDeviceObservation> ObserveFixedCohortDevices(
 
 FixedCohortResult PreparedFixedCohortWorkspace::Run(
     const std::atomic<bool>* cancel) const {
+  if (multi_gpu_plan_)
+    ValidateGeoExecutionMode(*multi_gpu_plan_, GeoRetention::kMaterialized);
   if (multi_gpu_plan_ && multi_gpu_plan_->snapshot_budget) {
     ValidateMultiGpuFixedCohortPlan(
         images_, references_, budget_, *multi_gpu_plan_);
@@ -199,6 +201,23 @@ FixedCohortResult PreparedFixedCohortWorkspace::Run(
                                 dispatch_,
                                 tile_threads_,
                                 cancel);
+}
+
+PublishedFixedCohortResult PreparedFixedCohortWorkspace::RunPublishedGeo(
+    PublishedGeoWriter& writer, const std::atomic<bool>* cancel) const {
+  Require(multi_gpu_plan_.has_value(), "published GEO requires HOST plan");
+  std::vector<std::string> expected;
+  for (const auto& ref : references_)
+    expected.push_back(names_.at(ref.reference_image_idx));
+  Require(expected == writer.References(), "published GEO names changed");
+  return RunPublishedMultiGpuFixedCohortPhotoGeo(images_,
+                                                 references_,
+                                                 budget_,
+                                                 *multi_gpu_plan_,
+                                                 deadline_,
+                                                 tile_threads_,
+                                                 writer,
+                                                 cancel);
 }
 
 FixedCohortResult RunFixedCohortPhotoGeo(

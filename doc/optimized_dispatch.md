@@ -375,3 +375,51 @@ Stock `feature_extractor` retains its resident default and existing explicit
 streaming controls. Automatic resource checks are Linux CUDA only; Windows is
 not qualified. No change here qualifies matching, SfM, undistortion, stereo,
 fusion, arbitrary hardware, performance parity or whole-pipeline streaming.
+
+### Opt-in published GEO host working set (Linux)
+
+The installed photos CLI accepts `--geo-retention published` with
+`--active-owners-ceiling 1` and one approved device. Native callers use
+`--geo_retention published --automatic_stereo_storage 1` and the exact approved
+single-device plan. This explicitly selects HOST exchange, not snapshots or
+multi-device execution. Default materialized APIs still return all GEO maps in
+caller order. PHOTO retention (`--output-policy photo_and_geo`) is independent.
+
+Published execution has a separate result API containing file identities rather
+than GEO Mats. Under each existing output lease it downloads one fenced pair,
+borrows it synchronously for exact Mat-format writes, checks writes/sync/close,
+uses page-rounded DONTNEED, then requires zero residency from untouched bounded
+mincore mappings. It destroys that single pair before ending the lease. Previous
+files are identity/residency checked **before** any new advice; they are never
+silently re-evicted. Errors, unsupported cache release, cancellation or residency
+produce no completed report and no materialized fallback. Failed output roots
+are retained and must not be reused.
+
+**Operator contract:** the fresh private cohort namespace has one owner and no
+body readers, hashing, collectors, hardlinks or validation until native completed
+report publication. This includes other processes running as the same UID.
+mincore is a snapshot, not protection against a later reader or a security
+boundary. Whole-body installed validation/linking/fusion follows the completed
+report, never incremental publication. This is not atomic pair publication or a
+crash-durability promise. Blocking filesystem calls retain existing deadline and
+cancellation limitations.
+
+Plan/prepare-only does not create the requested output or run a cache probe.
+After approval, execution qualifies the actual output filesystem in a fresh
+private directory using the same production writer/checker before solver
+allocation. Initial support requires little-endian float32 Linux with 4KiB pages
+and disk-backed storage; nonzero residency fails closed.
+
+Native forecasts retain the entire private 24A allowance: one active moved pair
+16A plus conservative retained 8A allowance, not a second pair or two measured
+scratch buffers. They charge full simultaneous pair cache, byte-per-page bounded
+mincore storage, retained file metadata, optional post-PHOTO heap/full file cache
+and subsequent validation of both requested map domains. Loader, phase and later
+peaks use MAX; existing scratch/process/unknown/reserves remain unchanged, with
+one aggregate 3% margin. The initial Linux profile uses **allowances**, not
+universal kernel bounds: 2MiB file-granule padding, 128 bytes/live cache page
+(excluding retained inode/path storage), 64KiB retained metadata/file, and an
+8MiB bound for the tiny real capability probe. Kept Linux 6.8 Mat-scale evidence
+supports that observed mechanism only; target qualification and aggregate caps
+remain required. This does not certify physical fit, 16GiB admission, arbitrary
+filesystems/scenes, or stage/collect/whole-pipeline resource admission.
