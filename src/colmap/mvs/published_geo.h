@@ -37,7 +37,11 @@ struct PublishedGeoPair {
 // Linux, 4KiB pages, disk-backed files only. Caller owns a private namespace
 // and forbids ALL body readers/hashes/hardlinks until successful completion.
 // Same UID and mincore snapshots are not a security boundary or future cache
-// guarantee. No durability/atomic-pair promise; failed attempts remain failed.
+// guarantee. Timestamps need not distinguish unobserved transient changes.
+// Observed verification, publication I/O, or cache-probe failures permanently
+// invalidate this attempt; later repairs cannot make it complete. Rejected
+// arguments and incomplete-output queries alone do not invalidate the attempt.
+// No durability/atomic-pair promise.
 // Synchronous borrow only: never copies or retains a Mat payload.
 class PublishedGeoWriter {
  public:
@@ -80,5 +84,7 @@ class PublishedGeoWriter {
   std::vector<PublishedGeoFile> files_;
   const std::atomic<bool>* cancel_;
   bool cache_qualified_ = false;
+  // Logical verification state: const queries can observe irreversible failure.
+  mutable bool failed_ = false;
 };
 }  // namespace colmap::mvs::owned

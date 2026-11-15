@@ -69,8 +69,55 @@ void Refuses(const char* name,
   }
   assert(refused);
 }
+void RemainsFailed(PublishedGeoWriter& writer,
+                   const std::filesystem::path& path,
+                   const Mat<float>& depth,
+                   const Mat<float>& normal) {
+  const char* names[] = {"failed-attempt-verify",
+                         "failed-attempt-complete",
+                         "failed-attempt-publish",
+                         "failed-attempt-qualify"};
+  for (int operation = 0; operation < 4; ++operation) {
+    Refuses(names[operation], "attempt previously failed", path, [&] {
+      try {
+        switch (operation) {
+          case 0:
+            writer.Verify();
+            break;
+          case 1:
+            writer.VerifyComplete();
+            break;
+          case 2:
+            writer.Publish(writer.Products().size(), depth, normal);
+            break;
+          case 3:
+            writer.QualifyCache();
+            break;
+        }
+      } catch (const std::runtime_error& error) {
+        assert(std::string(error.what()) ==
+               "published GEO attempt previously failed");
+        throw;
+      }
+    });
+  }
+}
 #ifdef PUBLISHED_GEO_WRAP_IO
 int fail_sync = 0, fail_close = 0, fail_advice = 0, fail_write = 0;
+// Inject only the timestamp observation seen in CI, on this owned inode.
+// Actual files, link counts, I/O, residency, and all other metadata stay real.
+const PublishedGeoFile* identical_ctime = nullptr;
+extern "C" int __real_fstat(int, struct stat*);
+extern "C" int __wrap_fstat(int fd, struct stat* info) {
+  const int result = __real_fstat(fd, info);
+  if (!result && identical_ctime &&
+      uint64_t(info->st_dev) == identical_ctime->device &&
+      uint64_t(info->st_ino) == identical_ctime->inode) {
+    info->st_ctim.tv_sec = identical_ctime->changed_seconds;
+    info->st_ctim.tv_nsec = identical_ctime->changed_nanoseconds;
+  }
+  return result;
+}
 extern "C" int __real_fdatasync(int);
 extern "C" int __real_close(int);
 extern "C" int __real_posix_fadvise(int, off_t, off_t, int);
@@ -121,6 +168,39 @@ int main() {
   Mat<float> depth(3, 1, 1), normal(3, 1, 3);
   depth.Fill(1.0f);
   normal.Fill(-2.0f);
+#ifdef PUBLISHED_GEO_WRAP_IO
+  {
+    PublishedGeoWriter observed(root, {"x"});
+    observed.Publish(0, depth, normal);
+    const auto published = observed.Products()[0].depth;
+    identical_ctime = &published;
+    const auto alias = root / "alias";
+    assert(link(published.path.c_str(), alias.c_str()) == 0);
+    Refuses(
+        "observed-hardlink", "identity/ownership invalid", published.path, [&] {
+          try {
+            observed.Verify();
+          } catch (const std::runtime_error& error) {
+            assert(std::string(error.what()) ==
+                   "published GEO file identity/ownership invalid");
+            throw;
+          }
+        });
+    assert(unlink(alias.c_str()) == 0);
+    std::cerr
+        << "[published-geo refusal] injected observation: identical ctime "
+           "on owned inode after real link/unlink\n";
+    Refuses(
+        "observed-hardlink-undone",
+        "previous verification failure is final",
+        published.path,
+        [&] { observed.Verify(); },
+        &published);
+    RemainsFailed(observed, published.path, depth, normal);
+    identical_ctime = nullptr;
+  }
+  std::filesystem::remove_all(root);
+#endif
   {
     PublishedGeoWriter writer(root, {"nested/image.jpg"});
     writer.Publish(0, depth, normal);
@@ -170,6 +250,10 @@ int main() {
       "wrapped-mat-incomplete", "output incomplete", root / "malformed", [&] {
         malformed.VerifyComplete();
       });
+  // Rejected arguments and incomplete queries do not invalidate an attempt.
+  malformed.Verify();
+  malformed.Publish(0, depth, normal);
+  malformed.VerifyComplete();
   // Ordinary filesystem failures and identity changes use the REAL writer.
   Refuses("duplicate-root", "fresh root required", root, [&] {
     PublishedGeoWriter duplicate(root, {"other"});
@@ -184,10 +268,18 @@ int main() {
   Refuses("out-of-order", "caller order/count changed", root / "ordered", [&] {
     ordered.Publish(1, depth, normal);
   });
+  Refuses("wrong-pair-shape", "pair shape mismatch", root / "ordered", [&] {
+    ordered.Publish(0, depth, depth);
+  });
   Refuses("ordered-incomplete", "output incomplete", root / "ordered", [&] {
     ordered.VerifyComplete();
   });
   ordered.Publish(0, depth, normal);
+  Refuses(
+      "partially-complete-query", "output incomplete", root / "ordered", [&] {
+        ordered.VerifyComplete();
+      });
+  ordered.Verify();
   ordered.Publish(1, depth, normal);
   ordered.VerifyComplete();
   const auto first = ordered.Products()[0].depth.path;
@@ -197,10 +289,11 @@ int main() {
     ordered.Verify();
   });
   assert(unlink(alias.c_str()) == 0);
-  // ctime is also bound: removing an illicit hardlink does not repair identity.
+  // An observed hardlink violation is final, even when ctime aliases after
+  // unlink.
   Refuses(
       "hardlink-removed",
-      "identity changed after unlink",
+      "observed hardlink failure is final after unlink",
       first,
       [&] { ordered.Verify(); },
       &ordered.Products()[0].depth);
@@ -269,6 +362,41 @@ int main() {
   }
   assert(munmap(page, 4096) == 0 && close(fd) == 0);
   PublishedGeoWriter::Probe(root);
+  // A deliberate reader violation cannot be repaired by external cache advice.
+  PublishedGeoWriter read_reset(root / "read-reset", {"x", "y"});
+  read_reset.Publish(0, depth, normal);
+  const auto read_path = read_reset.Products()[0].depth.path;
+  fd = open(read_path.c_str(), O_RDONLY);
+  assert(fd >= 0);
+  char byte = 0;
+  assert(pread(fd, &byte, 1, 0) == 1 && byte == '3');
+  Refuses("observed-cache-read", "cache residency nonzero", read_path, [&] {
+    try {
+      read_reset.Verify();
+    } catch (const std::runtime_error& error) {
+      assert(std::string(error.what()) ==
+             "published GEO cache residency is nonzero");
+      throw;
+    }
+  });
+  assert(posix_fadvise(fd, 0, 4096, POSIX_FADV_DONTNEED) == 0);
+  page = mmap(nullptr, 4096, PROT_NONE, MAP_SHARED, fd, 0);
+  assert(page != MAP_FAILED);
+  unsigned char resident = 1;
+  assert(mincore(page, 4096, &resident) == 0 && !(resident & 1));
+  assert(munmap(page, 4096) == 0 && close(fd) == 0);
+  RemainsFailed(read_reset, read_path, depth, normal);
+  assert(read_reset.Products().size() == 1);
+  assert(!std::filesystem::exists(
+      root / "read-reset/stereo/depth_maps/y.geometric.bin"));
+  PublishedGeoWriter namespace_reset(root / "namespace-reset", {"x"});
+  assert(chmod((root / "namespace-reset").c_str(), 0755) == 0);
+  Refuses("observed-namespace-permission",
+          "namespace no longer private",
+          root / "namespace-reset",
+          [&] { namespace_reset.Verify(); });
+  assert(chmod((root / "namespace-reset").c_str(), 0700) == 0);
+  RemainsFailed(namespace_reset, root / "namespace-reset", depth, normal);
   // Actual RLIMIT_FSIZE failure, no process-global limit/signal mutation.
   const pid_t child = fork();
   assert(child >= 0);
@@ -288,6 +416,14 @@ int main() {
   assert(waitpid(child, &status, 0) == child && WIFEXITED(status) &&
          WEXITSTATUS(status) == 0);
 #ifdef PUBLISHED_GEO_WRAP_IO
+  PublishedGeoWriter probe_failure(root / "probe-failure", {"x"});
+  fail_sync = 1;
+  Refuses("cache-probe-io-failure",
+          "probe sync failed",
+          root / "probe-failure",
+          [&] { probe_failure.QualifyCache(); });
+  fail_sync = 0;
+  RemainsFailed(probe_failure, root / "probe-failure", depth, normal);
   const char* failure_names[] = {
       "write-error", "sync-error", "advice-error", "close-error"};
   for (int failure = 0; failure < 4; ++failure) {
@@ -302,6 +438,8 @@ int main() {
             root / ("failed-" + std::to_string(failure)),
             [&] { failed.Publish(0, depth, normal); });
     fail_write = fail_sync = fail_advice = fail_close = 0;
+    RemainsFailed(
+        failed, root / ("failed-" + std::to_string(failure)), depth, normal);
     Refuses(failure_names[failure],
             "output incomplete after injected I/O error",
             root / ("failed-" + std::to_string(failure)),

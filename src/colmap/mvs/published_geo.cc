@@ -143,23 +143,29 @@ PublishedGeoWriter::PublishedGeoWriter(const std::filesystem::path& root,
 #endif
 }
 void PublishedGeoWriter::Check() const {
+  Require(!failed_, "published GEO attempt previously failed");
   if (cancel_ && cancel_->load())
     throw std::runtime_error("published GEO cancelled");
 }
 void PublishedGeoWriter::Verify() const {
-  Check();
-#ifdef __linux__
-  struct stat root{};
-  Require(lstat(root_.c_str(), &root) == 0 && S_ISDIR(root.st_mode) &&
-              root.st_uid == geteuid() && !(root.st_mode & 0077),
-          "published GEO namespace is no longer private");
-  for (const auto& file : files_) {
+  try {
     Check();
-    VerifyFile(file);
-  }
+#ifdef __linux__
+    struct stat root{};
+    Require(lstat(root_.c_str(), &root) == 0 && S_ISDIR(root.st_mode) &&
+                root.st_uid == geteuid() && !(root.st_mode & 0077),
+            "published GEO namespace is no longer private");
+    for (const auto& file : files_) {
+      Check();
+      VerifyFile(file);
+    }
 #else
-  throw std::runtime_error("published GEO requires Linux");
+    throw std::runtime_error("published GEO requires Linux");
 #endif
+  } catch (...) {
+    failed_ = true;
+    throw;
+  }
 }
 PublishedGeoFile PublishedGeoWriter::Write(const std::filesystem::path& path,
                                            const Mat<float>& map) {
@@ -225,12 +231,18 @@ void PublishedGeoWriter::Publish(size_t job,
   ValidateMat(depth);
   ValidateMat(normal);
   const auto name = references_[job] + ".geometric.bin";
-  const auto d = Write(root_ / "stereo" / "depth_maps" / name, depth);
-  files_.push_back(d);
-  const auto n = Write(root_ / "stereo" / "normal_maps" / name, normal);
-  files_.push_back(n);
-  Verify();
-  products_.push_back({d, n});
+  // Rejected arguments above are recoverable; effectful publication is not.
+  try {
+    const auto d = Write(root_ / "stereo" / "depth_maps" / name, depth);
+    files_.push_back(d);
+    const auto n = Write(root_ / "stereo" / "normal_maps" / name, normal);
+    files_.push_back(n);
+    Verify();
+    products_.push_back({d, n});
+  } catch (...) {
+    failed_ = true;
+    throw;
+  }
 }
 void PublishedGeoWriter::VerifyComplete() const {
   Verify();
@@ -241,8 +253,13 @@ void PublishedGeoWriter::VerifyComplete() const {
 void PublishedGeoWriter::QualifyCache() {
   Verify();
   if (!cache_qualified_) {
-    Probe(root_.parent_path(), cancel_);
-    cache_qualified_ = true;
+    try {
+      Probe(root_.parent_path(), cancel_);
+      cache_qualified_ = true;
+    } catch (...) {
+      failed_ = true;
+      throw;
+    }
   }
 }
 void PublishedGeoWriter::Probe(const std::filesystem::path& directory,
