@@ -14,19 +14,58 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/vfs.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 using namespace colmap::mvs;
 using namespace colmap::mvs::owned;
 namespace {
+// Metadata only: diagnostics must not refault bodies or repair cache state.
+void PathState(const char* phase, const std::filesystem::path& path) {
+  struct stat info{};
+  const int result = lstat(path.c_str(), &info);
+  const int error = result ? errno : 0;
+  std::cerr << "[published-geo refusal] " << phase << " path=" << path
+            << " lstat=" << result << " errno=" << error;
+  if (!result) {
+    std::cerr << " dev=" << info.st_dev << " ino=" << info.st_ino
+              << " uid=" << info.st_uid << " mode=" << info.st_mode
+              << " nlink=" << info.st_nlink << " bytes=" << info.st_size
+              << " mtime=" << info.st_mtim.tv_sec << ':' << info.st_mtim.tv_nsec
+              << " ctime=" << info.st_ctim.tv_sec << ':'
+              << info.st_ctim.tv_nsec;
+  }
+  std::cerr << '\n';
+}
 template <class F>
-void Refuses(F action) {
+void Refuses(const char* name,
+             const char* expected,
+             const std::filesystem::path& path,
+             F action,
+             const PublishedGeoFile* published = nullptr) {
   bool refused = false;
   try {
     action();
   } catch (const std::exception&) {
     refused = true;
+  }
+  // Only diagnose after failure: successful checks must not gain logging/stat
+  // delays between publication, link/unlink, and identity verification.
+  if (!refused) {
+    std::cerr << "[published-geo refusal] FAILED case=" << name
+              << ": action returned normally; expected std::exception ("
+              << expected << ")\n";
+    PathState("after unexpected return", path);
+    PathState("parent", path.parent_path());
+    if (published) {
+      std::cerr << "[published-geo refusal] recorded dev=" << published->device
+                << " ino=" << published->inode << " bytes=" << published->bytes
+                << " mtime=" << published->modified_seconds << ':'
+                << published->modified_nanoseconds
+                << " ctime=" << published->changed_seconds << ':'
+                << published->changed_nanoseconds << '\n';
+    }
   }
   assert(refused);
 }
@@ -72,6 +111,13 @@ int main() {
   const auto root = std::filesystem::temp_directory_path() /
                     ("published-geo-test-" + std::to_string(getpid()));
   std::filesystem::remove_all(root);
+  struct statfs filesystem{};
+  assert(statfs(root.parent_path().c_str(), &filesystem) == 0);
+  std::cerr << "[published-geo refusal] root=" << root << " uid=" << getuid()
+            << " euid=" << geteuid() << " page_bytes=" << sysconf(_SC_PAGESIZE)
+            << " fs_type=" << filesystem.f_type
+            << " fs_block_bytes=" << filesystem.f_bsize << '\n';
+  PathState("temporary parent", root.parent_path());
   Mat<float> depth(3, 1, 1), normal(3, 1, 3);
   depth.Fill(1.0f);
   normal.Fill(-2.0f);
@@ -117,36 +163,64 @@ int main() {
   Mat<float> malformed_depth(wrapped_width, 2, 1);
   Mat<float> malformed_normal(wrapped_width, 2, 3);
   PublishedGeoWriter malformed(root / "malformed", {"x"});
-  Refuses([&] { malformed.Publish(0, malformed_depth, malformed_normal); });
-  Refuses([&] { malformed.VerifyComplete(); });
-  // Ordinary filesystem failures and identity changes use the REAL writer.
-  Refuses([&] { PublishedGeoWriter duplicate(root, {"other"}); });
+  Refuses("wrapped-mat-publish", "invalid dimensions", root / "malformed", [&] {
+    malformed.Publish(0, malformed_depth, malformed_normal);
+  });
   Refuses(
-      [&] { PublishedGeoWriter missing(root / "absent" / "child", {"x"}); });
-  Refuses([&] { PublishedGeoWriter invalid(root / "invalid", {"../escape"}); });
+      "wrapped-mat-incomplete", "output incomplete", root / "malformed", [&] {
+        malformed.VerifyComplete();
+      });
+  // Ordinary filesystem failures and identity changes use the REAL writer.
+  Refuses("duplicate-root", "fresh root required", root, [&] {
+    PublishedGeoWriter duplicate(root, {"other"});
+  });
+  Refuses("missing-parent", "parent missing", root / "absent", [&] {
+    PublishedGeoWriter missing(root / "absent" / "child", {"x"});
+  });
+  Refuses("escaping-reference", "invalid component", root / "invalid", [&] {
+    PublishedGeoWriter invalid(root / "invalid", {"../escape"});
+  });
   PublishedGeoWriter ordered(root / "ordered", {"b", "a"});
-  Refuses([&] { ordered.Publish(1, depth, normal); });
-  Refuses([&] { ordered.VerifyComplete(); });
+  Refuses("out-of-order", "caller order/count changed", root / "ordered", [&] {
+    ordered.Publish(1, depth, normal);
+  });
+  Refuses("ordered-incomplete", "output incomplete", root / "ordered", [&] {
+    ordered.VerifyComplete();
+  });
   ordered.Publish(0, depth, normal);
   ordered.Publish(1, depth, normal);
   ordered.VerifyComplete();
   const auto first = ordered.Products()[0].depth.path;
   const auto alias = root / "alias";
   assert(link(first.c_str(), alias.c_str()) == 0);
-  Refuses([&] { ordered.Verify(); });
+  Refuses("hardlink-present", "identity/ownership invalid", first, [&] {
+    ordered.Verify();
+  });
   assert(unlink(alias.c_str()) == 0);
   // ctime is also bound: removing an illicit hardlink does not repair identity.
-  Refuses([&] { ordered.Verify(); });
+  Refuses(
+      "hardlink-removed",
+      "identity changed after unlink",
+      first,
+      [&] { ordered.Verify(); },
+      &ordered.Products()[0].depth);
   std::atomic<bool> cancelled{false};
   PublishedGeoWriter cancelled_writer(root / "cancelled", {"x"}, &cancelled);
   cancelled.store(true);
-  Refuses([&] { cancelled_writer.Publish(0, depth, normal); });
-  Refuses([&] { cancelled_writer.VerifyComplete(); });
+  Refuses("cancelled-publish", "cancelled", root / "cancelled", [&] {
+    cancelled_writer.Publish(0, depth, normal);
+  });
+  Refuses("cancelled-complete", "cancelled", root / "cancelled", [&] {
+    cancelled_writer.VerifyComplete();
+  });
   PublishedGeoWriter prior_read(root / "prior-read", {"first", "second"});
   prior_read.Publish(0, depth, normal);
   std::ifstream early(prior_read.Products()[0].depth.path, std::ios::binary);
   assert(early.get() == '3');
-  Refuses([&] { prior_read.Publish(1, depth, normal); });
+  Refuses("prior-body-read",
+          "cache residency nonzero",
+          prior_read.Products()[0].depth.path,
+          [&] { prior_read.Publish(1, depth, normal); });
   assert(prior_read.Products().size() == 1);
   assert(!std::filesystem::exists(
       root / "prior-read/stereo/depth_maps/second.geometric.bin"));
@@ -155,19 +229,26 @@ int main() {
   const auto collision_path =
       root / "collision/stereo/depth_maps/x.geometric.bin";
   std::ofstream(collision_path) << "preserved";
-  Refuses([&] { collision.Publish(0, depth, normal); });
+  Refuses("existing-file", "exclusive create failed", collision_path, [&] {
+    collision.Publish(0, depth, normal);
+  });
   assert(std::filesystem::file_size(collision_path) == 9);
   PublishedGeoWriter symlinked(root / "symlinked", {"x"});
   std::filesystem::create_directories(root / "symlinked/stereo/depth_maps");
   std::filesystem::create_symlink(
       collision_path, root / "symlinked/stereo/depth_maps/x.geometric.bin");
-  Refuses([&] { symlinked.Publish(0, depth, normal); });
+  Refuses("symlink-file",
+          "exclusive create failed",
+          root / "symlinked/stereo/depth_maps/x.geometric.bin",
+          [&] { symlinked.Publish(0, depth, normal); });
   PublishedGeoWriter replaced(root / "replaced", {"x"});
   replaced.Publish(0, depth, normal);
   const auto replaced_path = replaced.Products()[0].normal.path;
   std::filesystem::remove(replaced_path);
   std::ofstream(replaced_path) << "replacement";
-  Refuses([&] { replaced.VerifyComplete(); });
+  Refuses("replaced-file", "identity changed", replaced_path, [&] {
+    replaced.VerifyComplete();
+  });
   // mlock negative, only skipped if ordinary RLIMIT/capability forbids pinning.
   PublishedGeoWriter pinned(root / "pinned", {"x"});
   pinned.Publish(0, depth, normal);
@@ -177,7 +258,10 @@ int main() {
   assert(page != MAP_FAILED);
   if (mlock(page, 4096) == 0) {
     assert(posix_fadvise(fd, 0, 4096, POSIX_FADV_DONTNEED) == 0);
-    Refuses([&] { pinned.VerifyComplete(); });
+    Refuses("pinned-page",
+            "cache residency nonzero",
+            pinned.Products()[0].depth.path,
+            [&] { pinned.VerifyComplete(); });
     assert(munlock(page, 4096) == 0);
   } else {
     std::cout << "mlock negative unavailable: " << errno
@@ -204,6 +288,8 @@ int main() {
   assert(waitpid(child, &status, 0) == child && WIFEXITED(status) &&
          WEXITSTATUS(status) == 0);
 #ifdef PUBLISHED_GEO_WRAP_IO
+  const char* failure_names[] = {
+      "write-error", "sync-error", "advice-error", "close-error"};
   for (int failure = 0; failure < 4; ++failure) {
     PublishedGeoWriter failed(root / ("failed-" + std::to_string(failure)),
                               {"x"});
@@ -211,9 +297,15 @@ int main() {
     fail_sync = failure == 1;
     fail_advice = failure == 2;
     fail_close = failure == 3;
-    Refuses([&] { failed.Publish(0, depth, normal); });
+    Refuses(failure_names[failure],
+            "injected I/O error",
+            root / ("failed-" + std::to_string(failure)),
+            [&] { failed.Publish(0, depth, normal); });
     fail_write = fail_sync = fail_advice = fail_close = 0;
-    Refuses([&] { failed.VerifyComplete(); });
+    Refuses(failure_names[failure],
+            "output incomplete after injected I/O error",
+            root / ("failed-" + std::to_string(failure)),
+            [&] { failed.VerifyComplete(); });
     assert(failed.Products().empty());
   }
 #endif
