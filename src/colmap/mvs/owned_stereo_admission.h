@@ -3,6 +3,7 @@
 
 #include "colmap/mvs/owned_fixed_cohort_inventory.h"
 #include "colmap/mvs/owned_strip_storage.h"
+#include "colmap/mvs/published_geo.h"
 
 namespace colmap::mvs::owned {
 
@@ -59,6 +60,7 @@ struct StereoExecutionRecord {
   std::string reason;
 };
 struct StereoAdmissionRequest {
+  GeoRetention geo_retention = GeoRetention::kMaterialized;
   std::vector<FixedCohortImageShape> images;
   std::vector<StereoAdmissionReference> references;
   ByteCharge capacity, process, unknown, reserve;
@@ -73,6 +75,12 @@ struct StereoAdmissionRequest {
   uint64_t estimated_pitch_alignment = 512;
 };
 struct StereoAdmissionPlan {
+  GeoRetention geo_retention = GeoRetention::kMaterialized;
+  uint64_t transient_pair_cache_raw = 0, publication_probe_host_raw = 0;
+  uint64_t publication_metadata_raw = 0, capability_probe_host_raw = 0;
+  uint64_t post_photo_host_raw = 0, validation_host_raw = 0;
+  uint64_t photo_output_cache_raw = 0, validation_output_cache_raw = 0;
+  uint64_t post_output_metadata_raw = 0;
   FixedCohortOutputPolicy output_policy = FixedCohortOutputPolicy::kPhotoAndGeo;
   std::array<std::vector<StereoExecutionRecord>, 2> records;
   size_t active_owners = 1;

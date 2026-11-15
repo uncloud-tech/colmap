@@ -68,6 +68,10 @@ StereoExecutionRecord Inventory(const StereoAdmissionRequest& request,
       CheckedAdd(CheckedMultiply(2, area), CheckedMultiply(692, sources)),
       CheckedAdd(
           32, CheckedMultiply(geometry ? 5 : 1, record.padded_source_pixels)));
+  // Keep the entire legacy 24A allowance unchanged. In published mode it
+  // covers the single live moved/borrowed output pair (16A), plus 8A of
+  // conservative retained allowance, NOT two measured scratch allocations.
+  // Never subtract 16A or charge a fictional second result-pair copy.
   // Existing explicit output/reference scratch allowance plus host packing.
   // Conservatively retain gray packing while GEO's float packing is live.
   // InitTransforms packs 43 float parameters per source for one rotation at
@@ -125,6 +129,8 @@ StereoExecutionRecord Inventory(const StereoAdmissionRequest& request,
 
 SnapshotStereoInventory BuildSnapshotStereoInventory(
     const StereoAdmissionRequest& request, FixedCohortBudget declarations) {
+  if (request.geo_retention != GeoRetention::kMaterialized)
+    throw std::invalid_argument("snapshot inventory cannot publish GEO");
   std::vector<FixedCohortJobShape> jobs;
   for (const auto& ref : request.references)
     jobs.push_back({ref.reference, ref.sources[0], ref.sources[1]});
@@ -186,6 +192,8 @@ StereoAdmissionPlan PlanSingleDeviceStereoAdmission(
       request.block_width);
   StereoAdmissionPlan plan;
   plan.output_policy = request.output_policy;
+  GeoRetentionName(request.geo_retention);  // Reject unknown enum values.
+  plan.geo_retention = request.geo_retention;
   uint64_t pixels = 0, maps = 0, output_headers = 0;
   if (request.output_policy != FixedCohortOutputPolicy::kPhotoAndGeo &&
       request.output_policy != FixedCohortOutputPolicy::kFinalGeoOnly)
@@ -231,14 +239,85 @@ StereoAdmissionPlan PlanSingleDeviceStereoAdmission(
       CheckedAdd(maps, output_headers));
   plan.common_host_raw =
       CheckedAdd(CheckedMultiply(2, pixels), CheckedMultiply(2, maps));
+  if (request.geo_retention == GeoRetention::kPublished) {
+#ifndef __linux__
+    throw std::invalid_argument("published GEO admission requires Linux");
+#endif
+    // Full simultaneous pair cache, including headers and conservative folio
+    // rounding. All completed files retain metadata, never payload charges.
+    const auto round_file = [](uint64_t bytes) {
+      constexpr auto unit = PublishedGeoWriter::kCacheGranuleBytes;
+      constexpr auto page = PublishedGeoWriter::kPageBytes;
+      return CheckedAdd(
+          CheckedMultiply(CheckedAdd(bytes, unit - 1) / unit, unit),
+          CheckedMultiply(CheckedAdd(bytes, page - 1) / page,
+                          PublishedGeoWriter::kLiveMetadataPerPage));
+    };
+    for (const auto& ref : request.references) {
+      const auto shape = request.images.at(ref.reference);
+      const auto area = CheckedMultiply(shape.width, shape.height);
+      const auto header = std::to_string(shape.width).size() +
+                          std::to_string(shape.height).size() + 4;
+      const auto pair_cache =
+          CheckedAdd(round_file(CheckedAdd(CheckedMultiply(4, area), header)),
+                     round_file(CheckedAdd(CheckedMultiply(12, area), header)));
+      plan.transient_pair_cache_raw =
+          std::max(plan.transient_pair_cache_raw, pair_cache);
+      plan.photo_output_cache_raw =
+          CheckedAdd(plan.photo_output_cache_raw, pair_cache);
+    }
+    plan.publication_metadata_raw =
+        CheckedMultiply(CheckedMultiply(2, request.references.size()),
+                        PublishedGeoWriter::kFileAllowanceBytes);
+    plan.publication_probe_host_raw = PublishedGeoWriter::kProbeBytes;
+    // Actual production probe: 257-pixel pair + two files/cache/metadata and
+    // mincore window. This bound is separate from steady execution probes.
+    plan.capability_probe_host_raw =
+        PublishedGeoWriter::kCapabilityProbeHostBytes;
+    const auto base = CheckedAdd(CheckedMultiply(2, pixels), fixed.host);
+    plan.validation_output_cache_raw = CheckedMultiply(
+        request.output_policy == FixedCohortOutputPolicy::kPhotoAndGeo ? 2 : 1,
+        plan.photo_output_cache_raw);
+    plan.post_output_metadata_raw = CheckedMultiply(
+        request.output_policy == FixedCohortOutputPolicy::kPhotoAndGeo ? 2 : 1,
+        plan.publication_metadata_raw);
+    const auto photo_cache = plan.photo_output_cache_raw;
+    plan.post_photo_host_raw =
+        CheckedAdd(base,
+                   CheckedAdd(plan.post_output_metadata_raw,
+                              CheckedAdd(maps, photo_cache)));
+    if (request.output_policy == FixedCohortOutputPolicy::kFinalGeoOnly)
+      plan.post_photo_host_raw =
+          CheckedAdd(base, plan.post_output_metadata_raw);
+    // Installed validation is after native completion; conservatively charge
+    // BOTH requested map domains' entire cache plus existing process/unknown.
+    plan.validation_host_raw =
+        CheckedAdd(fixed.host,
+                   CheckedAdd(plan.validation_output_cache_raw,
+                              plan.post_output_metadata_raw));
+    plan.common_host_raw =
+        CheckedAdd(CheckedAdd(CheckedMultiply(2, pixels), maps),
+                   CheckedAdd(plan.transient_pair_cache_raw,
+                              CheckedAdd(plan.publication_metadata_raw,
+                                         plan.publication_probe_host_raw)));
+  }
   plan.loader_host_raw = CheckedAdd(
       CheckedAdd(CheckedMultiply(2, pixels), request.loader_scratch_host),
       fixed.host);
   plan.peak_raw = {plan.loader_host_raw, fixed.device};
+  uint64_t later_peak = 0;
+  if (request.geo_retention == GeoRetention::kPublished) {
+    later_peak =
+        std::max({plan.post_photo_host_raw,
+                  plan.validation_host_raw,
+                  CheckedAdd(CheckedAdd(fixed.host, CheckedMultiply(2, pixels)),
+                             plan.capability_probe_host_raw)});
+    plan.peak_raw.host = std::max(plan.peak_raw.host, later_peak);
+  }
   const auto complete = [&](const StereoExecutionRecord& record) {
     auto peak = Add(fixed, record.peak);
     peak.host = std::max(CheckedAdd(peak.host, plan.common_host_raw),
-                         plan.loader_host_raw);
+                         std::max(plan.loader_host_raw, later_peak));
     return peak;
   };
   const auto fits = [&](ByteCharge peak) {
@@ -376,6 +455,16 @@ bool SameStereoAdmissionPlan(const StereoAdmissionPlan& a,
                              const StereoAdmissionPlan& b) {
   const auto fields = [](const StereoAdmissionPlan& p) {
     return std::tie(p.output_policy,
+                    p.geo_retention,
+                    p.transient_pair_cache_raw,
+                    p.publication_probe_host_raw,
+                    p.publication_metadata_raw,
+                    p.capability_probe_host_raw,
+                    p.post_photo_host_raw,
+                    p.validation_host_raw,
+                    p.photo_output_cache_raw,
+                    p.validation_output_cache_raw,
+                    p.post_output_metadata_raw,
                     p.active_owners,
                     p.peak_raw.host,
                     p.peak_raw.device,

@@ -3,9 +3,8 @@
 
 #include "colmap/mvs/multi_gpu_fixed_cohort.h"
 
-#include <optional>
-
 #include <filesystem>
+#include <optional>
 #include <string>
 
 namespace colmap::mvs::owned {
@@ -48,6 +47,9 @@ class PreparedFixedCohortWorkspace {
   // Returns native depth/normal maps; no output paths or partial publication.
   // Uses the original preparation deadline, never creates a fresh budget.
   FixedCohortResult Run(const std::atomic<bool>* cancel = nullptr) const;
+  PublishedFixedCohortResult RunPublishedGeo(
+      PublishedGeoWriter& writer,
+      const std::atomic<bool>* cancel = nullptr) const;
 
  private:
   PreparedFixedCohortWorkspace() = default;

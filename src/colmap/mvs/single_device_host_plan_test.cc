@@ -72,6 +72,64 @@ int main() {
   assert(json.find("\"volume_mode\":\"strip_file\"") != std::string::npos);
   assert(json.find("\"requested_strip_columns\":\"0\"") != std::string::npos);
   assert(json.find("\"cache_host_bytes\":\"30412800\"") != std::string::npos);
+  const auto published =
+      PlanSingleDeviceStereoFixedCohort(shapes,
+                                        refs,
+                                        declarations,
+                                        device,
+                                        2000000000,
+                                        2000000000,
+                                        "/scratch",
+                                        "auto",
+                                        1,
+                                        0,
+                                        32,
+                                        GeoRetention::kPublished);
+  assert(published.single_device_host && !published.snapshot_budget);
+  assert(published.geo_retention == GeoRetention::kPublished);
+  ValidateGeoExecutionMode(published, GeoRetention::kPublished);
+  bool materialize_refused = false;
+  try {
+    ValidateGeoExecutionMode(published, GeoRetention::kMaterialized);
+  } catch (const std::invalid_argument&) {
+    materialize_refused = true;
+  }
+  assert(materialize_refused);
+  auto broken = published;
+  broken.single_device_host->admission.geo_retention =
+      GeoRetention::kMaterialized;
+  bool mismatch_refused = false;
+  try {
+    ValidateGeoExecutionMode(broken, GeoRetention::kPublished);
+  } catch (const std::invalid_argument&) {
+    mismatch_refused = true;
+  }
+  assert(mismatch_refused);
+  const auto published_json =
+      colmap::dense_plan::SingleDeviceHostJson(*published.single_device_host)
+          .Dump();
+  assert(published_json.find("\"geo_retention\":\"published\"") !=
+         std::string::npos);
+  assert(published_json.find("\"required_cache_capability\":") !=
+         std::string::npos);
+  bool owners_refused = false;
+  try {
+    PlanSingleDeviceStereoFixedCohort(shapes,
+                                      refs,
+                                      declarations,
+                                      device,
+                                      2000000000,
+                                      2000000000,
+                                      "/scratch",
+                                      "auto",
+                                      2,
+                                      0,
+                                      32,
+                                      GeoRetention::kPublished);
+  } catch (const std::invalid_argument&) {
+    owners_refused = true;
+  }
+  assert(owners_refused);
   auto changed = *plan.single_device_host;
   changed.admission.records[0][0].policy.async_pool = true;
   assert(colmap::dense_plan::SingleDeviceHostJson(changed).Dump() != json);

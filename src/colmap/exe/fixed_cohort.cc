@@ -27,6 +27,7 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 
@@ -146,6 +147,7 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
     fs::path report_path, approved_multi_gpu_plan;
     std::string stereo_devices;
     std::optional<owned::MultiGpuFixedCohortPlan> multi_gpu_plan;
+    std::unique_ptr<owned::PublishedGeoWriter> publisher;
     std::optional<dense_plan::Json> multi_gpu_placement;
     std::optional<MultiGpuSignalGuard> multi_gpu_signals;
     bool resolve_workspace_plan = false;
@@ -159,6 +161,8 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
     owned::ByteCharge capacity{};
     owned::FixedCohortBudget declarations;
     std::string output_policy = "final_geo_only";
+    std::string geo_retention = "materialized";
+    owned::GeoRetention retention = owned::GeoRetention::kMaterialized;
     std::string photo_source_storage = "private";
     std::set<std::string> supplied_caps;
     FixedCohortOptionManager options;
@@ -221,6 +225,11 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
     options.AddDefaultOption("tile_threads", &tile_threads);
     options.AddDefaultOption(
         "output_policy", &output_policy, "final_geo_only or photo_and_geo");
+    options.AddDefaultOption(
+        "geo_retention",
+        &geo_retention,
+        "materialized (default) or published; Linux single HOST owner only, "
+        "private/no-readers cohort until completed report");
     options.AddDefaultOption("photo_source_storage",
                              &photo_source_storage,
                              "private (default), shared PHOTO grayscale union, "
@@ -309,6 +318,14 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
     else {
       Require(output_policy == "photo_and_geo", "invalid output_policy");
       declarations.output_policy = owned::FixedCohortOutputPolicy::kPhotoAndGeo;
+    }
+    if (geo_retention == "published") {
+      retention = owned::GeoRetention::kPublished;
+      Require(automatic_stereo_storage && active_owners_ceiling == 1,
+              "published GEO requires automatic single-device HOST owner "
+              "ceiling 1");
+    } else {
+      Require(geo_retention == "materialized", "invalid geo_retention");
     }
     const bool auto_storage = photo_source_storage == "auto";
     Require(!auto_storage || auto_active_owners,
@@ -469,7 +486,8 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
             photo_source_storage,
             active_owners_ceiling ? active_owners_ceiling : references.size(),
             loader_scratch_host,
-            tile_threads);
+            tile_threads,
+            retention);
         if (multi_gpu_plan->snapshot_budget)
           budget = *multi_gpu_plan->snapshot_budget;
       } else {
@@ -512,6 +530,17 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
                                  std::istreambuf_iterator<char>());
       Require(approved_bytes == placement,
               "multi-GPU placement/scientific inputs changed since approval");
+#if defined(COLMAP_CUDA_ENABLED) && !defined(COLMAP_HIP_ENABLED)
+      if (retention == owned::GeoRetention::kPublished) {
+        output_path = fs::absolute(output_path).lexically_normal();
+        std::vector<std::string> names;
+        for (const auto& ref : named) names.push_back(ref.reference);
+        publisher = std::make_unique<owned::PublishedGeoWriter>(
+            output_path, std::move(names), &multi_gpu_cancelled);
+        mvs::NativeRunDeadlineGuard qualification_guard(deadline);
+        publisher->QualifyCache();  // After approval, BEFORE any CUDA query.
+      }
+#endif
       {
         mvs::NativeRunDeadlineGuard observation_guard(deadline);
         owned::CheckMultiGpuFixedCohortAvailable(*multi_gpu_plan);
@@ -694,9 +723,22 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
         fs::canonical(output_path.parent_path()) == output_path.parent_path(),
         "output parent must exist without symlink components");
     // Atomic no-clobber ownership: never remove/reuse a preexisting path.
-    Require(fs::create_directory(output_path), "fresh output_path required");
-    const auto result =
-        prepared.Run(multi_gpu_signals ? &multi_gpu_cancelled : nullptr);
+    owned::FixedCohortResult result;
+    const auto* cancelled = multi_gpu_signals ? &multi_gpu_cancelled : nullptr;
+    if (retention == owned::GeoRetention::kPublished) {
+      Require(static_cast<bool>(publisher),
+              "published GEO execution not qualified");
+      auto published = prepared.RunPublishedGeo(*publisher, cancelled);
+      Require(published.geo.size() == named.size(),
+              "published GEO descriptor count incomplete");
+      publisher->VerifyComplete();
+      result.output_policy = published.output_policy;
+      result.photo = std::move(published.photo);
+      result.phase_owner_limits = published.phase_owner_limits;
+    } else {
+      Require(fs::create_directory(output_path), "fresh output_path required");
+      result = prepared.Run(cancelled);
+    }
     if (auto_storage && !multi_gpu_plan)
       std::cout << "executed PHOTO owner_limit=" << result.phase_owner_limits[0]
                 << "; GEO owner_limit=" << result.phase_owner_limits[1]
@@ -733,8 +775,10 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
       };
       if (result.output_policy == owned::FixedCohortOutputPolicy::kPhotoAndGeo)
         write_maps(result.photo.at(i), ".photometric.bin");
-      write_maps(result.geo.at(i), ".geometric.bin");
+      if (!publisher) write_maps(result.geo.at(i), ".geometric.bin");
     }
+    if (publisher) publisher->VerifyComplete();
+    check_deadline();
     if (!report_path.empty()) {
       using dense_plan::Json;
       std::vector<std::pair<std::string, Json>> phases;
@@ -768,6 +812,7 @@ int RunExperimentalFixedCohort(int argc, char** argv) {
           Json::Object(
               {{"schema_version", Json(1)},
                {"status", Json("completed")},
+               {"geo_retention", Json(geo_retention)},
                {"output_policy",
                 Json(owned::FixedCohortOutputPolicyName(result.output_policy))},
                {"requested_backend", Json("experimental_fixed_cohort")},

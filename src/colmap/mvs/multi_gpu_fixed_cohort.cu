@@ -80,7 +80,7 @@ void CheckMultiGpuFixedCohortAvailable(const MultiGpuFixedCohortPlan& plan,
                            {plan.host_reserve, 0});
 }
 
-FixedCohortResult RunMultiGpuFixedCohortPhotoGeo(
+static FixedCohortResult RunHostPhotoGeo(
     const std::vector<Image>& images,
     const std::vector<FixedCohortReference>& refs,
     const FixedCohortBudget& budget,
@@ -88,7 +88,10 @@ FixedCohortResult RunMultiGpuFixedCohortPhotoGeo(
     NativeRunDeadline deadline,
     int tile_threads,
     const std::atomic<bool>* cancel,
-    std::function<void(bool, int, size_t, const char*)> observer) {
+    std::function<void(bool, int, size_t, const char*)> observer,
+    PublishedGeoWriter* publisher) {
+  ValidateGeoExecutionMode(
+      plan, publisher ? GeoRetention::kPublished : GeoRetention::kMaterialized);
   ValidateOwnedTileThreads(tile_threads);
   if (plan.snapshot_budget)
     throw std::invalid_argument(
@@ -105,6 +108,10 @@ FixedCohortResult RunMultiGpuFixedCohortPhotoGeo(
       throw std::runtime_error("multi-GPU invocation cancelled");
   };
   check();
+  if (publisher) {
+    publisher->QualifyCache();
+    publisher->Verify();
+  }
   // Reobserve the whole approved device set before any frozen/exchange/bank
   // payload allocation. UUIDs are binding, not an auto-reselection suggestion.
   uint64_t caller_pixels = 0;
@@ -123,7 +130,7 @@ FixedCohortResult RunMultiGpuFixedCohortPhotoGeo(
   FixedCohortResult result;
   result.output_policy = budget.output_policy;
   if (plan.single_device_host) result.phase_owner_limits = {1, 1};
-  result.geo.resize(refs.size());
+  if (!publisher) result.geo.resize(refs.size());
   for (const bool geo : {false, true}) {
     check();
     const auto& phase = plan.phases[geo];
@@ -241,6 +248,7 @@ FixedCohortResult RunMultiGpuFixedCohortPhotoGeo(
                 workers.Check();
                 check();
                 CUDA_SAFE_CALL(cudaSetDevice(device));
+                if (publisher) publisher->Verify();
                 coordinator.BeginPreparation(owner);
                 const size_t job = cohort.jobs.at(owner);
                 const auto& ref = refs.at(job);
@@ -298,7 +306,18 @@ FixedCohortResult RunMultiGpuFixedCohortPhotoGeo(
                   check();
                   coordinator.SolverDone(owner);
                   coordinator.BeginOutput(owner);
-                  if (geo) {
+                  if (geo && publisher) {
+                    publisher->Verify();
+                    {
+                      // Fenced getters return moved vectors: ONE 16A pair.
+                      // Synchronous borrow, destruction BEFORE EndOutput.
+                      FixedCohortResult::Maps maps;
+                      maps.depth = solver->GetDepthMap();
+                      maps.normal = solver->GetNormalMap();
+                      publisher->Publish(job, maps.depth, maps.normal);
+                    }
+                    publisher->Verify();
+                  } else if (geo) {
                     result.geo[job].depth = solver->GetDepthMap();
                     result.geo[job].normal = solver->GetNormalMap();
                   } else {
@@ -353,6 +372,7 @@ FixedCohortResult RunMultiGpuFixedCohortPhotoGeo(
     }
   }
   check();
+  if (publisher) publisher->VerifyComplete();
   if (budget.output_policy == FixedCohortOutputPolicy::kPhotoAndGeo) {
     result.photo.resize(refs.size());
     for (size_t i = 0; i < refs.size(); ++i) {
@@ -363,6 +383,50 @@ FixedCohortResult RunMultiGpuFixedCohortPhotoGeo(
     }
   }
   return result;  // All device owners drained; no snapshot or partial success.
+}
+FixedCohortResult RunMultiGpuFixedCohortPhotoGeo(
+    const std::vector<Image>& images,
+    const std::vector<FixedCohortReference>& refs,
+    const FixedCohortBudget& budget,
+    const MultiGpuFixedCohortPlan& plan,
+    NativeRunDeadline deadline,
+    int tile_threads,
+    const std::atomic<bool>* cancel,
+    std::function<void(bool, int, size_t, const char*)> observer) {
+  return RunHostPhotoGeo(images,
+                         refs,
+                         budget,
+                         plan,
+                         deadline,
+                         tile_threads,
+                         cancel,
+                         std::move(observer),
+                         nullptr);
+}
+PublishedFixedCohortResult RunPublishedMultiGpuFixedCohortPhotoGeo(
+    const std::vector<Image>& images,
+    const std::vector<FixedCohortReference>& refs,
+    const FixedCohortBudget& budget,
+    const MultiGpuFixedCohortPlan& plan,
+    NativeRunDeadline deadline,
+    int tile_threads,
+    PublishedGeoWriter& writer,
+    const std::atomic<bool>* cancel,
+    std::function<void(bool, int, size_t, const char*)> observer) {
+  auto result = RunHostPhotoGeo(images,
+                                refs,
+                                budget,
+                                plan,
+                                deadline,
+                                tile_threads,
+                                cancel,
+                                std::move(observer),
+                                &writer);
+  writer.VerifyComplete();
+  return {result.output_policy,
+          std::move(result.photo),
+          writer.Products(),
+          result.phase_owner_limits};
 }
 }  // namespace colmap::mvs::owned
 #endif

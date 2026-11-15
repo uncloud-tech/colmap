@@ -185,6 +185,17 @@ class MultiGpuBindingTest(unittest.TestCase):
                 argv[argv.index("--host_capacity_bytes") + 1], "4096"
             )
 
+    def test_geo_retention_is_explicit_and_materialized_by_default(self):
+        from colmap_reconstruction.cli import parse_args
+
+        base = ["--photos", ".", "--workspace", "."]
+        self.assertEqual(parse_args(base).geo_retention, "materialized")
+        selected = parse_args(
+            base
+            + ["--geo-retention", "published", "--active-owners-ceiling", "1"]
+        )
+        self.assertEqual(selected.geo_retention, "published")
+
     def test_single_device_arguments_request_native_selection_and_frozen_disk(
         self,
     ):
@@ -223,6 +234,7 @@ class MultiGpuBindingTest(unittest.TestCase):
             r.dense_device_capacity = 1000
             r.dense_disk_capacity = 8192
             self.assertEqual(args.output_policy, "final_geo_only")
+            self.assertEqual(args.geo_retention, "materialized")
             for policy in ("final_geo_only", "photo_and_geo"):
                 selected = parse_args(
                     [
@@ -239,6 +251,15 @@ class MultiGpuBindingTest(unittest.TestCase):
                 self.assertEqual(
                     candidate[candidate.index("--output_policy") + 1], policy
                 )
+            args.geo_retention = "published"
+            with self.assertRaises(ValueError):
+                r.dense_arguments()
+            args.active_owners_ceiling = 1
+            forwarded = r.dense_arguments()
+            self.assertEqual(
+                forwarded[forwarded.index("--geo_retention") + 1], "published"
+            )
+            args.geo_retention = "materialized"
             argv = r.dense_arguments()
             self.assertEqual(
                 argv[argv.index("--automatic_stereo_storage") + 1], "1"
@@ -353,6 +374,99 @@ class MultiGpuBindingTest(unittest.TestCase):
                     bind_single_device_plan(
                         changed, graph, devices, "fingerprint", "1000"
                     )
+
+    def test_published_geo_binding_requires_exact_mode_and_singletons(self):
+        from colmap_reconstruction.cli import bind_single_device_plan
+
+        devices, graph, plan = self.fixture()
+        devices = devices[:1]
+        plan.update(
+            geo_retention="published",
+            execution_kind="single_device_host_exchange",
+            allocation_fingerprint="fp",
+            active_owners_ceiling="1",
+        )
+        for phase in plan["phases"]:
+            phase["groups"] = [
+                dict(
+                    ordinal=0,
+                    uuid="a" * 32,
+                    capacity_bytes="1000",
+                    cohorts=[dict(jobs=[i], active_owners=1) for i in range(2)],
+                )
+            ]
+        plan["single_device_host"] = dict(
+            output_policy="final_geo_only",
+            geo_retention="published",
+            active_owners="1",
+            required_cache_capability=(
+                "linux_4k_sync_dontneed_mincore_zero_private_no_readers"
+            ),
+            effective_photo_source_storage="private",
+            phases=[
+                dict(
+                    phase=phase,
+                    records=[
+                        dict(
+                            reference=j["reference"],
+                            sources=j["sources"],
+                            volume_mode="resident_private",
+                            owned_cuda_graphs=False,
+                            owned_async_pool=False,
+                        )
+                        for j in graph["phases"][phase]["jobs"]
+                    ],
+                )
+                for phase in ("photo", "geo")
+            ],
+        )
+        original = copy.deepcopy(plan)
+        for policy in ("final_geo_only", "photo_and_geo"):
+            plan["output_policy"] = policy
+            plan["single_device_host"]["output_policy"] = policy
+            self.assertEqual(
+                bind_single_device_plan(
+                    plan,
+                    graph,
+                    devices,
+                    "fp",
+                    "1000",
+                    output_policy=policy,
+                    geo_retention="published",
+                )["geo"],
+                {0: "0", 1: "0"},
+            )
+        for field in (
+            "geo_retention",
+            "active_owners",
+            "required_cache_capability",
+        ):
+            changed = copy.deepcopy(original)
+            changed["single_device_host"][field] = "changed"
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                bind_single_device_plan(
+                    changed,
+                    graph,
+                    devices,
+                    "fp",
+                    "1000",
+                    geo_retention="published",
+                )
+        with self.assertRaises(ValueError):
+            bind_single_device_plan(original, graph, devices, "fp", "1000")
+        changed = copy.deepcopy(original)
+        changed["phases"][0]["groups"][0]["cohorts"] = [
+            dict(jobs=[0, 1], active_owners=1)
+        ]
+        with self.assertRaises(ValueError):
+            bind_single_device_plan(
+                changed,
+                graph,
+                devices,
+                "fp",
+                "1000",
+                geo_retention="published",
+            )
 
     def test_single_device_stage_prepares_and_binds_before_execution(self):
         import json

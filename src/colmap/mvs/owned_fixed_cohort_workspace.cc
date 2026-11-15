@@ -94,9 +94,9 @@ PreparedFixedCohortWorkspace PrepareFixedCohortWorkspace(
         "fixed-cohort deadline expired before preparation");
   NativeRunDeadlineGuard guard(deadline);
   guard.Check();
-  const auto admitted = multi_gpu_plan
-      ? ByteCharge{MarginBytes(multi_gpu_plan->host_peak_raw), 0}
-      : AdmitFixedCohortBudget(budget, capacity);
+  const auto admitted =
+      multi_gpu_plan ? ByteCharge{MarginBytes(multi_gpu_plan->host_peak_raw), 0}
+                     : AdmitFixedCohortBudget(budget, capacity);
 
   ValidateFixedCohortWorkspaceCameras(workspace_path);
   guard.Check();
@@ -138,7 +138,8 @@ PreparedFixedCohortWorkspace PrepareFixedCohortWorkspace(
     }
     ValidateFixedCohortShape(result.images_, result.references_, budget);
     if (multi_gpu_plan)
-      ValidateMultiGpuFixedCohortPlan(result.images_, result.references_, budget, *multi_gpu_plan);
+      ValidateMultiGpuFixedCohortPlan(
+          result.images_, result.references_, budget, *multi_gpu_plan);
     uint64_t known_scratch = 0;
     uint64_t original_bank = 0;
     for (size_t i = 0; i < result.images_.size(); ++i) {
@@ -154,7 +155,8 @@ PreparedFixedCohortWorkspace PrepareFixedCohortWorkspace(
             "fixed-cohort loader scratch below known logical inventory");
     // Cache contains original grayscale pixels; the prepared bank may be
     // resized. One aggregate margin per lifecycle peak, never margin-on-margin.
-    uint64_t loader_fixed = CheckedAdd(budget.process.host, budget.unknown.host);
+    uint64_t loader_fixed =
+        CheckedAdd(budget.process.host, budget.unknown.host);
     if (multi_gpu_plan) {
       // Every approved CUDA context already exists after preflight. Its
       // per-device allowance overlaps decoding too, not only solver execution.
@@ -162,9 +164,9 @@ PreparedFixedCohortWorkspace PrepareFixedCohortWorkspace(
       for (const auto& group : multi_gpu_plan->phases[0].groups)
         loader_fixed = CheckedAdd(loader_fixed, group.device.fixed_raw.host);
     }
-    const auto loader_raw = CheckedAdd(
-        CheckedAdd(original_bank, budget.caller_inputs.host),
-        CheckedAdd(loader_scratch_host, loader_fixed));
+    const auto loader_raw =
+        CheckedAdd(CheckedAdd(original_bank, budget.caller_inputs.host),
+                   CheckedAdd(loader_scratch_host, loader_fixed));
     const auto host_demand = std::max(admitted.host, MarginBytes(loader_raw));
     Require(
         CheckedAdd(host_demand, budget.headroom_reserve.host) <= capacity.host,
@@ -194,7 +196,8 @@ PreparedFixedCohortWorkspace PrepareFixedCohortWorkspace(
 std::vector<FixedCohortDeviceObservation> ObserveFixedCohortDevices(
     const NativeRunDeadlineGuard& guard) {
   guard.Check();
-  throw std::runtime_error("visible device inventory requires native CUDA; no fallback");
+  throw std::runtime_error(
+      "visible device inventory requires native CUDA; no fallback");
 }
 
 FixedCohortCapacityObservation ObserveFixedCohortCapacities(int) {
@@ -207,6 +210,10 @@ FixedCohortResult PreparedFixedCohortWorkspace::Run(
     const std::atomic<bool>*) const {
   throw std::runtime_error(
       "fixed-cohort workspace execution requires native CUDA");
+}
+PublishedFixedCohortResult PreparedFixedCohortWorkspace::RunPublishedGeo(
+    PublishedGeoWriter&, const std::atomic<bool>*) const {
+  throw std::runtime_error("published GEO execution requires native CUDA");
 }
 #endif
 }  // namespace colmap::mvs::owned

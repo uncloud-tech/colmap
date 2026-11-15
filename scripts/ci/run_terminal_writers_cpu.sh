@@ -8,7 +8,7 @@ cmake -S . -B "$build" -GNinja -DCMAKE_BUILD_TYPE=Release \
   -DCUDA_ENABLED=OFF -DMVS_ENABLED=ON -DTESTS_ENABLED=ON \
   -DGUI_ENABLED=OFF -DONNX_ENABLED=OFF -DOPENGL_ENABLED=OFF -DCGAL_ENABLED=OFF
 cmake --build "$build" --parallel 4 --target \
-  colmap_util_ply_test colmap_mvs_fusion_test
+  colmap_util_ply_test colmap_mvs_fusion_test colmap_mvs_published_geo_test
 export COLMAP_BINARY="$build/src/colmap/exe/colmap"
 COLMAP_BINARY=$(realpath "$COLMAP_BINARY")
 export COLMAP_BINARY
@@ -37,3 +37,8 @@ for name, count in (("ply-writer.xml", 5), ("fusion-writer.xml", 5)):
     assert int(suite.attrib.get("skipped", "0")) == 0, suite.attrib
     assert not suite.findall(".//skipped"), "Integration skipped: not GREEN"
 PY
+
+# Real Mat::Write byte oracle and checked publisher, then actual metadata CLI.
+TMPDIR="$(realpath "$build")" timeout 30s "$build/src/colmap/mvs/colmap_mvs_published_geo_test"
+COLMAP_TEST_EXECUTABLE="$COLMAP_BINARY" PYTHONPATH="$PWD/python" python3 -m unittest \
+  colmap_reconstruction.single_device_cli_test

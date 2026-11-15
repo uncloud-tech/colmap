@@ -52,6 +52,41 @@ int main() {
   assert(snapshot.records[1][0].staging_device_bytes == 16253952);
   assert(snapshot.budget.geo_staging_device[0] ==
          snapshot.records[1][0].staging_device_bytes);
+  auto published_request = request;
+  published_request.geo_retention = GeoRetention::kPublished;
+  Refuses<std::invalid_argument>([&] {
+    BuildSnapshotStereoInventory(published_request, FixedCohortBudget{});
+  });
+  const auto published = PlanSingleDeviceStereoAdmission(published_request);
+  assert(published.geo_retention == GeoRetention::kPublished);
+  assert(published.common_host_raw < plan.common_host_raw);
+  assert(published.admitted.host < plan.admitted.host);
+  assert(published.records[1][0].peak.host == plan.records[1][0].peak.host);
+  assert(published.transient_pair_cache_raw >= 16 * 641 * 481);
+  // Probe uses one 257-pixel pair, two rounded caches, two retained file
+  // records and one mincore vector; the rest is bounded path/namespace slack.
+  const uint64_t probe_known = 257 * 16 +
+                               2 * (PublishedGeoWriter::kCacheGranuleBytes +
+                                    PublishedGeoWriter::kLiveMetadataPerPage +
+                                    PublishedGeoWriter::kFileAllowanceBytes) +
+                               PublishedGeoWriter::kProbeBytes;
+  assert(probe_known < published.capability_probe_host_raw);
+  assert(published.capability_probe_host_raw == 8388608);
+  assert(published.publication_probe_host_raw == 1024);
+  assert(published.post_output_metadata_raw == 786432);
+  assert(published.post_photo_host_raw ==
+         14745632 + 1843204 + 4000 + published.photo_output_cache_raw + 786432);
+  assert(published.post_photo_host_raw > published.validation_host_raw / 2);
+  auto published_boundary = published_request;
+  published_boundary.capacity = published.admitted;
+  assert(SameStereoAdmissionPlan(
+      published, PlanSingleDeviceStereoAdmission(published_boundary)));
+  --published_boundary.capacity.host;
+  Refuses<StereoAdmissionRefusal>(
+      [&] { PlanSingleDeviceStereoAdmission(published_boundary); });
+  auto tampered = published;
+  tampered.geo_retention = GeoRetention::kMaterialized;
+  assert(!SameStereoAdmissionPlan(published, tampered));
   request.strip_columns = 32;  // Explicit narrow qualification remains exact.
   request.capacity.device = 60000000;
   const auto mixed = PlanSingleDeviceStereoAdmission(request);

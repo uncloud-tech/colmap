@@ -27,6 +27,7 @@ struct SingleDeviceHostExecution {
 };
 
 struct MultiGpuFixedCohortPlan {
+  GeoRetention geo_retention = GeoRetention::kMaterialized;
   FixedCohortOutputPolicy output_policy = FixedCohortOutputPolicy::kPhotoAndGeo;
   std::array<PhasePlan, 2> phases;
   uint64_t host_capacity = 0;
@@ -67,7 +68,8 @@ MultiGpuFixedCohortPlan PlanSingleDeviceHostFixedCohort(
     const std::filesystem::path& scratch_directory,
     const std::string& requested_photo_source_storage,
     uint64_t loader_scratch_host_raw = 0,
-    int tile_threads = 32);
+    int tile_threads = 32,
+    GeoRetention geo_retention = GeoRetention::kMaterialized);
 
 // Snapshot-preferred native selection; only typed metadata capacity refusal
 // selects HOST exchange. No allocations, failure-catching retry or resizing.
@@ -82,7 +84,8 @@ MultiGpuFixedCohortPlan PlanSingleDeviceStereoFixedCohort(
     const std::string& requested_photo_source_storage,
     size_t active_owners_ceiling,
     uint64_t loader_scratch_host_raw = 0,
-    int tile_threads = 32);
+    int tile_threads = 32,
+    GeoRetention geo_retention = GeoRetention::kMaterialized);
 
 // Revalidate a plan against regenerated complete metadata before pixel copies.
 // Native entry additionally checks approved UUIDs and observed FREE.
@@ -99,6 +102,26 @@ void ValidateMultiGpuFixedCohortPlan(
 // against FREE, never against caps or process/unknown declarations.
 void CheckMultiGpuFixedCohortAvailable(const MultiGpuFixedCohortPlan& plan,
                                        uint64_t live_caller_pixels = 0);
+
+// Reject incompatible execution APIs before copies, probes or GPU allocation.
+void ValidateGeoExecutionMode(const MultiGpuFixedCohortPlan&, GeoRetention);
+
+struct PublishedFixedCohortResult {
+  FixedCohortOutputPolicy output_policy;
+  std::vector<FixedCohortResult::Maps> photo;
+  std::vector<PublishedGeoPair> geo;
+  std::array<size_t, 2> phase_owner_limits{};
+};
+PublishedFixedCohortResult RunPublishedMultiGpuFixedCohortPhotoGeo(
+    const std::vector<Image>& images,
+    const std::vector<FixedCohortReference>& references,
+    const FixedCohortBudget& validation_budget,
+    const MultiGpuFixedCohortPlan& plan,
+    NativeRunDeadline deadline,
+    int tile_threads,
+    PublishedGeoWriter& writer,
+    const std::atomic<bool>* cancel = nullptr,
+    std::function<void(bool, int, size_t, const char*)> observer = {});
 
 FixedCohortResult RunMultiGpuFixedCohortPhotoGeo(
     const std::vector<Image>& images,

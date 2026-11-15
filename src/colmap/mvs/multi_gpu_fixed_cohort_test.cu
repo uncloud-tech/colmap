@@ -3,6 +3,7 @@
 #include "colmap/mvs/multi_gpu_fixed_cohort.h"
 #include "colmap/mvs/owned_fixed_cohort_validation.h"
 #include "colmap/mvs/patch_match_cuda_owned.h"
+#include "colmap/util/testing.h"
 
 #include <algorithm>
 #include <atomic>
@@ -10,7 +11,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 
 #include <gtest/gtest.h>
@@ -321,6 +324,156 @@ void ExpectBits(const FixedCohortResult::Maps& a,
                           pair.first->size() * sizeof(float)),
               0);
   }
+}
+
+TEST(PublishedGeo, ActualHostBytesPhotoRetentionAndFailureDrain) {
+  int count = 0;
+  if (cudaGetDeviceCount(&count) != cudaSuccess || count < 1)
+    GTEST_SKIP() << "requires actual CUDA; skipped is NOT qualification";
+  auto f =
+      MakeFixture(1, 1);  // Nonsorted references/duplicate source ordinals.
+  const auto directory = CreateTestDir();
+  const auto disk = std::filesystem::space(directory).available;
+  const auto bytes = [](const std::filesystem::path& path) {
+    std::ifstream stream(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(stream), {});
+  };
+  size_t attempt = 0;
+  for (const auto policy : {FixedCohortOutputPolicy::kPhotoAndGeo,
+                            FixedCohortOutputPolicy::kFinalGeoOnly}) {
+    auto declarations = f.budget;
+    declarations.output_policy = policy;
+    std::vector<FixedCohortJobShape> jobs;
+    for (const auto& ref : f.refs)
+      jobs.push_back(
+          {ref.reference_image_idx, ref.photo_sources, ref.geo_sources});
+    auto budget =
+        BuildFixedCohortLogicalInventory(f.shapes, jobs, declarations);
+    for (const uint64_t device_cap : {256ull << 20, 4ull << 20}) {
+      auto device = f.devices[0];
+      device.capacity_bytes = device_cap;
+      if (device_cap == (4ull << 20)) {
+        // Find the actual native minimum, using the production planner only.
+        uint64_t low = 1, high = f.devices[0].capacity_bytes;
+        while (low < high) {
+          const auto middle = low + (high - low) / 2;
+          device.capacity_bytes = middle;
+          try {
+            PlanSingleDeviceHostFixedCohort(f.shapes,
+                                            f.refs,
+                                            budget,
+                                            device,
+                                            2ull << 30,
+                                            disk,
+                                            directory,
+                                            "auto");
+            high = middle;
+          } catch (const StereoAdmissionRefusal& error) {
+            ASSERT_EQ(error.resource, StereoAdmissionResource::kDevice);
+            low = middle + 1;
+          }
+        }
+        device.capacity_bytes = low;
+      }
+      const auto materialized_plan = PlanSingleDeviceHostFixedCohort(f.shapes,
+                                                                     f.refs,
+                                                                     budget,
+                                                                     device,
+                                                                     2ull << 30,
+                                                                     disk,
+                                                                     directory,
+                                                                     "auto");
+      if (device_cap == (4ull << 20)) {
+        bool strip = false;
+        for (const auto& records :
+             materialized_plan.single_device_host->admission.records)
+          for (const auto& record : records)
+            strip |= record.mode == StereoVolumeMode::kStripFile;
+        ASSERT_TRUE(strip);
+      }
+      const auto expected = RunMultiGpuFixedCohortPhotoGeo(
+          f.images,
+          f.refs,
+          budget,
+          materialized_plan,
+          NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
+          32);
+      const auto published_plan =
+          PlanSingleDeviceHostFixedCohort(f.shapes,
+                                          f.refs,
+                                          budget,
+                                          device,
+                                          2ull << 30,
+                                          disk,
+                                          directory,
+                                          "auto",
+                                          0,
+                                          32,
+                                          GeoRetention::kPublished);
+      const std::vector<std::string> names{
+          "nested/three", "zero", "two", "one"};
+      const auto root = directory / ("cohort-" + std::to_string(attempt++));
+      PublishedGeoWriter writer(root, names);
+      EXPECT_THROW(RunMultiGpuFixedCohortPhotoGeo(
+                       f.images,
+                       f.refs,
+                       budget,
+                       published_plan,
+                       NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
+                       32),
+                   std::invalid_argument);
+      auto result = RunPublishedMultiGpuFixedCohortPhotoGeo(
+          f.images,
+          f.refs,
+          budget,
+          published_plan,
+          NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
+          32,
+          writer);
+      ASSERT_EQ(result.geo.size(), f.refs.size());
+      ASSERT_EQ(result.photo.size(), expected.photo.size());
+      for (size_t i = 0; i < f.refs.size(); ++i) {
+        // No body reads before successful return/complete check.
+        const auto depth = directory / "legacy-depth.bin";
+        const auto normal = directory / "legacy-normal.bin";
+        expected.geo[i].depth.Write(depth);
+        expected.geo[i].normal.Write(normal);
+        EXPECT_EQ(bytes(depth), bytes(result.geo[i].depth.path));
+        EXPECT_EQ(bytes(normal), bytes(result.geo[i].normal.path));
+        if (!result.photo.empty())
+          ExpectBits(expected.photo[i], result.photo[i]);
+      }
+      for (bool cancel_request : {false, true}) {
+        std::atomic<bool> cancelled{false};
+        PublishedGeoWriter failed(
+            directory / ("failed-" + std::to_string(attempt++)),
+            names,
+            &cancelled);
+        EXPECT_THROW(
+            RunPublishedMultiGpuFixedCohortPhotoGeo(
+                f.images,
+                f.refs,
+                budget,
+                published_plan,
+                NativeRunDeadline::FromBudget(std::chrono::seconds(60)),
+                32,
+                failed,
+                &cancelled,
+                [&](bool geo, int, size_t, const char* event) {
+                  if (geo && std::string(event) == "output") {
+                    if (cancel_request)
+                      cancelled.store(true);
+                    else
+                      throw std::runtime_error(
+                          "published output observer failure");
+                  }
+                }),
+            std::runtime_error);
+        EXPECT_THROW(failed.VerifyComplete(), std::runtime_error);
+      }
+    }
+  }
+  std::filesystem::remove_all(directory);
 }
 
 size_t PositiveDepthCount(const FixedCohortResult::Maps& maps) {
