@@ -142,7 +142,9 @@ extern "C" int __wrap_posix_fadvise(int fd,
                                     off_t offset,
                                     off_t count,
                                     int advice) {
-  if (fail_advice) return ENOSYS;
+  if (fail_advice == 1) return ENOSYS;
+  // Inject advice success without eviction, to exercise the real ZERO check.
+  if (fail_advice == 2) return 0;
   return __real_posix_fadvise(fd, offset, count, advice);
 }
 extern "C" ssize_t __wrap_write(int fd, const void* data, size_t count) {
@@ -416,6 +418,39 @@ int main() {
   assert(waitpid(child, &status, 0) == child && WIFEXITED(status) &&
          WEXITSTATUS(status) == 0);
 #ifdef PUBLISHED_GEO_WRAP_IO
+  PublishedGeoWriter postcondition(root / "postcondition", {"x"});
+  fail_advice = 2;
+  Refuses("publication-zero-postcondition",
+          "real cache residency nonzero",
+          root / "postcondition",
+          [&] {
+            try {
+              postcondition.Publish(0, depth, normal);
+            } catch (const std::runtime_error& error) {
+              assert(std::string(error.what()) ==
+                     "published GEO cache residency is nonzero");
+              throw;
+            }
+          });
+  fail_advice = 0;
+  RemainsFailed(postcondition, root / "postcondition", depth, normal);
+  PublishedGeoWriter probe_postcondition(root / "probe-postcondition", {"x"});
+  fail_advice = 2;
+  Refuses("probe-zero-postcondition",
+          "real cache residency nonzero",
+          root / "probe-postcondition",
+          [&] {
+            try {
+              probe_postcondition.QualifyCache();
+            } catch (const std::runtime_error& error) {
+              assert(std::string(error.what()) ==
+                     "published GEO cache residency is nonzero");
+              throw;
+            }
+          });
+  fail_advice = 0;
+  RemainsFailed(
+      probe_postcondition, root / "probe-postcondition", depth, normal);
   PublishedGeoWriter probe_failure(root / "probe-failure", {"x"});
   fail_sync = 1;
   Refuses("cache-probe-io-failure",
